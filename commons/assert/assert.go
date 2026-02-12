@@ -1,0 +1,488 @@
+// Package assert provides assertion utilities for validating invariants.
+//
+// Assertions return errors instead of panicking. Failed assertions:
+//   - Log a high-severity error message
+//   - Emit telemetry (metrics + trace events)
+//   - Return an AssertionError so callers can stop execution
+//
+// In production mode, stack traces are omitted from logs and telemetry to
+// prevent information disclosure. Production mode is detected via
+// runtime.IsProductionMode() (set explicitly at startup) or by the ENV/GO_ENV
+// environment variables as a fallback.
+package assert
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"reflect"
+	goruntime "runtime"
+	"runtime/debug"
+	"strconv"
+	"strings"
+	"sync"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/LerianStudio/lib-commons-v2/v3/commons/opentelemetry/metrics"
+
+	"github.com/LerianStudio/lib-commons-v2/v3/commons/runtime"
+)
+
+// Logger defines the minimal logging interface required by assertions.
+// This interface is satisfied by github.com/LerianStudio/lib-commons-v2/v3/commons/log.Logger.
+type Logger interface {
+	Errorf(format string, args ...any)
+}
+
+// Asserter evaluates invariants and emits telemetry on failure.
+type Asserter struct {
+	ctx       context.Context
+	logger    Logger
+	component string
+	operation string
+}
+
+// ErrAssertionFailed is the sentinel error for failed assertions.
+var ErrAssertionFailed = errors.New("assertion failed")
+
+// AssertionError represents a failed assertion with rich context.
+type AssertionError struct {
+	Assertion string
+	Message   string
+	Component string
+	Operation string
+	Details   string
+}
+
+// Error returns the formatted assertion failure message.
+func (entry *AssertionError) Error() string {
+	if entry == nil {
+		return ErrAssertionFailed.Error()
+	}
+
+	if entry.Details == "" {
+		return "assertion failed: " + entry.Message
+	}
+
+	return "assertion failed: " + entry.Message + "\n" + entry.Details
+}
+
+// Unwrap returns the sentinel assertion error for errors.Is.
+func (entry *AssertionError) Unwrap() error {
+	return ErrAssertionFailed
+}
+
+// New creates an Asserter with context, logging, and labels.
+// component and operation are used for telemetry labeling.
+//
+//nolint:contextcheck // Intentionally creates a fallback context when nil is passed
+func New(ctx context.Context, logger Logger, component, operation string) *Asserter {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	return &Asserter{
+		ctx:       ctx,
+		logger:    logger,
+		component: component,
+		operation: operation,
+	}
+}
+
+// That returns an error if ok is false. Use for general-purpose assertions.
+//
+// Example:
+//
+//	if err := asserter.That(ctx, len(items) > 0, "items must not be empty", "count", len(items)); err != nil {
+//		return err
+//	}
+func (asserter *Asserter) That(ctx context.Context, ok bool, msg string, kv ...any) error {
+	if ok {
+		return nil
+	}
+
+	return asserter.fail(ctx, "That", msg, kv...)
+}
+
+// NotNil returns an error if v is nil. This function correctly handles both untyped nil
+// and typed nil (nil interface values with concrete types).
+//
+// Example:
+//
+//	if err := asserter.NotNil(ctx, config, "config must be initialized"); err != nil {
+//		return err
+//	}
+func (asserter *Asserter) NotNil(ctx context.Context, v any, msg string, kv ...any) error {
+	if !isNil(v) {
+		return nil
+	}
+
+	return asserter.fail(ctx, "NotNil", msg, kv...)
+}
+
+// NotEmpty returns an error if s is an empty string.
+//
+// Example:
+//
+//	if err := asserter.NotEmpty(ctx, userID, "userID must be provided"); err != nil {
+//		return err
+//	}
+func (asserter *Asserter) NotEmpty(ctx context.Context, s, msg string, kv ...any) error {
+	if s != "" {
+		return nil
+	}
+
+	return asserter.fail(ctx, "NotEmpty", msg, kv...)
+}
+
+// NoError returns an error if err is not nil. The error message and type are
+// automatically included in the assertion context for debugging.
+//
+// Example:
+//
+//	if err := asserter.NoError(ctx, err, "compute must succeed", "input", input); err != nil {
+//		return err
+//	}
+func (asserter *Asserter) NoError(ctx context.Context, err error, msg string, kv ...any) error {
+	if err == nil {
+		return nil
+	}
+
+	// Prepend error and error_type to key-value pairs for richer debugging
+	// errorKVPairs: 2 pairs added (error + error_type), each pair = 2 elements
+	const errorKVPairs = 4
+
+	kvWithError := make([]any, 0, len(kv)+errorKVPairs)
+	kvWithError = append(kvWithError, "error", err.Error())
+	kvWithError = append(kvWithError, "error_type", fmt.Sprintf("%T", err))
+	kvWithError = append(kvWithError, kv...)
+
+	return asserter.fail(ctx, "NoError", msg, kvWithError...)
+}
+
+// Never always returns an error. Use for code paths that should be unreachable.
+//
+// Example:
+//
+//	return asserter.Never(ctx, "unhandled status", "status", status)
+func (asserter *Asserter) Never(ctx context.Context, msg string, kv ...any) error {
+	return asserter.fail(ctx, "Never", msg, kv...)
+}
+
+// Halt terminates the current goroutine if err is not nil.
+// Use this after a failed assertion in goroutines to prevent further execution.
+func (asserter *Asserter) Halt(err error) {
+	if err != nil {
+		goruntime.Goexit()
+	}
+}
+
+const maxValueLength = 200 // Truncate values longer than this
+
+// truncateValue truncates long values for logging safety.
+// This prevents log bloat and reduces risk of sensitive data exposure.
+func truncateValue(v any) string {
+	s := fmt.Sprintf("%v", v)
+	if len(s) <= maxValueLength {
+		return s
+	}
+
+	return s[:maxValueLength] + "... (truncated " + strconv.Itoa(len(s)-maxValueLength) + " chars)"
+}
+
+func (asserter *Asserter) fail(ctx context.Context, assertion, msg string, kv ...any) error {
+	ctx, logger, component, operation := asserter.values(ctx)
+	contextPairs := withContextPairs(assertion, component, operation, kv)
+	details := formatKeyValueLines(contextPairs)
+
+	stack := []byte(nil)
+	if shouldIncludeStack() {
+		stack = debug.Stack()
+	}
+
+	logAssertion(logger, formatLogMessage(msg, details, stack))
+	recordAssertionObservability(ctx, assertion, msg, stack, component, operation)
+
+	return &AssertionError{
+		Assertion: assertion,
+		Message:   msg,
+		Component: component,
+		Operation: operation,
+		Details:   details,
+	}
+}
+
+func (asserter *Asserter) values(ctx context.Context) (context.Context, Logger, string, string) {
+	if asserter == nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+
+		return ctx, nil, "", ""
+	}
+
+	if ctx == nil {
+		ctx = asserter.ctx
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	return ctx, asserter.logger, asserter.component, asserter.operation
+}
+
+func shouldIncludeStack() bool {
+	// Primary check: use runtime.IsProductionMode() which is explicitly
+	// set during application startup via runtime.SetProductionMode(true).
+	if runtime.IsProductionMode() {
+		return false
+	}
+
+	// Fallback: check environment variables for cases where production mode
+	// has not been explicitly configured via the runtime package.
+	env := strings.TrimSpace(os.Getenv("ENV"))
+	goEnv := strings.TrimSpace(os.Getenv("GO_ENV"))
+
+	return !strings.EqualFold(env, "production") && !strings.EqualFold(goEnv, "production")
+}
+
+// contextPairsCapacity is the capacity for the fixed context pairs (assertion, component, operation).
+const contextPairsCapacity = 6
+
+func withContextPairs(assertion, component, operation string, kv []any) []any {
+	contextPairs := make([]any, 0, len(kv)+contextPairsCapacity)
+	contextPairs = append(contextPairs, "assertion", assertion)
+
+	if component != "" {
+		contextPairs = append(contextPairs, "component", component)
+	}
+
+	if operation != "" {
+		contextPairs = append(contextPairs, "operation", operation)
+	}
+
+	contextPairs = append(contextPairs, kv...)
+
+	return contextPairs
+}
+
+func formatKeyValueLines(kv []any) string {
+	if len(kv) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+
+	for i := 0; i < len(kv); i += 2 {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+
+		var value any
+		if i+1 < len(kv) {
+			value = kv[i+1]
+		} else {
+			value = "MISSING_VALUE"
+		}
+
+		fmt.Fprintf(&sb, "    %v=%v", kv[i], truncateValue(value))
+	}
+
+	return sb.String()
+}
+
+func formatLogMessage(msg, details string, stack []byte) string {
+	var sb strings.Builder
+
+	sb.WriteString("ASSERTION FAILED: ")
+	sb.WriteString(msg)
+
+	if details != "" {
+		sb.WriteString("\n")
+		sb.WriteString(details)
+	}
+
+	if len(stack) > 0 {
+		sb.WriteString("\nstack trace:\n")
+		sb.WriteString(string(stack))
+	}
+
+	return sb.String()
+}
+
+func logAssertion(logger Logger, message string) {
+	if logger != nil {
+		logger.Errorf("%s", message)
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, message)
+}
+
+// isNil checks if a value is nil, handling both untyped nil and typed nil
+// (nil interface values with concrete types).
+func isNil(v any) bool {
+	if v == nil {
+		return true
+	}
+
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Interface, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
+		return rv.IsNil()
+	default:
+		return false
+	}
+}
+
+const maxLabelLength = 64
+
+// AssertionSpanEventName is the event name used when recording assertion failures on spans.
+const AssertionSpanEventName = "assertion.failed"
+
+// AssertionMetrics provides assertion-related metrics using OpenTelemetry.
+// It wraps lib-commons' MetricsFactory for consistent metric handling.
+type AssertionMetrics struct {
+	factory *metrics.MetricsFactory
+}
+
+// assertionFailedMetric defines the metric for counting failed assertions.
+var assertionFailedMetric = metrics.Metric{
+	Name:        "assertion_failed_total",
+	Unit:        "1",
+	Description: "Total number of failed assertions",
+}
+
+var (
+	assertionMetricsInstance *AssertionMetrics
+	assertionMetricsMu       sync.RWMutex
+)
+
+// InitAssertionMetrics initializes assertion metrics with the provided MetricsFactory.
+// This should be called once during application startup after telemetry is initialized.
+func InitAssertionMetrics(factory *metrics.MetricsFactory) {
+	assertionMetricsMu.Lock()
+	defer assertionMetricsMu.Unlock()
+
+	if factory == nil {
+		return
+	}
+
+	if assertionMetricsInstance != nil {
+		return
+	}
+
+	assertionMetricsInstance = &AssertionMetrics{factory: factory}
+}
+
+// GetAssertionMetrics returns the singleton AssertionMetrics instance.
+// Returns nil if InitAssertionMetrics has not been called.
+func GetAssertionMetrics() *AssertionMetrics {
+	assertionMetricsMu.RLock()
+	defer assertionMetricsMu.RUnlock()
+
+	return assertionMetricsInstance
+}
+
+// ResetAssertionMetrics clears the assertion metrics singleton (useful for tests).
+func ResetAssertionMetrics() {
+	assertionMetricsMu.Lock()
+	defer assertionMetricsMu.Unlock()
+
+	assertionMetricsInstance = nil
+}
+
+// RecordAssertionFailed increments the assertion_failed_total counter with labels.
+// If metrics are not initialized, this is a no-op.
+func (am *AssertionMetrics) RecordAssertionFailed(
+	ctx context.Context,
+	component, operation, assertion string,
+) {
+	if am == nil || am.factory == nil {
+		return
+	}
+
+	am.factory.Counter(assertionFailedMetric).
+		WithLabels(map[string]string{
+			"component": sanitizeLabel(component),
+			"operation": sanitizeLabel(operation),
+			"assertion": sanitizeLabel(assertion),
+		}).
+		AddOne(ctx)
+}
+
+func sanitizeLabel(value string) string {
+	if len(value) > maxLabelLength {
+		return value[:maxLabelLength]
+	}
+
+	return value
+}
+
+func recordAssertionMetric(ctx context.Context, component, operation, assertion string) {
+	am := GetAssertionMetrics()
+	if am != nil {
+		am.RecordAssertionFailed(ctx, component, operation, assertion)
+	}
+}
+
+func recordAssertionObservability(
+	ctx context.Context,
+	assertion, message string,
+	stack []byte,
+	component, operation string,
+) {
+	recordAssertionMetric(ctx, component, operation, assertion)
+	recordAssertionToSpan(ctx, assertion, message, stack, component, operation)
+}
+
+func recordAssertionToSpan(
+	ctx context.Context,
+	assertion, message string,
+	stack []byte,
+	component, operation string,
+) {
+	span := trace.SpanFromContext(ctx)
+	if !span.IsRecording() {
+		return
+	}
+
+	attrs := []attribute.KeyValue{
+		attribute.String("assertion.name", assertion),
+		attribute.String("assertion.message", message),
+	}
+
+	if component != "" {
+		attrs = append(attrs, attribute.String("assertion.component", component))
+	}
+
+	if operation != "" {
+		attrs = append(attrs, attribute.String("assertion.operation", operation))
+	}
+
+	if len(stack) > 0 {
+		attrs = append(attrs, attribute.String("assertion.stack", string(stack)))
+	}
+
+	span.AddEvent(AssertionSpanEventName, trace.WithAttributes(attrs...))
+	span.RecordError(fmt.Errorf("%w: %s", ErrAssertionFailed, message))
+	span.SetStatus(codes.Error, assertionStatusMessage(component, operation))
+}
+
+func assertionStatusMessage(component, operation string) string {
+	switch {
+	case component != "" && operation != "":
+		return fmt.Sprintf("assertion failed in %s/%s", component, operation)
+	case component != "":
+		return "assertion failed in " + component
+	case operation != "":
+		return "assertion failed in " + operation
+	default:
+		return "assertion failed"
+	}
+}

@@ -1,0 +1,72 @@
+package zap
+
+import (
+	"fmt"
+	"log"
+	"os"
+
+	clog "github.com/LerianStudio/lib-commons-v2/v3/commons/log"
+	"go.opentelemetry.io/contrib/bridges/otelzap"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+)
+
+// InitializeLoggerWithError initializes our log layer and returns it with error handling.
+// Returns an error instead of calling log.Fatalf on failure.
+//
+//nolint:ireturn
+func InitializeLoggerWithError() (clog.Logger, error) {
+	var zapCfg zap.Config
+
+	if os.Getenv("ENV_NAME") == "production" {
+		zapCfg = zap.NewProductionConfig()
+		zapCfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
+		zapCfg.Level = zap.NewAtomicLevelAt(zapcore.InfoLevel)
+	} else {
+		zapCfg = zap.NewDevelopmentConfig()
+		zapCfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+		zapCfg.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
+	}
+
+	if val, ok := os.LookupEnv("LOG_LEVEL"); ok {
+		var lvl zapcore.Level
+		if err := lvl.Set(val); err != nil {
+			log.Printf("Invalid LOG_LEVEL, fallback to InfoLevel: %v", err)
+
+			lvl = zapcore.InfoLevel
+		}
+
+		zapCfg.Level = zap.NewAtomicLevelAt(lvl)
+	}
+
+	zapCfg.DisableStacktrace = true
+
+	logger, err := zapCfg.Build(zap.AddCallerSkip(2), zap.WrapCore(func(core zapcore.Core) zapcore.Core {
+		return zapcore.NewTee(core, otelzap.NewCore(os.Getenv("OTEL_LIBRARY_NAME")))
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("can't initialize zap logger: %w", err)
+	}
+
+	sugarLogger := logger.Sugar()
+
+	sugarLogger.Infof("Log level is (%v)", zapCfg.Level)
+	sugarLogger.Infof("Logger is (%T) \n", sugarLogger)
+
+	return &ZapWithTraceLogger{
+		Logger: sugarLogger,
+	}, nil
+}
+
+// Deprecated: Use InitializeLoggerWithError for proper error handling.
+// InitializeLogger initializes our log layer and returns it.
+//
+//nolint:ireturn
+func InitializeLogger() clog.Logger {
+	logger, err := InitializeLoggerWithError()
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	return logger
+}
