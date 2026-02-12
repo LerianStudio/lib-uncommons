@@ -1,5 +1,5 @@
 # ------------------------------------------------------
-# Test configuration for lib-commons
+# Test configuration for lib-uncommons
 # ------------------------------------------------------
 
 # Native fuzz test controls

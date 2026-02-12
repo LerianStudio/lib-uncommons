@@ -1,6 +1,6 @@
-# Project Rules - lib-commons
+# Project Rules - lib-uncommons
 
-This document defines the coding standards, architecture patterns, and development guidelines for the `lib-commons` library.
+This document defines the coding standards, architecture patterns, and development guidelines for the `lib-uncommons` library.
 
 ## Table of Contents
 
@@ -22,8 +22,8 @@ This document defines the coding standards, architecture patterns, and developme
 ### Package Structure
 
 ```text
-lib-commons/
-├── commons/                    # All library packages
+lib-uncommons/
+├── uncommons/                  # All library packages
 │   ├── {package}/              # Feature package
 │   │   ├── {package}.go        # Main implementation
 │   │   ├── {package}_test.go   # Unit tests
@@ -77,7 +77,7 @@ import (
     "go.uber.org/zap"
 
     // Internal packages
-    "github.com/LerianStudio/lib-commons-v2/v3/commons/log"
+    "github.com/LerianStudio/lib-uncommons/uncommons/log"
 )
 ```
 

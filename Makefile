@@ -1,9 +1,9 @@
 # Define the root directory of the project
-LIB_COMMONS := $(shell pwd)
+LIB_UNCOMMONS := $(shell pwd)
 
 # Include shared color definitions and utility functions
-include $(LIB_COMMONS)/commons/shell/makefile_colors.mk
-include $(LIB_COMMONS)/commons/shell/makefile_utils.mk
+include $(LIB_UNCOMMONS)/uncommons/shell/makefile_colors.mk
+include $(LIB_UNCOMMONS)/uncommons/shell/makefile_utils.mk
 
 # Define common utility functions
 define print_title
@@ -25,7 +25,7 @@ include $(MK_DIR)/tests.mk
 help:
 	@echo ""
 	@echo ""
-	@echo "Lib-Commons Project Management Commands"
+	@echo "Lib-Uncommons Project Management Commands"
 	@echo ""
 	@echo ""
 	@echo "Core Commands:"
