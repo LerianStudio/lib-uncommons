@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/LerianStudio/lib-uncommons/uncommons/assert"
 	"github.com/LerianStudio/lib-uncommons/uncommons/log"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -57,6 +58,8 @@ const defaultRabbitMQHealthCheckTimeout = 5 * time.Second
 // without explicitly acknowledging the risk via AllowInsecureTLS.
 var ErrInsecureTLS = errors.New("rabbitmq health check HTTP client has TLS verification disabled — set AllowInsecureTLS to acknowledge this risk")
 
+var ErrNilConnection = errors.New("rabbitmq connection is nil")
+
 // Connect keeps a singleton connection with rabbitmq.
 func (rc *RabbitMQConnection) Connect() error {
 	return rc.ConnectContext(context.Background())
@@ -64,6 +67,13 @@ func (rc *RabbitMQConnection) Connect() error {
 
 // ConnectContext keeps a singleton connection with rabbitmq.
 func (rc *RabbitMQConnection) ConnectContext(ctx context.Context) error {
+	if rc == nil {
+		asserter := assert.New(context.Background(), nil, "rabbitmq", "ConnectContext")
+		_ = asserter.Never(context.Background(), "rabbitmq connection receiver is nil")
+
+		return ErrNilConnection
+	}
+
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -92,11 +102,11 @@ func (rc *RabbitMQConnection) ConnectContext(ctx context.Context) error {
 	logger := rc.logger()
 	rc.mu.Unlock()
 
-	logger.Info("Connecting on rabbitmq...")
+	logger.Log(context.Background(), log.LevelInfo, "Connecting on rabbitmq...")
 
 	conn, err := dialer(ctx, connStr)
 	if err != nil {
-		logger.Errorf("failed to connect to rabbitmq: %v", sanitizeAMQPErr(err, connStr))
+		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to connect to rabbitmq: %v", sanitizeAMQPErr(err, connStr)))
 
 		return newSanitizedError(err, connStr, "failed to connect to rabbitmq")
 	}
@@ -105,7 +115,7 @@ func (rc *RabbitMQConnection) ConnectContext(ctx context.Context) error {
 	if err != nil {
 		rc.closeConnectionWith(conn, connCloser)
 
-		logger.Errorf("failed to open channel on rabbitmq: %v", err)
+		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to open channel on rabbitmq: %v", err))
 
 		return fmt.Errorf("failed to open channel on rabbitmq: %w", err)
 	}
@@ -115,12 +125,12 @@ func (rc *RabbitMQConnection) ConnectContext(ctx context.Context) error {
 
 		err = errors.New("can't connect rabbitmq")
 
-		logger.Error("rabbitmq health check failed")
+		logger.Log(context.Background(), log.LevelError, "rabbitmq health check failed")
 
 		return fmt.Errorf("rabbitmq health check failed: %w", err)
 	}
 
-	logger.Info("Connected on rabbitmq")
+	logger.Log(context.Background(), log.LevelInfo, "Connected on rabbitmq")
 
 	rc.mu.Lock()
 	if rc.Connection != nil && rc.Connection != conn && !connectionClosedFn(rc.Connection) {
@@ -146,6 +156,13 @@ func (rc *RabbitMQConnection) EnsureChannel() error {
 
 // EnsureChannelContext ensures that the channel is open and connected.
 func (rc *RabbitMQConnection) EnsureChannelContext(ctx context.Context) error {
+	if rc == nil {
+		asserter := assert.New(context.Background(), nil, "rabbitmq", "EnsureChannelContext")
+		_ = asserter.Never(context.Background(), "rabbitmq connection receiver is nil")
+
+		return ErrNilConnection
+	}
+
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -189,7 +206,7 @@ func (rc *RabbitMQConnection) EnsureChannelContext(ctx context.Context) error {
 
 		conn, err = dialer(ctx, connStr)
 		if err != nil {
-			logger.Errorf("can't connect to rabbitmq: %v", sanitizeAMQPErr(err, connStr))
+			logger.Log(context.Background(), log.LevelError, fmt.Sprintf("can't connect to rabbitmq: %v", sanitizeAMQPErr(err, connStr)))
 
 			rc.mu.Lock()
 			rc.Connected = false
@@ -211,7 +228,7 @@ func (rc *RabbitMQConnection) EnsureChannelContext(ctx context.Context) error {
 	if err != nil {
 		rc.handleChannelFailure(conn, existingConn, newConnection, connCloser)
 
-		logger.Errorf("can't open channel on rabbitmq: %v", err)
+		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("can't open channel on rabbitmq: %v", err))
 
 		return err
 	}
@@ -235,6 +252,13 @@ func (rc *RabbitMQConnection) GetNewConnect() (*amqp.Channel, error) {
 
 // GetNewConnectContext returns a pointer to the rabbitmq connection, initializing it if necessary.
 func (rc *RabbitMQConnection) GetNewConnectContext(ctx context.Context) (*amqp.Channel, error) {
+	if rc == nil {
+		asserter := assert.New(context.Background(), nil, "rabbitmq", "GetNewConnectContext")
+		_ = asserter.Never(context.Background(), "rabbitmq connection receiver is nil")
+
+		return nil, ErrNilConnection
+	}
+
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -260,7 +284,7 @@ func (rc *RabbitMQConnection) GetNewConnectContext(ctx context.Context) (*amqp.C
 	rc.mu.Unlock()
 
 	if err := rc.EnsureChannelContext(ctx); err != nil {
-		rc.logger().Errorf("failed to ensure channel: %v", err)
+		rc.logger().Log(context.Background(), log.LevelError, fmt.Sprintf("failed to ensure channel: %v", err))
 
 		return nil, err
 	}
@@ -278,13 +302,20 @@ func (rc *RabbitMQConnection) GetNewConnectContext(ctx context.Context) (*amqp.C
 }
 
 // HealthCheck rabbitmq when the server is started.
-func (rc *RabbitMQConnection) HealthCheck() bool {
+func (rc *RabbitMQConnection) HealthCheck() (bool, error) {
 	return rc.HealthCheckContext(context.Background())
 }
 
 // HealthCheckContext rabbitmq when the server is started.
 // It captures config fields under lock to avoid reading them during concurrent mutation.
-func (rc *RabbitMQConnection) HealthCheckContext(ctx context.Context) bool {
+func (rc *RabbitMQConnection) HealthCheckContext(ctx context.Context) (bool, error) {
+	if rc == nil {
+		asserter := assert.New(context.Background(), nil, "rabbitmq", "HealthCheckContext")
+		_ = asserter.Never(context.Background(), "rabbitmq connection receiver is nil")
+
+		return false, ErrNilConnection
+	}
+
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -298,7 +329,11 @@ func (rc *RabbitMQConnection) HealthCheckContext(ctx context.Context) bool {
 	logger := rc.logger()
 	rc.mu.Unlock()
 
-	return rc.healthCheck(ctx, healthURL, user, pass, client, logger)
+	if !rc.healthCheck(ctx, healthURL, user, pass, client, logger) {
+		return false, errors.New("rabbitmq health check failed")
+	}
+
+	return true, nil
 }
 
 // healthCheck is the internal implementation that operates on pre-captured config values,
@@ -309,21 +344,21 @@ func (rc *RabbitMQConnection) healthCheck(ctx context.Context, rawHealthURL, use
 	}
 
 	if err := ctx.Err(); err != nil {
-		logger.Errorf("context canceled while running rabbitmq health check: %v", err)
+		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("context canceled while running rabbitmq health check: %v", err))
 
 		return false
 	}
 
 	healthURL, err := validateHealthCheckURL(rawHealthURL)
 	if err != nil {
-		logger.Errorf("invalid rabbitmq health check url: %v", err)
+		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("invalid rabbitmq health check url: %v", err))
 
 		return false
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
 	if err != nil {
-		logger.Errorf("failed to make GET request for rabbitmq health check: %v", err)
+		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to make GET request for rabbitmq health check: %v", err))
 
 		return false
 	}
@@ -336,21 +371,21 @@ func (rc *RabbitMQConnection) healthCheck(ctx context.Context, rawHealthURL, use
 
 	resp, err := client.Do(req)
 	if err != nil {
-		logger.Errorf("failed to execute rabbitmq health check request: %v", err)
+		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to execute rabbitmq health check request: %v", err))
 
 		return false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		logger.Errorf("rabbitmq health check failed with status %q", resp.Status)
+		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("rabbitmq health check failed with status %q", resp.Status))
 
 		return false
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		logger.Errorf("failed to read rabbitmq health check response: %v", err)
+		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to read rabbitmq health check response: %v", err))
 
 		return false
 	}
@@ -359,13 +394,13 @@ func (rc *RabbitMQConnection) healthCheck(ctx context.Context, rawHealthURL, use
 
 	err = json.Unmarshal(body, &result)
 	if err != nil {
-		logger.Errorf("failed to parse rabbitmq health check response: %v", err)
+		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to parse rabbitmq health check response: %v", err))
 
 		return false
 	}
 
 	if result == nil {
-		logger.Error("rabbitmq health check response is empty or null")
+		logger.Log(context.Background(), log.LevelError, "rabbitmq health check response is empty or null")
 
 		return false
 	}
@@ -374,7 +409,7 @@ func (rc *RabbitMQConnection) healthCheck(ctx context.Context, rawHealthURL, use
 		return true
 	}
 
-	logger.Error("rabbitmq is not healthy")
+	logger.Log(context.Background(), log.LevelError, "rabbitmq is not healthy")
 
 	return false
 }
@@ -493,7 +528,7 @@ func (rc *RabbitMQConnection) closeConnectionWith(connection *amqp.Connection, c
 	}
 
 	if err := closer(connection); err != nil {
-		rc.logger().Warnf("failed to close rabbitmq connection during cleanup: %v", err)
+		rc.logger().Log(context.Background(), log.LevelWarn, fmt.Sprintf("failed to close rabbitmq connection during cleanup: %v", err))
 	}
 }
 
@@ -522,7 +557,10 @@ func (rc *RabbitMQConnection) Close() error {
 // CloseContext closes the rabbitmq channel and connection.
 func (rc *RabbitMQConnection) CloseContext(ctx context.Context) error {
 	if rc == nil {
-		return nil
+		asserter := assert.New(context.Background(), nil, "rabbitmq", "CloseContext")
+		_ = asserter.Never(context.Background(), "rabbitmq connection receiver is nil")
+
+		return ErrNilConnection
 	}
 
 	if ctx == nil {
@@ -550,7 +588,7 @@ func (rc *RabbitMQConnection) CloseContext(ctx context.Context) error {
 	if channel != nil {
 		if err := chCloser(ctx, channel); err != nil {
 			closeErr = fmt.Errorf("failed to close rabbitmq channel: %w", err)
-			logger.Warnf("failed to close rabbitmq channel: %v", err)
+			logger.Log(context.Background(), log.LevelWarn, fmt.Sprintf("failed to close rabbitmq channel: %v", err))
 		}
 	}
 
@@ -562,7 +600,7 @@ func (rc *RabbitMQConnection) CloseContext(ctx context.Context) error {
 				closeErr = fmt.Errorf("%w; failed to close rabbitmq connection: %v", closeErr, err)
 			}
 
-			logger.Warnf("failed to close rabbitmq connection: %v", err)
+			logger.Log(context.Background(), log.LevelWarn, fmt.Sprintf("failed to close rabbitmq connection: %v", err))
 		}
 	}
 
@@ -571,14 +609,16 @@ func (rc *RabbitMQConnection) CloseContext(ctx context.Context) error {
 
 func (rc *RabbitMQConnection) logger() log.Logger {
 	if rc == nil || rc.Logger == nil {
-		return &log.NoneLogger{}
+		return &log.NopLogger{}
 	}
 
 	return rc.Logger
 }
 
-// validateHealthCheckURL validates the health check URL and appends the RabbitMQ health endpoint path.
-// It enforces http/https scheme, requires a host, and rejects embedded user credentials.
+// validateHealthCheckURL validates the health check URL and appends the RabbitMQ health endpoint path
+// if not already present. The HealthCheckURL should be the RabbitMQ management API base URL
+// (e.g., "http://host:15672" or "https://host:15672"), NOT the full health endpoint.
+// If the URL already ends with "/api/health/checks/alarms", it is returned as-is.
 //
 // Security note: this function does NOT restrict which hosts can be targeted.
 // The HealthCheckURL is assumed to come from trusted configuration (env vars, config files).
@@ -607,7 +647,15 @@ func validateHealthCheckURL(rawURL string) (string, error) {
 		return "", errors.New("rabbitmq health check URL must not include user credentials")
 	}
 
-	return strings.TrimSuffix(parsedURL.String(), "/") + "/api/health/checks/alarms", nil
+	// Only append the health endpoint path if not already present.
+	const healthPath = "/api/health/checks/alarms"
+
+	normalized := strings.TrimSuffix(parsedURL.String(), "/")
+	if strings.HasSuffix(normalized, healthPath) {
+		return normalized, nil
+	}
+
+	return normalized + healthPath, nil
 }
 
 // sanitizedError wraps an original error with a redacted message.
@@ -618,7 +666,10 @@ type sanitizedError struct {
 	message  string
 }
 
+// Error returns the sanitized message.
 func (e *sanitizedError) Error() string { return e.message }
+
+// Unwrap returns the original wrapped error.
 func (e *sanitizedError) Unwrap() error { return e.original }
 
 // newSanitizedError wraps err with a human-readable prefix and redacted connection string.

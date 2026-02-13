@@ -19,6 +19,15 @@ import (
 func TestRabbitMQConnection_Connect(t *testing.T) {
 	t.Parallel()
 
+	t.Run("nil receiver", func(t *testing.T) {
+		t.Parallel()
+
+		var conn *RabbitMQConnection
+
+		err := conn.ConnectContext(context.Background())
+		assert.ErrorIs(t, err, ErrNilConnection)
+	})
+
 	t.Run("context canceled before connect", func(t *testing.T) {
 		t.Parallel()
 
@@ -29,7 +38,7 @@ func TestRabbitMQConnection_Connect(t *testing.T) {
 
 		conn := &RabbitMQConnection{
 			ConnectionStringSource: "amqp://guest:guest@localhost:5672",
-			Logger:                 &log.NoneLogger{},
+			Logger:                 &log.NopLogger{},
 			dialerContext: func(context.Context, string) (*amqp.Connection, error) {
 				dialerCalls++
 
@@ -50,7 +59,7 @@ func TestRabbitMQConnection_Connect(t *testing.T) {
 
 		conn := &RabbitMQConnection{
 			ConnectionStringSource: "amqp://guest:guest@localhost:5672",
-			Logger:                 &log.NoneLogger{},
+			Logger:                 &log.NopLogger{},
 			dialer: func(string) (*amqp.Connection, error) {
 				dialerCalls++
 
@@ -76,7 +85,7 @@ func TestRabbitMQConnection_Connect(t *testing.T) {
 
 		conn := &RabbitMQConnection{
 			ConnectionStringSource: "amqp://guest:guest@localhost:5672",
-			Logger:                 &log.NoneLogger{},
+			Logger:                 &log.NopLogger{},
 			dialer: func(string) (*amqp.Connection, error) {
 				dialerCalls++
 
@@ -117,7 +126,7 @@ func TestRabbitMQConnection_Connect(t *testing.T) {
 		conn := &RabbitMQConnection{
 			ConnectionStringSource: "amqp://guest:guest@localhost:5672",
 			HealthCheckURL:         healthServer.URL,
-			Logger:                 &log.NoneLogger{},
+			Logger:                 &log.NopLogger{},
 			dialer: func(string) (*amqp.Connection, error) {
 				dialerCalls++
 
@@ -144,6 +153,8 @@ func TestRabbitMQConnection_Connect(t *testing.T) {
 	})
 
 	t.Run("healthy server creates connection", func(t *testing.T) {
+		t.Parallel()
+
 		dialerCalls := 0
 		healthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -155,7 +166,7 @@ func TestRabbitMQConnection_Connect(t *testing.T) {
 		conn := &RabbitMQConnection{
 			ConnectionStringSource: "amqp://guest:guest@localhost:5672",
 			HealthCheckURL:         healthServer.URL,
-			Logger:                 &log.NoneLogger{},
+			Logger:                 &log.NopLogger{},
 			dialer: func(string) (*amqp.Connection, error) {
 				dialerCalls++
 
@@ -197,7 +208,7 @@ func TestRabbitMQConnection_Connect(t *testing.T) {
 		conn := &RabbitMQConnection{
 			ConnectionStringSource: "amqp://guest:guest@localhost:5672",
 			HealthCheckURL:         healthServer.URL,
-			Logger:                 &log.NoneLogger{},
+			Logger:                 &log.NopLogger{},
 			dialer: func(string) (*amqp.Connection, error) {
 				atomic.AddInt32(&dialerCalls, 1)
 
@@ -254,6 +265,15 @@ func TestRabbitMQConnection_Connect(t *testing.T) {
 func TestRabbitMQConnection_EnsureChannel(t *testing.T) {
 	t.Parallel()
 
+	t.Run("nil receiver", func(t *testing.T) {
+		t.Parallel()
+
+		var conn *RabbitMQConnection
+
+		err := conn.EnsureChannelContext(context.Background())
+		assert.ErrorIs(t, err, ErrNilConnection)
+	})
+
 	t.Run("creates connection and channel when missing", func(t *testing.T) {
 		t.Parallel()
 
@@ -261,7 +281,7 @@ func TestRabbitMQConnection_EnsureChannel(t *testing.T) {
 		channelCalls := 0
 
 		conn := &RabbitMQConnection{
-			Logger: &log.NoneLogger{},
+			Logger: &log.NopLogger{},
 			dialer: func(string) (*amqp.Connection, error) {
 				dialerCalls++
 
@@ -296,7 +316,7 @@ func TestRabbitMQConnection_EnsureChannel(t *testing.T) {
 			Connection: &amqp.Connection{},
 			Channel:    &amqp.Channel{},
 			Connected:  true,
-			Logger:     &log.NoneLogger{},
+			Logger:     &log.NopLogger{},
 			dialer: func(string) (*amqp.Connection, error) {
 				dialerCalls++
 
@@ -327,7 +347,7 @@ func TestRabbitMQConnection_EnsureChannel(t *testing.T) {
 		conn := &RabbitMQConnection{
 			Connection: &amqp.Connection{},
 			Channel:    &amqp.Channel{},
-			Logger:     &log.NoneLogger{},
+			Logger:     &log.NopLogger{},
 			dialer: func(string) (*amqp.Connection, error) {
 				return nil, nil
 			},
@@ -357,7 +377,7 @@ func TestRabbitMQConnection_EnsureChannel(t *testing.T) {
 		cancel()
 
 		conn := &RabbitMQConnection{
-			Logger: &log.NoneLogger{},
+			Logger: &log.NopLogger{},
 			dialer: func(string) (*amqp.Connection, error) {
 				dialerCalls++
 
@@ -378,7 +398,7 @@ func TestRabbitMQConnection_EnsureChannel(t *testing.T) {
 			Connection:         &amqp.Connection{},
 			Channel:            &amqp.Channel{},
 			Connected:          true,
-			Logger:             &log.NoneLogger{},
+			Logger:             &log.NopLogger{},
 			connectionClosedFn: func(*amqp.Connection) bool { return false },
 			channelClosedFn:    func(*amqp.Channel) bool { return false },
 		}
@@ -398,7 +418,7 @@ func TestRabbitMQConnection_EnsureChannel(t *testing.T) {
 
 		connection := &amqp.Connection{}
 		conn := &RabbitMQConnection{
-			Logger: &log.NoneLogger{},
+			Logger: &log.NopLogger{},
 			dialer: func(string) (*amqp.Connection, error) {
 				dialerCalls++
 
@@ -430,6 +450,16 @@ func TestRabbitMQConnection_EnsureChannel(t *testing.T) {
 func TestRabbitMQConnection_GetNewConnect(t *testing.T) {
 	t.Parallel()
 
+	t.Run("nil receiver", func(t *testing.T) {
+		t.Parallel()
+
+		var conn *RabbitMQConnection
+
+		ch, err := conn.GetNewConnectContext(context.Background())
+		assert.ErrorIs(t, err, ErrNilConnection)
+		assert.Nil(t, ch)
+	})
+
 	t.Run("context canceled before connect", func(t *testing.T) {
 		t.Parallel()
 
@@ -450,7 +480,7 @@ func TestRabbitMQConnection_GetNewConnect(t *testing.T) {
 		dialerCalls := int32(0)
 
 		conn := &RabbitMQConnection{
-			Logger: &log.NoneLogger{},
+			Logger: &log.NopLogger{},
 			dialer: func(string) (*amqp.Connection, error) {
 				atomic.AddInt32(&dialerCalls, 1)
 
@@ -481,7 +511,7 @@ func TestRabbitMQConnection_GetNewConnect(t *testing.T) {
 			Connection: &amqp.Connection{},
 			Channel:    existing,
 			Connected:  true,
-			Logger:     &log.NoneLogger{},
+			Logger:     &log.NopLogger{},
 			dialer: func(string) (*amqp.Connection, error) {
 				dialerCalls++
 
@@ -513,7 +543,7 @@ func TestRabbitMQConnection_GetNewConnect(t *testing.T) {
 			Connection: connection,
 			Channel:    nil,
 			Connected:  true,
-			Logger:     &log.NoneLogger{},
+			Logger:     &log.NopLogger{},
 			dialer: func(string) (*amqp.Connection, error) {
 				return connection, nil
 			},
@@ -543,7 +573,7 @@ func TestRabbitMQConnection_GetNewConnect(t *testing.T) {
 		dialerCalls := int32(0)
 
 		conn := &RabbitMQConnection{
-			Logger: &log.NoneLogger{},
+			Logger: &log.NopLogger{},
 			dialer: func(string) (*amqp.Connection, error) {
 				atomic.AddInt32(&dialerCalls, 1)
 
@@ -592,6 +622,15 @@ func TestRabbitMQConnection_GetNewConnect(t *testing.T) {
 func TestRabbitMQConnection_HealthCheck(t *testing.T) {
 	t.Parallel()
 
+	t.Run("nil receiver", func(t *testing.T) {
+		t.Parallel()
+
+		var conn *RabbitMQConnection
+		healthy, err := conn.HealthCheckContext(context.Background())
+		assert.ErrorIs(t, err, ErrNilConnection)
+		assert.False(t, healthy)
+	})
+
 	t.Run("healthy response", func(t *testing.T) {
 		t.Parallel()
 
@@ -605,10 +644,12 @@ func TestRabbitMQConnection_HealthCheck(t *testing.T) {
 
 		conn := &RabbitMQConnection{
 			HealthCheckURL: healthServer.URL,
-			Logger:         &log.NoneLogger{},
+			Logger:         &log.NopLogger{},
 		}
 
-		assert.True(t, conn.HealthCheck())
+		healthy, err := conn.HealthCheck()
+		assert.NoError(t, err)
+		assert.True(t, healthy)
 	})
 
 	t.Run("server returns error status", func(t *testing.T) {
@@ -621,9 +662,11 @@ func TestRabbitMQConnection_HealthCheck(t *testing.T) {
 		}))
 		defer healthServer.Close()
 
-		conn := &RabbitMQConnection{HealthCheckURL: healthServer.URL, Logger: &log.NoneLogger{}}
+		conn := &RabbitMQConnection{HealthCheckURL: healthServer.URL, Logger: &log.NopLogger{}}
 
-		assert.False(t, conn.HealthCheck())
+		healthy, err := conn.HealthCheck()
+		assert.Error(t, err)
+		assert.False(t, healthy)
 	})
 
 	t.Run("unhealthy response body", func(t *testing.T) {
@@ -637,9 +680,11 @@ func TestRabbitMQConnection_HealthCheck(t *testing.T) {
 		}))
 		defer healthServer.Close()
 
-		conn := &RabbitMQConnection{HealthCheckURL: healthServer.URL, Logger: &log.NoneLogger{}}
+		conn := &RabbitMQConnection{HealthCheckURL: healthServer.URL, Logger: &log.NopLogger{}}
 
-		assert.False(t, conn.HealthCheck())
+		healthy, err := conn.HealthCheck()
+		assert.Error(t, err)
+		assert.False(t, healthy)
 	})
 
 	t.Run("malformed response", func(t *testing.T) {
@@ -652,9 +697,11 @@ func TestRabbitMQConnection_HealthCheck(t *testing.T) {
 		}))
 		defer healthServer.Close()
 
-		conn := &RabbitMQConnection{HealthCheckURL: healthServer.URL, Logger: &log.NoneLogger{}}
+		conn := &RabbitMQConnection{HealthCheckURL: healthServer.URL, Logger: &log.NopLogger{}}
 
-		assert.False(t, conn.HealthCheck())
+		healthy, err := conn.HealthCheck()
+		assert.Error(t, err)
+		assert.False(t, healthy)
 	})
 
 	t.Run("null response", func(t *testing.T) {
@@ -668,25 +715,31 @@ func TestRabbitMQConnection_HealthCheck(t *testing.T) {
 		}))
 		defer healthServer.Close()
 
-		conn := &RabbitMQConnection{HealthCheckURL: healthServer.URL, Logger: &log.NoneLogger{}}
+		conn := &RabbitMQConnection{HealthCheckURL: healthServer.URL, Logger: &log.NopLogger{}}
 
-		assert.False(t, conn.HealthCheck())
+		healthy, err := conn.HealthCheck()
+		assert.Error(t, err)
+		assert.False(t, healthy)
 	})
 
 	t.Run("invalid URL returns false", func(t *testing.T) {
 		t.Parallel()
 
-		conn := &RabbitMQConnection{HealthCheckURL: "http://[::1", Logger: &log.NoneLogger{}}
+		conn := &RabbitMQConnection{HealthCheckURL: "http://[::1", Logger: &log.NopLogger{}}
 
-		assert.False(t, conn.HealthCheck())
+		healthy, err := conn.HealthCheck()
+		assert.Error(t, err)
+		assert.False(t, healthy)
 	})
 
 	t.Run("invalid URL scheme is rejected", func(t *testing.T) {
 		t.Parallel()
 
-		conn := &RabbitMQConnection{HealthCheckURL: "ftp://localhost:15672", Logger: &log.NoneLogger{}}
+		conn := &RabbitMQConnection{HealthCheckURL: "ftp://localhost:15672", Logger: &log.NopLogger{}}
 
-		assert.False(t, conn.HealthCheck())
+		healthy, err := conn.HealthCheck()
+		assert.Error(t, err)
+		assert.False(t, healthy)
 	})
 
 	t.Run("context canceled before health check request", func(t *testing.T) {
@@ -703,10 +756,12 @@ func TestRabbitMQConnection_HealthCheck(t *testing.T) {
 
 		conn := &RabbitMQConnection{
 			HealthCheckURL: healthServer.URL,
-			Logger:         &log.NoneLogger{},
+			Logger:         &log.NopLogger{},
 		}
 
-		assert.False(t, conn.HealthCheckContext(ctx))
+		healthy, err := conn.HealthCheckContext(ctx)
+		assert.Error(t, err)
+		assert.False(t, healthy)
 	})
 
 	t.Run("authentication", func(t *testing.T) {
@@ -730,18 +785,23 @@ func TestRabbitMQConnection_HealthCheck(t *testing.T) {
 			HealthCheckURL: healthServer.URL,
 			User:           "wrong",
 			Pass:           "wrong",
-			Logger:         &log.NoneLogger{},
+			Logger:         &log.NopLogger{},
 		}
 
 		goodAuth := &RabbitMQConnection{
 			HealthCheckURL: healthServer.URL,
 			User:           "correct",
 			Pass:           "correct",
-			Logger:         &log.NoneLogger{},
+			Logger:         &log.NopLogger{},
 		}
 
-		assert.False(t, badAuth.HealthCheck())
-		assert.True(t, goodAuth.HealthCheck())
+		badHealthy, badErr := badAuth.HealthCheck()
+		assert.Error(t, badErr)
+		assert.False(t, badHealthy)
+
+		goodHealthy, goodErr := goodAuth.HealthCheck()
+		assert.NoError(t, goodErr)
+		assert.True(t, goodHealthy)
 	})
 }
 
@@ -752,7 +812,7 @@ func TestApplyDefaults_InsecureTLS(t *testing.T) {
 		t.Parallel()
 
 		conn := &RabbitMQConnection{
-			Logger: &log.NoneLogger{},
+			Logger: &log.NopLogger{},
 			healthHTTPClient: &http.Client{
 				Transport: &http.Transport{
 					TLSClientConfig: &tls.Config{
@@ -773,7 +833,7 @@ func TestApplyDefaults_InsecureTLS(t *testing.T) {
 		t.Parallel()
 
 		conn := &RabbitMQConnection{
-			Logger: &log.NoneLogger{},
+			Logger: &log.NopLogger{},
 			healthHTTPClient: &http.Client{
 				Transport: &http.Transport{
 					TLSClientConfig: &tls.Config{
@@ -795,7 +855,7 @@ func TestApplyDefaults_InsecureTLS(t *testing.T) {
 		t.Parallel()
 
 		conn := &RabbitMQConnection{
-			Logger: &log.NoneLogger{},
+			Logger: &log.NopLogger{},
 		}
 
 		conn.mu.Lock()
@@ -809,7 +869,7 @@ func TestApplyDefaults_InsecureTLS(t *testing.T) {
 		t.Parallel()
 
 		conn := &RabbitMQConnection{
-			Logger: &log.NoneLogger{},
+			Logger: &log.NopLogger{},
 			healthHTTPClient: &http.Client{
 				Transport: &http.Transport{
 					TLSClientConfig: &tls.Config{
@@ -835,7 +895,7 @@ func TestValidateHealthCheckURL(t *testing.T) {
 
 		conn := &RabbitMQConnection{
 			HealthCheckURL: "  http://localhost:15672  ",
-			Logger:         &log.NoneLogger{},
+			Logger:         &log.NopLogger{},
 		}
 
 		normalized, err := validateHealthCheckURL(conn.HealthCheckURL)
@@ -907,10 +967,12 @@ func TestRabbitMQConnection_HealthCheck_UsesConfiguredPath(t *testing.T) {
 
 	conn := &RabbitMQConnection{
 		HealthCheckURL: healthServer.URL + "/custom/alerts",
-		Logger:         &log.NoneLogger{},
+		Logger:         &log.NopLogger{},
 	}
 
-	assert.True(t, conn.HealthCheck())
+	healthy, err := conn.HealthCheck()
+	assert.NoError(t, err)
+	assert.True(t, healthy)
 
 	select {
 	case p := <-gotPath:
@@ -1160,7 +1222,7 @@ func TestRabbitMQConnection_Close(t *testing.T) {
 
 				return nil
 			},
-			Logger: &log.NoneLogger{},
+			Logger: &log.NopLogger{},
 		}
 
 		err := conn.Close()
@@ -1186,7 +1248,7 @@ func TestRabbitMQConnection_Close(t *testing.T) {
 			connectionCloser: func(*amqp.Connection) error {
 				return errors.New("connection close failed")
 			},
-			Logger: &log.NoneLogger{},
+			Logger: &log.NopLogger{},
 		}
 
 		err := conn.Close()
@@ -1212,7 +1274,7 @@ func TestRabbitMQConnection_Close(t *testing.T) {
 			connectionCloser: func(*amqp.Connection) error {
 				return errors.New("connection close failed")
 			},
-			Logger: &log.NoneLogger{},
+			Logger: &log.NopLogger{},
 		}
 
 		err := conn.Close()
@@ -1228,7 +1290,7 @@ func TestRabbitMQConnection_Close(t *testing.T) {
 
 		assert.NotPanics(t, func() {
 			err := rc.CloseContext(context.Background())
-			assert.NoError(t, err)
+			assert.ErrorIs(t, err, ErrNilConnection)
 		})
 	})
 
