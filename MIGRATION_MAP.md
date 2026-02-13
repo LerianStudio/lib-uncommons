@@ -118,6 +118,19 @@ New low-level APIs:
 | `RecordOperationRouteCreated(ctx, organizationID, ledgerID, attrs...)` | `RecordOperationRouteCreated(ctx, attrs...) error` |
 | `RecordTransactionRouteCreated(ctx, organizationID, ledgerID, attrs...)` | `RecordTransactionRouteCreated(ctx, attrs...) error` |
 
+**Migration note:** The `organizationID` and `ledgerID` positional parameters and the internal `WithLedgerLabels()` call have been removed. Callers must now pass these labels explicitly via OpenTelemetry attributes:
+
+```go
+// v1
+factory.RecordAccountCreated(ctx, orgID, ledgerID)
+
+// v2
+factory.RecordAccountCreated(ctx,
+    attribute.String("organization_id", orgID),
+    attribute.String("ledger_id", ledgerID),
+)
+```
+
 ### New in v2
 
 - `NewNopFactory() *MetricsFactory` -- no-op fallback for tests / disabled metrics
@@ -278,6 +291,8 @@ New types: `ResourceOwnershipVerifier` func type, `IDLocation` type, `ErrInvalid
 
 `ErrorResponse` now implements the `error` interface.
 
+**Wire format impact:** `ErrorResponse.Code` changed from `string` to `int`, which changes the JSON serialization from `"code": "400"` to `"code": 400`. Any downstream consumer that unmarshals error responses with `Code` as a string type will break. Callers must update their response parsing structs to use `int` (or a numeric JSON type) for the `code` field.
+
 ### Proxy
 
 | v1 | v2 |
@@ -399,6 +414,12 @@ New: `(*ServerManager).WithShutdownTimeout(d) *ServerManager`
 
 New constructor: `NewDomainError(code, field, message) error`
 
+`Balance` struct changes: removed fields `Alias`, `Key`, `AssetCode`; added field `Asset` (replaces `AssetCode`). `AccountType` changed from `string` to typed `AccountType` enum.
+
+New operation types: `OperationDebit`, `OperationCredit`, `OperationOnHold`, `OperationRelease`
+New status types: `StatusCreated`, `StatusApproved`, `StatusPending`, `StatusCanceled`
+New function: `ResolveOperation(pending, isSource bool, status TransactionStatus) (Operation, error)`
+
 ### Validation flow
 
 | v1 | v2 |
@@ -429,6 +450,16 @@ New: `Config.Validate() error`
 
 ---
 
+## uncommons/app
+
+| v1 | v2 |
+|----|----|
+| `(*Launcher).Add(appName, app) *Launcher` | `(*Launcher).Add(appName, app) error` (no more method chaining) |
+
+New sentinel errors: `ErrNilLauncher`, `ErrEmptyApp`, `ErrNilApp`
+
+---
+
 ## uncommons/context (removals)
 
 | v1 | v2 |
@@ -446,6 +477,72 @@ New: `Config.Validate() error`
 | v1 | v2 |
 |----|----|
 | `EnsureConfigFromEnvVars(s any) any` | removed (use `SetConfigFromEnvVars(s any) error`) |
+
+---
+
+## uncommons/utils
+
+### Signature changes
+
+| v1 | v2 |
+|----|----|
+| `GenerateUUIDv7() uuid.UUID` | `GenerateUUIDv7() (uuid.UUID, error)` |
+
+**Migration note:** In v1, `GenerateUUIDv7()` internally used `uuid.Must(uuid.NewV7())`, which panics if `crypto/rand` fails. In v2 the panic path is removed: the function returns `(uuid.UUID, error)` so callers can handle the (rare but possible) entropy-source failure gracefully. All call sites must now check the returned error.
+
+### Removed deprecated functions (moved to Midaz)
+
+- `ValidateCountryAddress`, `ValidateAccountType`, `ValidateType`, `ValidateCode`, `ValidateCurrency`
+- `GenericInternalKey`, `TransactionInternalKey`, `IdempotencyInternalKey`, `BalanceInternalKey`, `AccountingRoutesInternalKey`
+
+---
+
+## uncommons/crypto
+
+| v1 | v2 |
+|----|----|
+| `Crypto.Logger` field (`*zap.Logger`) | `Crypto.Logger` field (`log.Logger`) |
+
+Direct `go.uber.org/zap` dependency removed from this package.
+
+---
+
+## uncommons/jwt
+
+### Token validation semantics
+
+| v1 | v2 |
+|----|----|
+| `Token.Valid` (bool) -- full validation | `Token.SignatureValid` (bool) -- signature-only verification |
+| (no separate time validation) | `ValidateTimeClaims(claims) error` |
+| (no separate time validation) | `ValidateTimeClaimsAt(claims, now) error` |
+| (no combined parse+validate) | `ParseAndValidate(token, secret, allowedAlgs) (*Token, error)` |
+
+**Migration note:** In v1, the `Token.Valid` field was set to `true` after `Parse()` succeeded, which callers commonly interpreted as "the token is fully valid." In v2, `Token.SignatureValid` clarifies that only the cryptographic HMAC signature was verified -- it does **not** cover time-based claims (`exp`, `nbf`, `iat`). Callers relying on `Token.Valid` for authorization decisions must either:
+
+1. Switch to `ParseAndValidate()`, which performs both signature verification and time-claim validation in one call, or
+2. Call `ValidateTimeClaims(token.Claims)` (or `ValidateTimeClaimsAt(token.Claims, now)` for deterministic testing) after `Parse()`.
+
+New sentinel errors for time validation: `ErrTokenExpired`, `ErrTokenNotYetValid`, `ErrTokenIssuedInFuture`.
+
+---
+
+## uncommons/license
+
+| v1 | v2 |
+|----|----|
+| `DefaultHandler(reason)` panics | `DefaultHandler(reason)` records assertion failure (no panic) |
+| `ManagerShutdown.Terminate(reason)` panics on nil handler | Records assertion failure, returns without panic |
+
+---
+
+## uncommons/cron
+
+| v1 | v2 |
+|----|----|
+| `schedule.Next(from)` on nil receiver | returns `(time.Time{}, nil)` -> now returns `(time.Time{}, ErrNilSchedule)` |
+
+New error: `ErrNilSchedule`
 
 ---
 
@@ -487,10 +584,14 @@ Field list expanded with additional financial and PII identifiers.
 
 ### uncommons/jwt
 
-- `Parse(token, secret, allowedAlgs) (*Token, error)` -- HMAC JWT verification
+- `Parse(token, secret, allowedAlgs) (*Token, error)` -- HMAC JWT signature verification only
+- `ParseAndValidate(token, secret, allowedAlgs) (*Token, error)` -- signature + time claim validation
 - `Sign(claims, secret, alg) (string, error)` -- HMAC JWT creation
-- `ValidateTimeClaims(claims, now) error` -- exp/nbf/iat validation
+- `ValidateTimeClaims(claims) error` -- exp/nbf/iat validation against current UTC time
+- `ValidateTimeClaimsAt(claims, now) error` -- exp/nbf/iat validation against a specific time (for deterministic testing)
+- `Token.SignatureValid` (bool) -- replaces v1 `Token.Valid`; clarifies signature-only scope
 - Algorithms: `AlgHS256`, `AlgHS384`, `AlgHS512`
+- Sentinel errors: `ErrTokenExpired`, `ErrTokenNotYetValid`, `ErrTokenIssuedInFuture`
 
 ### uncommons/backoff
 
@@ -542,6 +643,11 @@ The following files were removed during v2 consolidation:
 ```bash
 # Check for removed v1 patterns
 rg -n "InitializeTelemetryWithError|InitializeTelemetry\(|SetSpanAttributesFromStruct|WithLedgerLabels|WithOrganizationLabels|NoneLogger|BuildConnectionString\(|WriteError\(|HandleFiberError\(|ValidateBalancesRules\(|DetermineOperation\(|ValidateFromToOperation\(|NewTracerFromContext\(|NewMetricFactoryFromContext\(|NewHeaderIDFromContext\(|EnsureConfigFromEnvVars\(|WithTimeout\(|GracefulShutdown|MongoConnection|PostgresConnection|RedisConnection|ZapWithTraceLogger|FieldObfuscator|LogLevel|NoneLogger|WithFields\(|InitializeLogger\b" .
+
+# Check for v1 patterns that changed signature or semantics in v2
+rg -n "uuid\.Must\(uuid\.NewV7|GenerateUUIDv7\(\)" . --type go  # should now return (uuid.UUID, error)
+rg -n "Token\.Valid\b" . --type go                                # renamed to Token.SignatureValid
+rg -n "\"code\":\s*\"[0-9]" . --type go                          # ErrorResponse.Code is now int, not string
 
 # Check for new v2 packages
 rg -n "uncommons/circuitbreaker|uncommons/assert|uncommons/safe|uncommons/security|uncommons/jwt|uncommons/backoff|uncommons/pointers|uncommons/cron|uncommons/errgroup" . --type go

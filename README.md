@@ -11,7 +11,7 @@ The current major API surface is **v2**. If you are migrating from older code, s
 ## Installation
 
 ```bash
-go get github.com/LerianStudio/lib-uncommons
+go get github.com/LerianStudio/lib-uncommons/v2
 ```
 
 ## What is in this library
@@ -69,8 +69,8 @@ go get github.com/LerianStudio/lib-uncommons
 import (
     "context"
 
-    "github.com/LerianStudio/lib-uncommons/uncommons/log"
-    "github.com/LerianStudio/lib-uncommons/uncommons/opentelemetry"
+    "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+    "github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry"
 )
 
 func bootstrap() error {
@@ -82,7 +82,7 @@ func bootstrap() error {
         ServiceVersion:            "2.0.0",
         DeploymentEnv:             "local",
         CollectorExporterEndpoint: "localhost:4317",
-        EnableTelemetry:           false,
+        EnableTelemetry:           false, // Set to true when collector is available
         InsecureExporter:          true,
         Logger:                    logger,
     })

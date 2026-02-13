@@ -4,7 +4,7 @@ This file provides repository-specific guidance for coding agents working on `li
 
 ## Project snapshot
 
-- Module: `github.com/LerianStudio/lib-uncommons`
+- Module: `github.com/LerianStudio/lib-uncommons/v2`
 - Language: Go
 - Go version: `1.25.7` (see `go.mod`)
 - Current API generation: v2 (breaking changes already applied in multiple packages)
