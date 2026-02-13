@@ -139,10 +139,14 @@ func renderFields(fields []Field) string {
 }
 
 func sanitizeFieldValue(value any) any {
-	s, ok := value.(string)
-	if !ok {
+	switch v := value.(type) {
+	case string:
+		return sanitizeLogString(v)
+	case error:
+		return sanitizeLogString(v.Error())
+	case fmt.Stringer:
+		return sanitizeLogString(v.String())
+	default:
 		return value
 	}
-
-	return sanitizeLogString(s)
 }

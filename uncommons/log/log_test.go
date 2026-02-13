@@ -5,6 +5,7 @@ package log
 import (
 	"bytes"
 	"context"
+	"errors"
 	stdlog "log"
 	"os"
 	"path/filepath"
@@ -662,4 +663,61 @@ func TestRenderFields_SanitizesKeysAndValues(t *testing.T) {
 	})
 	assert.NotContains(t, result, "\n")
 	assert.Contains(t, result, `\n`)
+}
+
+// ===========================================================================
+// sanitizeFieldValue Tests
+// ===========================================================================
+
+// testStringer is a small helper that implements fmt.Stringer for testing.
+type testStringer struct{ s string }
+
+func (ts testStringer) String() string { return ts.s }
+
+// TestSanitizeFieldValue verifies that sanitizeFieldValue handles string,
+// error, and fmt.Stringer types, sanitizing control characters in each case.
+func TestSanitizeFieldValue(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    any
+		expected any
+	}{
+		{
+			name:     "plain string passthrough",
+			input:    "hello",
+			expected: "hello",
+		},
+		{
+			name:     "string with newline is sanitized",
+			input:    "line1\nline2",
+			expected: `line1\nline2`,
+		},
+		{
+			name:     "error with newline is sanitized",
+			input:    errors.New("bad\ninput"),
+			expected: `bad\ninput`,
+		},
+		{
+			name:     "fmt.Stringer with newline is sanitized",
+			input:    testStringer{s: "hello\nworld"},
+			expected: `hello\nworld`,
+		},
+		{
+			name:     "integer passes through unchanged",
+			input:    42,
+			expected: 42,
+		},
+		{
+			name:     "nil passes through unchanged",
+			input:    nil,
+			expected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := sanitizeFieldValue(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
 }

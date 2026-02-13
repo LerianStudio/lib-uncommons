@@ -43,6 +43,10 @@ const (
 	LevelDebug
 )
 
+// LevelUnknown represents an invalid or unrecognized log level.
+// Returned by ParseLevel on error to distinguish from LevelError (the zero value).
+const LevelUnknown Level = 255
+
 // String returns the string representation of a log level.
 func (level Level) String() string {
 	switch level {
@@ -72,9 +76,7 @@ func ParseLevel(lvl string) (Level, error) {
 		return LevelError, nil
 	}
 
-	var l Level
-
-	return l, fmt.Errorf("not a valid Level: %q", lvl)
+	return LevelUnknown, fmt.Errorf("not a valid Level: %q", lvl)
 }
 
 // Field is a strongly-typed key/value attribute attached to a log event.

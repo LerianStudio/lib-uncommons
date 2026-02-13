@@ -203,11 +203,14 @@ func TestSanitizeFieldValue_TypeDispatch(t *testing.T) {
 		assert.Nil(t, result)
 	})
 
-	t.Run("error values pass through as-is", func(t *testing.T) {
+	t.Run("error values are sanitized", func(t *testing.T) {
 		err := errors.New("some error\nwith newline")
 		result := sanitizeFieldValue(err)
-		// errors are not strings, so they pass through unchanged
-		assert.Equal(t, err, result)
+		s, ok := result.(string)
+		require.True(t, ok, "error values should be converted to sanitized strings")
+		assert.NotContains(t, s, "\n")
+		assert.Contains(t, s, `\n`)
+		assert.Equal(t, `some error\nwith newline`, s)
 	})
 }
 
