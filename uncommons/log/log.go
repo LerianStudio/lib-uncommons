@@ -179,21 +179,21 @@ func (l *GoLogger) Debugln(args ...any) {
 // Fatal implements Fatal Logger interface function.
 func (l *GoLogger) Fatal(args ...any) {
 	if l.IsLevelEnabled(FatalLevel) {
-		log.Print(args...)
+		log.Fatal(args...)
 	}
 }
 
 // Fatalf implements Fatalf Logger interface function.
 func (l *GoLogger) Fatalf(format string, args ...any) {
 	if l.IsLevelEnabled(FatalLevel) {
-		log.Printf(format, args...)
+		log.Fatalf(format, args...)
 	}
 }
 
 // Fatalln implements Fatalln Logger interface function.
 func (l *GoLogger) Fatalln(args ...any) {
 	if l.IsLevelEnabled(FatalLevel) {
-		log.Println(args...)
+		log.Fatalln(args...)
 	}
 }
 
