@@ -1,6 +1,9 @@
 package uncommons
 
 import (
+	"fmt"
+	"strings"
+
 	constant "github.com/LerianStudio/lib-uncommons/uncommons/constants"
 )
 
@@ -66,7 +69,13 @@ func ValidateBusinessError(err error, entityType string, args ...any) error {
 		},
 	}
 	if mappedError, found := errorMap[err]; found {
-		return mappedError
+		response, ok := mappedError.(Response)
+		if ok && len(args) > 0 {
+			response.Message = fmt.Sprintf("%s (%s)", response.Message, strings.Trim(fmt.Sprint(args...), "[]"))
+			return response
+		}
+
+		return response
 	}
 
 	return err
