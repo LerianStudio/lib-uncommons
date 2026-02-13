@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/LerianStudio/lib-uncommons/uncommons/log"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 )
 
 // MetricsFactory provides a thread-safe factory for creating and managing OpenTelemetry metrics
@@ -20,6 +23,9 @@ type MetricsFactory struct {
 	histograms sync.Map // string -> metric.Int64Histogram
 	logger     log.Logger
 }
+
+// ErrNilMeter indicates that a nil OTEL meter was provided.
+var ErrNilMeter = errors.New("metric meter cannot be nil")
 
 // Metric represents a metric that can be collected by the server.
 type Metric struct {
@@ -74,50 +80,72 @@ var (
 	DefaultTransactionBuckets = []float64{1, 10, 50, 100, 500, 1000, 2500, 5000, 8000, 10000}
 )
 
-// NewMetricsFactory creates a new MetricsFactory instance
-func NewMetricsFactory(meter metric.Meter, logger log.Logger) *MetricsFactory {
+// NewMetricsFactory creates a new MetricsFactory instance.
+func NewMetricsFactory(meter metric.Meter, logger log.Logger) (*MetricsFactory, error) {
+	if meter == nil {
+		return nil, ErrNilMeter
+	}
+
 	return &MetricsFactory{
 		meter:  meter,
 		logger: logger,
+	}, nil
+}
+
+// NewNopFactory returns a MetricsFactory backed by OpenTelemetry's no-op meter.
+// It is safe for use as a fallback when a real meter is unavailable.
+func NewNopFactory() *MetricsFactory {
+	return &MetricsFactory{
+		meter:  noop.NewMeterProvider().Meter("nop"),
+		logger: log.NewNop(),
 	}
 }
 
 // Counter creates or retrieves a counter metric and returns a builder for fluent API usage
-func (f *MetricsFactory) Counter(m Metric) *CounterBuilder {
-	counter := f.getOrCreateCounter(m)
+func (f *MetricsFactory) Counter(m Metric) (*CounterBuilder, error) {
+	counter, err := f.getOrCreateCounter(m)
+	if err != nil {
+		return nil, err
+	}
 
 	return &CounterBuilder{
 		factory: f,
 		counter: counter,
 		name:    m.Name,
-	}
+	}, nil
 }
 
 // Gauge creates or retrieves a gauge metric and returns a builder for fluent API usage
-func (f *MetricsFactory) Gauge(m Metric) *GaugeBuilder {
-	gauge := f.getOrCreateGauge(m)
+func (f *MetricsFactory) Gauge(m Metric) (*GaugeBuilder, error) {
+	gauge, err := f.getOrCreateGauge(m)
+	if err != nil {
+		return nil, err
+	}
 
 	return &GaugeBuilder{
 		factory: f,
 		gauge:   gauge,
 		name:    m.Name,
-	}
+	}, nil
 }
 
 // Histogram creates or retrieves a histogram metric and returns a builder for fluent API usage
-func (f *MetricsFactory) Histogram(m Metric) *HistogramBuilder {
+func (f *MetricsFactory) Histogram(m Metric) (*HistogramBuilder, error) {
 	// Set default buckets if not provided
 	if m.Buckets == nil {
 		m.Buckets = selectDefaultBuckets(m.Name)
 	}
 
-	histogram := f.getOrCreateHistogram(m)
+	histogram, err := f.getOrCreateHistogram(m)
+	if err != nil {
+		return nil, err
+	}
 
 	return &HistogramBuilder{
 		factory:   f,
 		histogram: histogram,
 		name:      m.Name,
-	}
+	}, nil
 }
 
 // selectDefaultBuckets chooses default buckets based on metric name.
@@ -148,13 +176,13 @@ func selectDefaultBuckets(name string) []float64 {
 }
 
 // getOrCreateCounter lazily creates or retrieves an existing counter
-func (f *MetricsFactory) getOrCreateCounter(m Metric) metric.Int64Counter {
+func (f *MetricsFactory) getOrCreateCounter(m Metric) (metric.Int64Counter, error) {
 	if counter, exists := f.counters.Load(m.Name); exists {
 		if c, ok := counter.(metric.Int64Counter); ok {
-			return c
+			return c, nil
 		}
 
-		return nil
+		return nil, fmt.Errorf("counter cache contains invalid type for %q", m.Name)
 	}
 
 	// Create new counter with proper options
@@ -163,33 +191,33 @@ func (f *MetricsFactory) getOrCreateCounter(m Metric) metric.Int64Counter {
 	counter, err := f.meter.Int64Counter(m.Name, counterOpts...)
 	if err != nil {
 		if f.logger != nil {
-			f.logger.Errorf("Failed to create counter metric '%s': %v", m.Name, err)
+			f.logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to create counter metric %q", m.Name), log.Err(err))
 		}
-		// Return nil - builders will handle nil gracefully
-		return nil
+
+		return nil, fmt.Errorf("create counter %q: %w", m.Name, err)
 	}
 
 	// Store in sync.Map for future use
 	if actual, loaded := f.counters.LoadOrStore(m.Name, counter); loaded {
 		// Another goroutine created it first, use that one
 		if c, ok := actual.(metric.Int64Counter); ok {
-			return c
+			return c, nil
 		}
 
-		return nil
+		return nil, fmt.Errorf("counter cache contains invalid type for %q", m.Name)
 	}
 
-	return counter
+	return counter, nil
 }
 
 // getOrCreateGauge lazily creates or retrieves an existing gauge
-func (f *MetricsFactory) getOrCreateGauge(m Metric) metric.Int64Gauge {
+func (f *MetricsFactory) getOrCreateGauge(m Metric) (metric.Int64Gauge, error) {
 	if gauge, exists := f.gauges.Load(m.Name); exists {
 		if g, ok := gauge.(metric.Int64Gauge); ok {
-			return g
+			return g, nil
 		}
 
-		return nil
+		return nil, fmt.Errorf("gauge cache contains invalid type for %q", m.Name)
 	}
 
 	// Create new gauge with proper options
@@ -198,37 +226,37 @@ func (f *MetricsFactory) getOrCreateGauge(m Metric) metric.Int64Gauge {
 	gauge, err := f.meter.Int64Gauge(m.Name, gaugeOpts...)
 	if err != nil {
 		if f.logger != nil {
-			f.logger.Errorf("Failed to create gauge metric '%s': %v", m.Name, err)
+			f.logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to create gauge metric %q", m.Name), log.Err(err))
 		}
-		// Return nil - builders will handle nil gracefully
-		return nil
+
+		return nil, fmt.Errorf("create gauge %q: %w", m.Name, err)
 	}
 
 	// Store in sync.Map for future use
 	if actual, loaded := f.gauges.LoadOrStore(m.Name, gauge); loaded {
 		// Another goroutine created it first, use that one
 		if g, ok := actual.(metric.Int64Gauge); ok {
-			return g
+			return g, nil
 		}
 
-		return nil
+		return nil, fmt.Errorf("gauge cache contains invalid type for %q", m.Name)
 	}
 
-	return gauge
+	return gauge, nil
 }
 
 // getOrCreateHistogram lazily creates or retrieves an existing histogram.
 // Uses a composite key (name + buckets hash) to ensure different bucket configs
 // result in different histograms.
-func (f *MetricsFactory) getOrCreateHistogram(m Metric) metric.Int64Histogram {
+func (f *MetricsFactory) getOrCreateHistogram(m Metric) (metric.Int64Histogram, error) {
 	cacheKey := histogramCacheKey(m.Name, m.Buckets)
 
 	if histogram, exists := f.histograms.Load(cacheKey); exists {
 		if h, ok := histogram.(metric.Int64Histogram); ok {
-			return h
+			return h, nil
 		}
 
-		return nil
+		return nil, fmt.Errorf("histogram cache contains invalid type for %q", cacheKey)
 	}
 
 	// Create new histogram with proper options
@@ -237,23 +265,23 @@ func (f *MetricsFactory) getOrCreateHistogram(m Metric) metric.Int64Histogram {
 	histogram, err := f.meter.Int64Histogram(m.Name, histogramOpts...)
 	if err != nil {
 		if f.logger != nil {
-			f.logger.Errorf("Failed to create histogram metric '%s': %v", m.Name, err)
+			f.logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to create histogram metric %q", m.Name), log.Err(err))
 		}
-		// Return nil - builders will handle nil gracefully
-		return nil
+
+		return nil, fmt.Errorf("create histogram %q: %w", m.Name, err)
 	}
 
 	// Store in sync.Map for future use
 	if actual, loaded := f.histograms.LoadOrStore(cacheKey, histogram); loaded {
 		// Another goroutine created it first, use that one
 		if h, ok := actual.(metric.Int64Histogram); ok {
-			return h
+			return h, nil
 		}
 
-		return nil
+		return nil, fmt.Errorf("histogram cache contains invalid type for %q", cacheKey)
 	}
 
-	return histogram
+	return histogram, nil
 }
 
 // histogramCacheKey generates a unique cache key based on name and bucket configuration.

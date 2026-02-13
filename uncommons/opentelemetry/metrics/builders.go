@@ -2,9 +2,16 @@ package metrics
 
 import (
 	"context"
+	"errors"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+)
+
+var (
+	ErrNilCounter   = errors.New("counter instrument is nil")
+	ErrNilGauge     = errors.New("gauge instrument is nil")
+	ErrNilHistogram = errors.New("histogram instrument is nil")
 )
 
 // CounterBuilder provides a fluent API for recording counter metrics with optional labels
@@ -50,17 +57,19 @@ func (c *CounterBuilder) WithAttributes(attrs ...attribute.KeyValue) *CounterBui
 }
 
 // Add records a counter increment
-func (c *CounterBuilder) Add(ctx context.Context, value int64) {
+func (c *CounterBuilder) Add(ctx context.Context, value int64) error {
 	if c.counter == nil {
-		return
+		return ErrNilCounter
 	}
 
-	// Use only the builder attributes (no trace correlation to avoid high cardinality)
 	c.counter.Add(ctx, value, metric.WithAttributes(c.attrs...))
+
+	return nil
 }
 
-func (c *CounterBuilder) AddOne(ctx context.Context) {
-	c.Add(ctx, 1)
+// AddOne increments the counter by one.
+func (c *CounterBuilder) AddOne(ctx context.Context) error {
+	return c.Add(ctx, 1)
 }
 
 // GaugeBuilder provides a fluent API for recording gauge metrics with optional labels
@@ -105,27 +114,19 @@ func (g *GaugeBuilder) WithAttributes(attrs ...attribute.KeyValue) *GaugeBuilder
 	return builder
 }
 
-// Record sets the gauge to the provided value.
-//
-// Deprecated: use Set for application code. This method is kept for
-// parity with OpenTelemetry's instrument API (metric.Int64Gauge.Record)
-// to ease portability from raw OTEL usage. It delegates to Set.
-func (g *GaugeBuilder) Record(ctx context.Context, value int64) {
-	g.Set(ctx, value)
-}
-
 // Set sets the current value of a gauge (recommended for application code).
 //
 // This is the primary implementation for recording gauge values and is
 // idiomatic for instantaneous state (e.g., queue length, in-flight operations).
 // It uses only the builder attributes to avoid high-cardinality labels.
-func (g *GaugeBuilder) Set(ctx context.Context, value int64) {
+func (g *GaugeBuilder) Set(ctx context.Context, value int64) error {
 	if g.gauge == nil {
-		return
+		return ErrNilGauge
 	}
 
-	// Use only the builder attributes (no trace correlation to avoid high cardinality)
 	g.gauge.Record(ctx, value, metric.WithAttributes(g.attrs...))
+
+	return nil
 }
 
 // HistogramBuilder provides a fluent API for recording histogram metrics with optional labels
@@ -171,11 +172,12 @@ func (h *HistogramBuilder) WithAttributes(attrs ...attribute.KeyValue) *Histogra
 }
 
 // Record records a histogram value
-func (h *HistogramBuilder) Record(ctx context.Context, value int64) {
+func (h *HistogramBuilder) Record(ctx context.Context, value int64) error {
 	if h.histogram == nil {
-		return
+		return ErrNilHistogram
 	}
 
-	// Use only the builder attributes (no trace correlation to avoid high cardinality)
 	h.histogram.Record(ctx, value, metric.WithAttributes(h.attrs...))
+
+	return nil
 }

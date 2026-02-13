@@ -6,9 +6,12 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
-func (f *MetricsFactory) RecordOperationRouteCreated(ctx context.Context, organizationID, ledgerID string, attributes ...attribute.KeyValue) {
-	f.Counter(MetricOperationRoutesCreated).
-		WithLabels(f.WithLedgerLabels(organizationID, ledgerID)).
-		WithAttributes(attributes...).
-		AddOne(ctx)
+// RecordOperationRouteCreated increments the operation-route-created counter.
+func (f *MetricsFactory) RecordOperationRouteCreated(ctx context.Context, attributes ...attribute.KeyValue) error {
+	b, err := f.Counter(MetricOperationRoutesCreated)
+	if err != nil {
+		return err
+	}
+
+	return b.WithAttributes(attributes...).AddOne(ctx)
 }

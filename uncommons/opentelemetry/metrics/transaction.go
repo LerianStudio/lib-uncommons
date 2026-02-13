@@ -6,9 +6,12 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
-func (f *MetricsFactory) RecordTransactionProcessed(ctx context.Context, organizationID, ledgerID string, attributes ...attribute.KeyValue) {
-	f.Counter(MetricTransactionsProcessed).
-		WithLabels(f.WithLedgerLabels(organizationID, ledgerID)).
-		WithAttributes(attributes...).
-		AddOne(ctx)
+// RecordTransactionProcessed increments the transaction-processed counter.
+func (f *MetricsFactory) RecordTransactionProcessed(ctx context.Context, attributes ...attribute.KeyValue) error {
+	b, err := f.Counter(MetricTransactionsProcessed)
+	if err != nil {
+		return err
+	}
+
+	return b.WithAttributes(attributes...).AddOne(ctx)
 }
