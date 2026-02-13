@@ -60,10 +60,6 @@ func (c *CounterBuilder) Add(ctx context.Context, value int64) {
 }
 
 func (c *CounterBuilder) AddOne(ctx context.Context) {
-	if c.counter == nil {
-		return
-	}
-
 	c.Add(ctx, 1)
 }
 

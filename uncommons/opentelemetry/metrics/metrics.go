@@ -150,7 +150,11 @@ func selectDefaultBuckets(name string) []float64 {
 // getOrCreateCounter lazily creates or retrieves an existing counter
 func (f *MetricsFactory) getOrCreateCounter(m Metric) metric.Int64Counter {
 	if counter, exists := f.counters.Load(m.Name); exists {
-		return counter.(metric.Int64Counter)
+		if c, ok := counter.(metric.Int64Counter); ok {
+			return c
+		}
+
+		return nil
 	}
 
 	// Create new counter with proper options
@@ -168,7 +172,11 @@ func (f *MetricsFactory) getOrCreateCounter(m Metric) metric.Int64Counter {
 	// Store in sync.Map for future use
 	if actual, loaded := f.counters.LoadOrStore(m.Name, counter); loaded {
 		// Another goroutine created it first, use that one
-		return actual.(metric.Int64Counter)
+		if c, ok := actual.(metric.Int64Counter); ok {
+			return c
+		}
+
+		return nil
 	}
 
 	return counter
@@ -177,7 +185,11 @@ func (f *MetricsFactory) getOrCreateCounter(m Metric) metric.Int64Counter {
 // getOrCreateGauge lazily creates or retrieves an existing gauge
 func (f *MetricsFactory) getOrCreateGauge(m Metric) metric.Int64Gauge {
 	if gauge, exists := f.gauges.Load(m.Name); exists {
-		return gauge.(metric.Int64Gauge)
+		if g, ok := gauge.(metric.Int64Gauge); ok {
+			return g
+		}
+
+		return nil
 	}
 
 	// Create new gauge with proper options
@@ -195,7 +207,11 @@ func (f *MetricsFactory) getOrCreateGauge(m Metric) metric.Int64Gauge {
 	// Store in sync.Map for future use
 	if actual, loaded := f.gauges.LoadOrStore(m.Name, gauge); loaded {
 		// Another goroutine created it first, use that one
-		return actual.(metric.Int64Gauge)
+		if g, ok := actual.(metric.Int64Gauge); ok {
+			return g
+		}
+
+		return nil
 	}
 
 	return gauge
@@ -208,7 +224,11 @@ func (f *MetricsFactory) getOrCreateHistogram(m Metric) metric.Int64Histogram {
 	cacheKey := histogramCacheKey(m.Name, m.Buckets)
 
 	if histogram, exists := f.histograms.Load(cacheKey); exists {
-		return histogram.(metric.Int64Histogram)
+		if h, ok := histogram.(metric.Int64Histogram); ok {
+			return h
+		}
+
+		return nil
 	}
 
 	// Create new histogram with proper options
@@ -226,7 +246,11 @@ func (f *MetricsFactory) getOrCreateHistogram(m Metric) metric.Int64Histogram {
 	// Store in sync.Map for future use
 	if actual, loaded := f.histograms.LoadOrStore(cacheKey, histogram); loaded {
 		// Another goroutine created it first, use that one
-		return actual.(metric.Int64Histogram)
+		if h, ok := actual.(metric.Int64Histogram); ok {
+			return h
+		}
+
+		return nil
 	}
 
 	return histogram
@@ -251,7 +275,7 @@ func histogramCacheKey(name string, buckets []float64) string {
 }
 
 func (f *MetricsFactory) addCounterOptions(m Metric) []metric.Int64CounterOption {
-	opts := []metric.Int64CounterOption{}
+	var opts []metric.Int64CounterOption
 	if m.Description != "" {
 		opts = append(opts, metric.WithDescription(m.Description))
 	}
@@ -264,7 +288,7 @@ func (f *MetricsFactory) addCounterOptions(m Metric) []metric.Int64CounterOption
 }
 
 func (f *MetricsFactory) addGaugeOptions(m Metric) []metric.Int64GaugeOption {
-	opts := []metric.Int64GaugeOption{}
+	var opts []metric.Int64GaugeOption
 	if m.Description != "" {
 		opts = append(opts, metric.WithDescription(m.Description))
 	}
@@ -277,7 +301,7 @@ func (f *MetricsFactory) addGaugeOptions(m Metric) []metric.Int64GaugeOption {
 }
 
 func (f *MetricsFactory) addHistogramOptions(m Metric) []metric.Int64HistogramOption {
-	opts := []metric.Int64HistogramOption{}
+	var opts []metric.Int64HistogramOption
 	if m.Description != "" {
 		opts = append(opts, metric.WithDescription(m.Description))
 	}
