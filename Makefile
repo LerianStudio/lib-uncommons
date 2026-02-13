@@ -36,7 +36,10 @@ else
 endif
 
 # Low-resource mode for limited machines (sets -p=1 -parallel=1, disables -race)
-# Usage: make test-integration LOW_RESOURCE=1
+# Usage: make test LOW_RESOURCE=1
+#        make test-unit LOW_RESOURCE=1
+#        make test-integration LOW_RESOURCE=1
+#        make coverage-unit LOW_RESOURCE=1
 #        make coverage-integration LOW_RESOURCE=1
 LOW_RESOURCE ?= 0
 
@@ -172,19 +175,19 @@ test:
 	@set -e; mkdir -p $(TEST_REPORTS_DIR); \
 	if [ -n "$(GOTESTSUM)" ]; then \
 	  echo "Running tests with gotestsum"; \
-	  gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) ./... || { \
+	  gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) $(LOW_RES_PARALLEL_FLAG) -count=1 $(GO_TEST_LDFLAGS) ./... || { \
 	    if [ "$(RETRY_ON_FAIL)" = "1" ]; then \
 	      echo "Retrying tests once..."; \
-	      gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) ./...; \
+	      gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) $(LOW_RES_PARALLEL_FLAG) -count=1 $(GO_TEST_LDFLAGS) ./...; \
 	    else \
 	      exit 1; \
 	    fi; \
 	  }; \
 	else \
-	  go test -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) ./... || { \
+	  go test -tags=unit -v $(LOW_RES_RACE_FLAG) $(LOW_RES_PARALLEL_FLAG) -count=1 $(GO_TEST_LDFLAGS) ./... || { \
 	    if [ "$(RETRY_ON_FAIL)" = "1" ]; then \
 	      echo "Retrying tests once..."; \
-	      go test -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) ./...; \
+	      go test -tags=unit -v $(LOW_RES_RACE_FLAG) $(LOW_RES_PARALLEL_FLAG) -count=1 $(GO_TEST_LDFLAGS) ./...; \
 	    else \
 	      exit 1; \
 	    fi; \
@@ -208,19 +211,19 @@ test-unit:
 	else \
 	  if [ -n "$(GOTESTSUM)" ]; then \
 	    echo "Running unit tests with gotestsum"; \
-	    gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) $$pkgs || { \
+	    gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) $(LOW_RES_PARALLEL_FLAG) -count=1 $(GO_TEST_LDFLAGS) $$pkgs || { \
 	      if [ "$(RETRY_ON_FAIL)" = "1" ]; then \
 	        echo "Retrying unit tests once..."; \
-	        gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) $$pkgs; \
+	        gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) $(LOW_RES_PARALLEL_FLAG) -count=1 $(GO_TEST_LDFLAGS) $$pkgs; \
 	      else \
 	        exit 1; \
 	      fi; \
 	    }; \
 	  else \
-	    go test -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) $$pkgs || { \
+	    go test -tags=unit -v $(LOW_RES_RACE_FLAG) $(LOW_RES_PARALLEL_FLAG) -count=1 $(GO_TEST_LDFLAGS) $$pkgs || { \
 	      if [ "$(RETRY_ON_FAIL)" = "1" ]; then \
 	        echo "Retrying unit tests once..."; \
-	        go test -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) $$pkgs; \
+	        go test -tags=unit -v $(LOW_RES_RACE_FLAG) $(LOW_RES_PARALLEL_FLAG) -count=1 $(GO_TEST_LDFLAGS) $$pkgs; \
 	      else \
 	        exit 1; \
 	      fi; \
@@ -325,19 +328,19 @@ coverage-unit:
 	  echo "Packages: $$pkgs"; \
 	  if [ -n "$(GOTESTSUM)" ]; then \
 	    echo "Running unit tests with gotestsum (coverage enabled)"; \
-	    gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) -covermode=atomic -coverprofile=$(TEST_REPORTS_DIR)/unit_coverage.out $$pkgs || { \
+	    gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) $(LOW_RES_PARALLEL_FLAG) -count=1 $(GO_TEST_LDFLAGS) -covermode=atomic -coverprofile=$(TEST_REPORTS_DIR)/unit_coverage.out $$pkgs || { \
 	      if [ "$(RETRY_ON_FAIL)" = "1" ]; then \
 	        echo "Retrying unit tests once..."; \
-	        gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) -covermode=atomic -coverprofile=$(TEST_REPORTS_DIR)/unit_coverage.out $$pkgs; \
+	        gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) $(LOW_RES_PARALLEL_FLAG) -count=1 $(GO_TEST_LDFLAGS) -covermode=atomic -coverprofile=$(TEST_REPORTS_DIR)/unit_coverage.out $$pkgs; \
 	      else \
 	        exit 1; \
 	      fi; \
 	    }; \
 	  else \
-	    go test -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) -covermode=atomic -coverprofile=$(TEST_REPORTS_DIR)/unit_coverage.out $$pkgs || { \
+	    go test -tags=unit -v $(LOW_RES_RACE_FLAG) $(LOW_RES_PARALLEL_FLAG) -count=1 $(GO_TEST_LDFLAGS) -covermode=atomic -coverprofile=$(TEST_REPORTS_DIR)/unit_coverage.out $$pkgs || { \
 	      if [ "$(RETRY_ON_FAIL)" = "1" ]; then \
 	        echo "Retrying unit tests once..."; \
-	        go test -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) -covermode=atomic -coverprofile=$(TEST_REPORTS_DIR)/unit_coverage.out $$pkgs; \
+	        go test -tags=unit -v $(LOW_RES_RACE_FLAG) $(LOW_RES_PARALLEL_FLAG) -count=1 $(GO_TEST_LDFLAGS) -covermode=atomic -coverprofile=$(TEST_REPORTS_DIR)/unit_coverage.out $$pkgs; \
 	      else \
 	        exit 1; \
 	      fi; \
