@@ -110,20 +110,24 @@ func obfuscateStructFields(data any, obfuscator FieldObfuscator) any {
 // ObfuscateStruct applies obfuscation to a struct and returns the obfuscated data.
 // This is a utility function that can be used independently of OpenTelemetry spans.
 func ObfuscateStruct(valueStruct any, obfuscator FieldObfuscator) (any, error) {
-	if obfuscator == nil {
+	if valueStruct == nil || obfuscator == nil {
 		return valueStruct, nil
 	}
 
-	// Convert to JSON and back to get a map[string]any representation
+	// Convert to JSON and back to get a generic representation.
+	// Using any (not map[string]any) to handle arrays, primitives, and objects.
 	jsonBytes, err := json.Marshal(valueStruct)
 	if err != nil {
 		return nil, err
 	}
 
-	var structData map[string]any
-	if err := json.Unmarshal(jsonBytes, &structData); err != nil {
+	var data any
+	if err := json.Unmarshal(jsonBytes, &data); err != nil {
 		return nil, err
 	}
 
-	return obfuscateStructFields(structData, obfuscator), nil
+	// Zero the intermediate buffer to minimize sensitive data lifetime in memory
+	clear(jsonBytes)
+
+	return obfuscateStructFields(data, obfuscator), nil
 }

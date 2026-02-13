@@ -24,7 +24,7 @@ func TestInitializeTelemetryWithError_TelemetryDisabled(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, telemetry)
 	assert.NotNil(t, telemetry.TracerProvider)
-	assert.NotNil(t, telemetry.MetricProvider)
+	assert.NotNil(t, telemetry.MeterProvider)
 	assert.NotNil(t, telemetry.LoggerProvider)
 	assert.NotNil(t, telemetry.MetricsFactory)
 }
@@ -43,7 +43,7 @@ func TestInitializeTelemetry_TelemetryDisabled(t *testing.T) {
 
 	assert.NotNil(t, telemetry)
 	assert.NotNil(t, telemetry.TracerProvider)
-	assert.NotNil(t, telemetry.MetricProvider)
+	assert.NotNil(t, telemetry.MeterProvider)
 	assert.NotNil(t, telemetry.LoggerProvider)
 }
 
@@ -84,6 +84,7 @@ func TestInitializeTelemetryWithError_EnabledWithLazyConnection(t *testing.T) {
 		DeploymentEnv:             "test",
 		CollectorExporterEndpoint: "localhost:4317",
 		EnableTelemetry:           true,
+		InsecureExporter:          true,
 		Logger:                    &log.NoneLogger{},
 	}
 
@@ -93,7 +94,7 @@ func TestInitializeTelemetryWithError_EnabledWithLazyConnection(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, telemetry)
 	assert.NotNil(t, telemetry.TracerProvider)
-	assert.NotNil(t, telemetry.MetricProvider)
+	assert.NotNil(t, telemetry.MeterProvider)
 	assert.NotNil(t, telemetry.LoggerProvider)
 
 	// Clean up

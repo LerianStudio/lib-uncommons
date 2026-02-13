@@ -48,16 +48,18 @@ type TelemetryConfig struct {
 	DeploymentEnv             string
 	CollectorExporterEndpoint string
 	EnableTelemetry           bool
+	InsecureExporter          bool // explicitly opt-in to insecure gRPC (default: secure/TLS)
 	Logger                    log.Logger
 }
 
 type Telemetry struct {
 	TelemetryConfig
 	TracerProvider *sdktrace.TracerProvider
-	MetricProvider *sdkmetric.MeterProvider
+	MeterProvider  *sdkmetric.MeterProvider
 	LoggerProvider *sdklog.LoggerProvider
 	MetricsFactory *metrics.MetricsFactory
 	shutdown       func()
+	shutdownCtx    func(context.Context) error
 }
 
 // NewResource creates a new resource with custom attributes.
@@ -75,9 +77,14 @@ func (tl *TelemetryConfig) newResource() *sdkresource.Resource {
 	return r
 }
 
-// NewLoggerExporter creates a new logger exporter that writes to stdout.
+// newLoggerExporter creates a new OTLP gRPC log exporter.
 func (tl *TelemetryConfig) newLoggerExporter(ctx context.Context) (*otlploggrpc.Exporter, error) {
-	exporter, err := otlploggrpc.New(ctx, otlploggrpc.WithEndpoint(tl.CollectorExporterEndpoint), otlploggrpc.WithInsecure())
+	opts := []otlploggrpc.Option{otlploggrpc.WithEndpoint(tl.CollectorExporterEndpoint)}
+	if tl.InsecureExporter {
+		opts = append(opts, otlploggrpc.WithInsecure())
+	}
+
+	exporter, err := otlploggrpc.New(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -85,9 +92,14 @@ func (tl *TelemetryConfig) newLoggerExporter(ctx context.Context) (*otlploggrpc.
 	return exporter, nil
 }
 
-// newMetricExporter creates a new metric exporter that writes to stdout.
+// newMetricExporter creates a new OTLP gRPC metric exporter.
 func (tl *TelemetryConfig) newMetricExporter(ctx context.Context) (*otlpmetricgrpc.Exporter, error) {
-	exp, err := otlpmetricgrpc.New(ctx, otlpmetricgrpc.WithEndpoint(tl.CollectorExporterEndpoint), otlpmetricgrpc.WithInsecure())
+	opts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(tl.CollectorExporterEndpoint)}
+	if tl.InsecureExporter {
+		opts = append(opts, otlpmetricgrpc.WithInsecure())
+	}
+
+	exp, err := otlpmetricgrpc.New(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -95,9 +107,14 @@ func (tl *TelemetryConfig) newMetricExporter(ctx context.Context) (*otlpmetricgr
 	return exp, nil
 }
 
-// newTracerExporter creates a new tracer exporter that writes to stdout.
+// newTracerExporter creates a new OTLP gRPC trace exporter.
 func (tl *TelemetryConfig) newTracerExporter(ctx context.Context) (*otlptrace.Exporter, error) {
-	exporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithEndpoint(tl.CollectorExporterEndpoint), otlptracegrpc.WithInsecure())
+	opts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(tl.CollectorExporterEndpoint)}
+	if tl.InsecureExporter {
+		opts = append(opts, otlptracegrpc.WithInsecure())
+	}
+
+	exporter, err := otlptracegrpc.New(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -123,12 +140,15 @@ func (tl *TelemetryConfig) newMeterProvider(res *sdkresource.Resource, exp *otlp
 	return mp
 }
 
-// newTracerProvider creates a new tracer provider with stdout exporter and default resource.
+// newTracerProvider creates a new tracer provider with default resource,
+// the AttrBag processor for request-scoped attributes, and the ObfuscatingSpanProcessor
+// for automatic sensitive field obfuscation in span attributes before export.
 func (tl *TelemetryConfig) newTracerProvider(rsc *sdkresource.Resource, exp *otlptrace.Exporter) *sdktrace.TracerProvider {
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exp),
 		sdktrace.WithResource(rsc),
 		sdktrace.WithSpanProcessor(AttrBagSpanProcessor{}),
+		sdktrace.WithSpanProcessor(NewObfuscatingSpanProcessor(nil, nil)),
+		sdktrace.WithBatcher(exp),
 	)
 
 	return tp
@@ -136,7 +156,22 @@ func (tl *TelemetryConfig) newTracerProvider(rsc *sdkresource.Resource, exp *otl
 
 // ShutdownTelemetry shuts down the telemetry providers and exporters.
 func (tl *Telemetry) ShutdownTelemetry() {
+	if tl == nil || tl.shutdown == nil {
+		return
+	}
+
 	tl.shutdown()
+}
+
+// ShutdownTelemetryWithContext shuts down the telemetry providers and exporters
+// using the provided context for timeout control. Use this during graceful shutdown
+// when you need to bound the flush time (e.g., SIGTERM with 15s window).
+func (tl *Telemetry) ShutdownTelemetryWithContext(ctx context.Context) error {
+	if tl == nil || tl.shutdownCtx == nil {
+		return nil
+	}
+
+	return tl.shutdownCtx(ctx)
 }
 
 // InitializeTelemetryWithError initializes the telemetry providers and sets them globally.
@@ -150,11 +185,15 @@ func InitializeTelemetryWithError(cfg *TelemetryConfig) (*Telemetry, error) {
 		return nil, ErrNilTelemetryLogger
 	}
 
+	if cfg.EnableTelemetry && strings.TrimSpace(cfg.CollectorExporterEndpoint) == "" {
+		return nil, errors.New("collector exporter endpoint cannot be empty when telemetry is enabled")
+	}
+
 	ctx := context.Background()
 	l := cfg.Logger
 
 	if !cfg.EnableTelemetry {
-		l.Warn("Telemetry turned off ⚠️ ")
+		l.Warn("Telemetry disabled")
 
 		mp := sdkmetric.NewMeterProvider()
 		tp := sdktrace.NewTracerProvider()
@@ -165,10 +204,11 @@ func InitializeTelemetryWithError(cfg *TelemetryConfig) (*Telemetry, error) {
 		return &Telemetry{
 			TelemetryConfig: *cfg,
 			TracerProvider:  tp,
-			MetricProvider:  mp,
+			MeterProvider:   mp,
 			LoggerProvider:  lp,
 			MetricsFactory:  metricsFactory,
 			shutdown:        func() {},
+			shutdownCtx:     func(context.Context) error { return nil },
 		}, nil
 	}
 
@@ -203,41 +243,13 @@ func InitializeTelemetryWithError(cfg *TelemetryConfig) (*Telemetry, error) {
 	lp := cfg.newLoggerProvider(r, lExp)
 	global.SetLoggerProvider(lp)
 
-	shutdownHandler := func() {
-		err := mp.Shutdown(ctx)
-		if err != nil {
-			l.Errorf("can't shutdown metric provider: %v", err)
-		}
-
-		err = tp.Shutdown(ctx)
-		if err != nil {
-			l.Errorf("can't shutdown tracer provider: %v", err)
-		}
-
-		err = lp.Shutdown(ctx)
-		if err != nil {
-			l.Errorf("can't shutdown logger provider: %v", err)
-		}
-
-		err = tExp.Shutdown(ctx)
-		if err != nil {
-			l.Errorf("can't shutdown tracer exporter: %v", err)
-		}
-
-		err = mExp.Shutdown(ctx)
-		if err != nil {
-			l.Errorf("can't shutdown metric exporter: %v", err)
-		}
-
-		err = lExp.Shutdown(ctx)
-		if err != nil {
-			l.Errorf("can't shutdown logger exporter: %v", err)
-		}
-	}
+	// IMPORTANT: Providers MUST precede their exporters — providers flush pending
+	// data to exporters on Shutdown. Order: providers first, then exporters.
+	shutdownHandler, shutdownCtxHandler := buildShutdownHandlers(l, mp, tp, lp, tExp, mExp, lExp)
 
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 
-	l.Infof("Telemetry initialized ✅ ")
+	l.Infof("Telemetry initialized successfully")
 
 	return &Telemetry{
 		TelemetryConfig: TelemetryConfig{
@@ -247,13 +259,15 @@ func InitializeTelemetryWithError(cfg *TelemetryConfig) (*Telemetry, error) {
 			DeploymentEnv:             cfg.DeploymentEnv,
 			CollectorExporterEndpoint: cfg.CollectorExporterEndpoint,
 			EnableTelemetry:           cfg.EnableTelemetry,
+			InsecureExporter:          cfg.InsecureExporter,
 			Logger:                    l,
 		},
 		TracerProvider: tp,
-		MetricProvider: mp,
+		MeterProvider:  mp,
 		LoggerProvider: lp,
 		MetricsFactory: metricsFactory,
 		shutdown:       shutdownHandler,
+		shutdownCtx:    shutdownCtxHandler,
 	}, nil
 }
 
@@ -272,8 +286,53 @@ func InitializeTelemetry(cfg *TelemetryConfig) *Telemetry {
 	return telemetry
 }
 
+// shutdownable abstracts the Shutdown(ctx) method shared by all OTel providers and exporters.
+type shutdownable interface {
+	Shutdown(ctx context.Context) error
+}
+
+// buildShutdownHandlers creates both the fire-and-forget and context-aware shutdown closures
+// for all telemetry providers and exporters.
+func buildShutdownHandlers(l log.Logger, components ...shutdownable) (func(), func(context.Context) error) {
+	shutdown := func() {
+		ctx := context.Background()
+
+		for _, c := range components {
+			if c == nil {
+				continue
+			}
+
+			if err := c.Shutdown(ctx); err != nil {
+				l.Errorf("telemetry shutdown error: %v", err)
+			}
+		}
+	}
+
+	shutdownCtx := func(ctx context.Context) error {
+		var errs []error
+
+		for _, c := range components {
+			if c == nil {
+				continue
+			}
+
+			if err := c.Shutdown(ctx); err != nil {
+				errs = append(errs, err)
+			}
+		}
+
+		return errors.Join(errs...)
+	}
+
+	return shutdown, shutdownCtx
+}
+
 // SetSpanAttributesFromStruct converts a struct to a JSON string and sets it as an attribute on the span.
 func SetSpanAttributesFromStruct(span *trace.Span, key string, valueStruct any) error {
+	if span == nil || *span == nil {
+		return nil
+	}
+
 	jsonByte, err := json.Marshal(valueStruct)
 	if err != nil {
 		return err
@@ -282,26 +341,32 @@ func SetSpanAttributesFromStruct(span *trace.Span, key string, valueStruct any) 
 	vStr := string(jsonByte)
 
 	(*span).SetAttributes(attribute.KeyValue{
-		Key:   attribute.Key(key),
-		Value: attribute.StringValue(vStr),
+		Key:   attribute.Key(sanitizeUTF8String(key)),
+		Value: attribute.StringValue(sanitizeUTF8String(vStr)),
 	})
 
 	return nil
 }
 
-// Deprecated: Use SetSpanAttributesFromStruct instead.
-//
 // SetSpanAttributesFromStructWithObfuscation converts a struct to a JSON string,
 // obfuscates sensitive fields using the default obfuscator, and sets it as an attribute on the span.
+//
+// For automatic obfuscation without per-call opt-in, consider using ObfuscatingSpanProcessor
+// in the TracerProvider pipeline instead.
 func SetSpanAttributesFromStructWithObfuscation(span *trace.Span, key string, valueStruct any) error {
 	return SetSpanAttributesFromStructWithCustomObfuscation(span, key, valueStruct, NewDefaultObfuscator())
 }
 
-// Deprecated: Use SetSpanAttributesFromStruct instead.
-//
 // SetSpanAttributesFromStructWithCustomObfuscation converts a struct to a JSON string,
 // obfuscates sensitive fields using the custom obfuscator provided, and sets it as an attribute on the span.
+//
+// For automatic obfuscation without per-call opt-in, consider using ObfuscatingSpanProcessor
+// in the TracerProvider pipeline instead.
 func SetSpanAttributesFromStructWithCustomObfuscation(span *trace.Span, key string, valueStruct any, obfuscator FieldObfuscator) error {
+	if span == nil || *span == nil {
+		return nil
+	}
+
 	processedStruct, err := ObfuscateStruct(valueStruct, obfuscator)
 	if err != nil {
 		return err
@@ -335,28 +400,38 @@ func SetSpanAttributeForParam(c *fiber.Ctx, param, value, entityName string) {
 
 // HandleSpanBusinessErrorEvent adds a business error event to the span.
 func HandleSpanBusinessErrorEvent(span *trace.Span, eventName string, err error) {
-	if span != nil && err != nil {
-		(*span).AddEvent(eventName, trace.WithAttributes(attribute.String("error", err.Error())))
+	if span == nil || *span == nil || err == nil {
+		return
 	}
+
+	(*span).AddEvent(eventName, trace.WithAttributes(attribute.String("error", err.Error())))
 }
 
 // HandleSpanEvent adds an event to the span.
 func HandleSpanEvent(span *trace.Span, eventName string, attributes ...attribute.KeyValue) {
-	if span != nil {
-		(*span).AddEvent(eventName, trace.WithAttributes(attributes...))
+	if span == nil || *span == nil {
+		return
 	}
+
+	(*span).AddEvent(eventName, trace.WithAttributes(attributes...))
 }
 
 // HandleSpanError sets the status of the span to error and records the error.
 func HandleSpanError(span *trace.Span, message string, err error) {
-	if span != nil && err != nil {
-		(*span).SetStatus(codes.Error, message+": "+err.Error())
-		(*span).RecordError(err)
+	if span == nil || *span == nil || err == nil {
+		return
 	}
+
+	(*span).SetStatus(codes.Error, message+": "+err.Error())
+	(*span).RecordError(err)
 }
 
 // InjectHTTPContext modifies HTTP headers for trace propagation in outgoing client requests
 func InjectHTTPContext(headers *http.Header, ctx context.Context) {
+	if headers == nil {
+		return
+	}
+
 	carrier := propagation.HeaderCarrier{}
 	otel.GetTextMapPropagator().Inject(ctx, carrier)
 
@@ -527,6 +602,10 @@ func InjectTraceHeadersIntoQueue(ctx context.Context, headers *map[string]any) {
 		return
 	}
 
+	if *headers == nil {
+		*headers = make(map[string]any)
+	}
+
 	// Inject trace context using W3C standards
 	traceHeaders := InjectQueueTraceContext(ctx)
 	for k, v := range traceHeaders {
@@ -559,6 +638,10 @@ func ExtractTraceContextFromQueueHeaders(baseCtx context.Context, amqpHeaders ma
 }
 
 func (tl *Telemetry) EndTracingSpans(ctx context.Context) {
+	if tl == nil {
+		return
+	}
+
 	trace.SpanFromContext(ctx).End()
 }
 
