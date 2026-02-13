@@ -18,9 +18,24 @@ type Logger interface {
 }
 
 // Level represents the severity of a log entry.
+//
+// Lower numeric values indicate higher severity (LevelError=0 is most severe,
+// LevelDebug=3 is least). This is inverted from slog/zap conventions where
+// higher numeric values mean higher severity.
+//
+// The GoLogger.Enabled comparison uses l.Level >= level, which works because
+// the logger's Level acts as a verbosity ceiling: a logger at LevelInfo (2)
+// emits Error (0), Warn (1), and Info (2) messages, but suppresses Debug (3).
 type Level uint8
 
-// These are the supported log levels.
+// Level constants define log severity. Lower numeric values indicate higher
+// severity. Setting a logger's Level to a given constant enables that level
+// and all levels with lower numeric values (i.e., higher severity).
+//
+//	LevelError (0) -- only errors
+//	LevelWarn  (1) -- errors + warnings
+//	LevelInfo  (2) -- errors + warnings + info
+//	LevelDebug (3) -- everything
 const (
 	LevelError Level = iota
 	LevelWarn
@@ -69,6 +84,10 @@ type Field struct {
 }
 
 // Any creates a field with an arbitrary value.
+//
+// WARNING: prefer typed constructors (String, Int, Bool, Err) to avoid
+// accidentally logging sensitive data (passwords, tokens, PII). If using
+// Any, ensure the value is sanitized or non-sensitive.
 func Any(key string, value any) Field {
 	return Field{Key: key, Value: value}
 }

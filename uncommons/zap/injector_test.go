@@ -11,7 +11,7 @@ import (
 func TestNewRejectsMissingOTelLibraryName(t *testing.T) {
 	t.Parallel()
 
-	_, _, err := New(Config{Environment: EnvironmentProduction})
+	_, err := New(Config{Environment: EnvironmentProduction})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "OTelLibraryName is required")
 }
@@ -19,7 +19,7 @@ func TestNewRejectsMissingOTelLibraryName(t *testing.T) {
 func TestNewRejectsInvalidEnvironment(t *testing.T) {
 	t.Parallel()
 
-	_, _, err := New(Config{Environment: Environment("banana"), OTelLibraryName: "svc"})
+	_, err := New(Config{Environment: Environment("banana"), OTelLibraryName: "svc"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid environment")
 }
@@ -27,27 +27,27 @@ func TestNewRejectsInvalidEnvironment(t *testing.T) {
 func TestNewAppliesEnvironmentDefaultLevel(t *testing.T) {
 	t.Parallel()
 
-	_, level, err := New(Config{Environment: EnvironmentDevelopment, OTelLibraryName: "svc"})
+	logger, err := New(Config{Environment: EnvironmentDevelopment, OTelLibraryName: "svc"})
 	require.NoError(t, err)
-	assert.Equal(t, zapcore.DebugLevel, level.Level())
+	assert.Equal(t, zapcore.DebugLevel, logger.Level().Level())
 
-	_, level, err = New(Config{Environment: EnvironmentProduction, OTelLibraryName: "svc"})
+	logger, err = New(Config{Environment: EnvironmentProduction, OTelLibraryName: "svc"})
 	require.NoError(t, err)
-	assert.Equal(t, zapcore.InfoLevel, level.Level())
+	assert.Equal(t, zapcore.InfoLevel, logger.Level().Level())
 }
 
 func TestNewAppliesCustomLevel(t *testing.T) {
 	t.Parallel()
 
-	_, level, err := New(Config{Environment: EnvironmentProduction, OTelLibraryName: "svc", Level: "error"})
+	logger, err := New(Config{Environment: EnvironmentProduction, OTelLibraryName: "svc", Level: "error"})
 	require.NoError(t, err)
-	assert.Equal(t, zapcore.ErrorLevel, level.Level())
+	assert.Equal(t, zapcore.ErrorLevel, logger.Level().Level())
 }
 
 func TestNewRejectsInvalidCustomLevel(t *testing.T) {
 	t.Parallel()
 
-	_, _, err := New(Config{Environment: EnvironmentProduction, OTelLibraryName: "svc", Level: "invalid"})
+	_, err := New(Config{Environment: EnvironmentProduction, OTelLibraryName: "svc", Level: "invalid"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid level")
 }

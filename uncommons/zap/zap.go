@@ -1,20 +1,27 @@
 package zap
 
 import (
+	"context"
 	"time"
 
+	logpkg "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
-// Field is a typed structured logging field.
+// Field is a typed structured logging field (zap alias kept for convenience methods).
 type Field = zap.Field
 
-// Logger is a strict structured logger.
+// Logger is a strict structured logger that implements log.Logger.
 //
 // It intentionally does not expose printf/line/fatal helpers.
 type Logger struct {
-	logger *zap.Logger
+	logger      *zap.Logger
+	atomicLevel zap.AtomicLevel
 }
+
+// Compile-time assertion: *Logger implements logpkg.Logger.
+var _ logpkg.Logger = (*Logger)(nil)
 
 func (l *Logger) must() *zap.Logger {
 	if l == nil || l.logger == nil {
@@ -24,9 +31,80 @@ func (l *Logger) must() *zap.Logger {
 	return l.logger
 }
 
+// ---------------------------------------------------------------------------
+// log.Logger interface methods
+// ---------------------------------------------------------------------------
+
+// Log implements log.Logger. It dispatches to the appropriate zap level.
+func (l *Logger) Log(_ context.Context, level logpkg.Level, msg string, fields ...logpkg.Field) {
+	zapFields := logFieldsToZap(fields)
+
+	switch level {
+	case logpkg.LevelDebug:
+		l.must().Debug(msg, zapFields...)
+	case logpkg.LevelInfo:
+		l.must().Info(msg, zapFields...)
+	case logpkg.LevelWarn:
+		l.must().Warn(msg, zapFields...)
+	case logpkg.LevelError:
+		l.must().Error(msg, zapFields...)
+	default:
+		l.must().Info(msg, zapFields...)
+	}
+}
+
 // With returns a child logger with additional structured fields.
-func (l *Logger) With(fields ...Field) *Logger {
-	return &Logger{logger: l.must().With(fields...)}
+//
+//nolint:ireturn
+func (l *Logger) With(fields ...logpkg.Field) logpkg.Logger {
+	return &Logger{
+		logger:      l.must().With(logFieldsToZap(fields)...),
+		atomicLevel: l.atomicLevel,
+	}
+}
+
+// WithGroup returns a child logger that nests subsequent fields under a namespace.
+//
+//nolint:ireturn
+func (l *Logger) WithGroup(name string) logpkg.Logger {
+	return &Logger{
+		logger:      l.must().With(zap.Namespace(name)),
+		atomicLevel: l.atomicLevel,
+	}
+}
+
+// Enabled reports whether the logger would emit a log at the given level.
+func (l *Logger) Enabled(level logpkg.Level) bool {
+	return l.must().Core().Enabled(logLevelToZap(level))
+}
+
+// Sync flushes buffered logs, respecting context cancellation.
+func (l *Logger) Sync(ctx context.Context) error {
+	done := make(chan error, 1)
+
+	go func() {
+		done <- l.must().Sync()
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-done:
+		return err
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Convenience methods (direct zap.Field access for performance-sensitive code)
+// ---------------------------------------------------------------------------
+
+// WithZapFields returns a child logger with additional zap.Field values.
+// Use this when working directly with zap fields for performance.
+func (l *Logger) WithZapFields(fields ...Field) *Logger {
+	return &Logger{
+		logger:      l.must().With(fields...),
+		atomicLevel: l.atomicLevel,
+	}
 }
 
 // Debug logs a message with debug severity.
@@ -49,14 +127,14 @@ func (l *Logger) Error(message string, fields ...Field) {
 	l.must().Error(message, fields...)
 }
 
-// Sync flushes buffered logs.
-func (l *Logger) Sync() error {
-	return l.must().Sync()
-}
-
 // Raw returns the underlying zap logger.
 func (l *Logger) Raw() *zap.Logger {
 	return l.must()
+}
+
+// Level returns the runtime-adjustable level handle for this logger.
+func (l *Logger) Level() zap.AtomicLevel {
+	return l.atomicLevel
 }
 
 // Any creates a field with any value.
@@ -87,4 +165,34 @@ func Duration(key string, value time.Duration) Field {
 // ErrorField creates an error field.
 func ErrorField(err error) Field {
 	return zap.Error(err)
+}
+
+// ---------------------------------------------------------------------------
+// Internal conversion helpers
+// ---------------------------------------------------------------------------
+
+// logLevelToZap converts a log.Level to a zapcore.Level.
+func logLevelToZap(level logpkg.Level) zapcore.Level {
+	switch level {
+	case logpkg.LevelDebug:
+		return zapcore.DebugLevel
+	case logpkg.LevelInfo:
+		return zapcore.InfoLevel
+	case logpkg.LevelWarn:
+		return zapcore.WarnLevel
+	case logpkg.LevelError:
+		return zapcore.ErrorLevel
+	default:
+		return zapcore.InfoLevel
+	}
+}
+
+// logFieldsToZap converts log.Field values to zap.Field values.
+func logFieldsToZap(fields []logpkg.Field) []zap.Field {
+	zapFields := make([]zap.Field, len(fields))
+	for i, f := range fields {
+		zapFields[i] = zap.Any(f.Key, f.Value)
+	}
+
+	return zapFields
 }

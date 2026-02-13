@@ -3,7 +3,7 @@ package log_test
 import (
 	"fmt"
 
-	ulog "github.com/LerianStudio/lib-uncommons/uncommons/log"
+	ulog "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 )
 
 func ExampleParseLevel() {

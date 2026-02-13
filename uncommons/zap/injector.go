@@ -1,6 +1,7 @@
 package zap
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -31,7 +32,7 @@ type Config struct {
 
 func (c Config) validate() error {
 	if c.OTelLibraryName == "" {
-		return fmt.Errorf("OTelLibraryName is required")
+		return errors.New("OTelLibraryName is required")
 	}
 
 	switch c.Environment {
@@ -42,17 +43,20 @@ func (c Config) validate() error {
 	}
 }
 
-// New creates a structured logger and returns it with a runtime-adjustable level handle.
-func New(cfg Config) (*Logger, zap.AtomicLevel, error) {
+// New creates a structured logger from the given configuration.
+//
+// The returned Logger implements log.Logger and stores the runtime-adjustable
+// level handle internally. Use Logger.Level() to access it.
+func New(cfg Config) (*Logger, error) {
 	if err := cfg.validate(); err != nil {
-		return nil, zap.AtomicLevel{}, fmt.Errorf("invalid zap config: %w", err)
+		return nil, fmt.Errorf("invalid zap config: %w", err)
 	}
 
 	baseConfig := buildConfigByEnvironment(cfg.Environment)
 
 	level, err := resolveLevel(cfg)
 	if err != nil {
-		return nil, zap.AtomicLevel{}, err
+		return nil, err
 	}
 
 	baseConfig.Level = level
@@ -67,10 +71,10 @@ func New(cfg Config) (*Logger, zap.AtomicLevel, error) {
 
 	built, err := baseConfig.Build(coreOptions...)
 	if err != nil {
-		return nil, zap.AtomicLevel{}, fmt.Errorf("failed to build logger: %w", err)
+		return nil, fmt.Errorf("failed to build logger: %w", err)
 	}
 
-	return &Logger{logger: built}, level, nil
+	return &Logger{logger: built, atomicLevel: level}, nil
 }
 
 func resolveLevel(cfg Config) (zap.AtomicLevel, error) {

@@ -1,6 +1,7 @@
 package zap
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -77,9 +78,9 @@ func TestStructuredLoggingMethods(t *testing.T) {
 	assert.Equal(t, "error message", entries[3].Message)
 }
 
-func TestWithAddsFieldsWithoutMutatingParent(t *testing.T) {
+func TestWithZapFieldsAddsFieldsWithoutMutatingParent(t *testing.T) {
 	logger, observed := newObservedLogger(zapcore.DebugLevel)
-	child := logger.With(String("tenant_id", "t-1"))
+	child := logger.WithZapFields(String("tenant_id", "t-1"))
 
 	logger.Info("parent")
 	child.Info("child")
@@ -95,7 +96,7 @@ func TestWithAddsFieldsWithoutMutatingParent(t *testing.T) {
 func TestSyncReturnsErrorFromUnderlyingLogger(t *testing.T) {
 	logger, _ := newObservedLogger(zapcore.DebugLevel)
 
-	assert.NoError(t, logger.Sync())
+	assert.NoError(t, logger.Sync(context.Background()))
 }
 
 func TestFieldHelpers(t *testing.T) {
@@ -151,7 +152,7 @@ func TestCWE117_ZapMessageNewlineInjection(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			logger, buf := newBufferedLogger(zapcore.DebugLevel)
 			logger.Info(tt.message)
-			_ = logger.Sync()
+			_ = logger.Sync(context.Background())
 
 			out := buf.String()
 			// JSON output from zap should be a single line per entry
@@ -174,7 +175,7 @@ func TestCWE117_ZapFieldValueInjection(t *testing.T) {
 
 	maliciousValue := "user123\n{\"level\":\"error\",\"msg\":\"ADMIN ACCESS GRANTED\"}"
 	logger.Info("login", String("user_id", maliciousValue))
-	_ = logger.Sync()
+	_ = logger.Sync(context.Background())
 
 	out := buf.String()
 	lines := strings.Split(strings.TrimSpace(out), "\n")
@@ -189,7 +190,7 @@ func TestCWE117_ZapFieldNameInjection(t *testing.T) {
 
 	// Field name with embedded newline
 	logger.Info("event", zap.String("key\ninjected", "value"))
-	_ = logger.Sync()
+	_ = logger.Sync(context.Background())
 
 	out := buf.String()
 	lines := strings.Split(strings.TrimSpace(out), "\n")
@@ -201,7 +202,7 @@ func TestCWE117_ZapFieldNameInjection(t *testing.T) {
 func TestCWE117_ZapNullByteInMessage(t *testing.T) {
 	logger, buf := newBufferedLogger(zapcore.DebugLevel)
 	logger.Info("before\x00after")
-	_ = logger.Sync()
+	_ = logger.Sync(context.Background())
 
 	out := buf.String()
 	lines := strings.Split(strings.TrimSpace(out), "\n")
@@ -212,7 +213,7 @@ func TestCWE117_ZapNullByteInMessage(t *testing.T) {
 func TestCWE117_ZapANSIEscapeInMessage(t *testing.T) {
 	logger, buf := newBufferedLogger(zapcore.DebugLevel)
 	logger.Info("normal \x1b[31mRED\x1b[0m normal")
-	_ = logger.Sync()
+	_ = logger.Sync(context.Background())
 
 	out := buf.String()
 	lines := strings.Split(strings.TrimSpace(out), "\n")
@@ -223,7 +224,7 @@ func TestCWE117_ZapANSIEscapeInMessage(t *testing.T) {
 func TestCWE117_ZapTabInMessage(t *testing.T) {
 	logger, buf := newBufferedLogger(zapcore.DebugLevel)
 	logger.Info("col1\tcol2\tcol3")
-	_ = logger.Sync()
+	_ = logger.Sync(context.Background())
 
 	out := buf.String()
 	lines := strings.Split(strings.TrimSpace(out), "\n")
@@ -237,9 +238,9 @@ func TestCWE117_ZapTabInMessage(t *testing.T) {
 // via With() still properly handle injection attempts.
 func TestCWE117_ZapWithPreservesSanitization(t *testing.T) {
 	logger, buf := newBufferedLogger(zapcore.DebugLevel)
-	child := logger.With(String("session", "sess\n{\"forged\":true}"))
+	child := logger.WithZapFields(String("session", "sess\n{\"forged\":true}"))
 	child.Info("child message")
-	_ = logger.Sync()
+	_ = logger.Sync(context.Background())
 
 	out := buf.String()
 	lines := strings.Split(strings.TrimSpace(out), "\n")
@@ -257,7 +258,7 @@ func TestCWE117_ZapMultipleVectorsSimultaneously(t *testing.T) {
 	logger.Info(msg,
 		zap.String("user\nfake", "val\nfake"),
 		zap.String("safe_key", "safe_val"))
-	_ = logger.Sync()
+	_ = logger.Sync(context.Background())
 
 	out := buf.String()
 	lines := strings.Split(strings.TrimSpace(out), "\n")

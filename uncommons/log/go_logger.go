@@ -26,9 +26,10 @@ type GoLogger struct {
 }
 
 // Enabled reports whether the logger emits entries at the given level.
+// On a nil receiver, Enabled returns false silently. Use NopLogger as the
+// documented nil-safe alternative.
 func (l *GoLogger) Enabled(level Level) bool {
 	if l == nil {
-		log.Print("[warn] nil GoLogger receiver on Enabled")
 		return false
 	}
 
@@ -48,7 +49,6 @@ func (l *GoLogger) Log(_ context.Context, level Level, msg string, fields ...Fie
 //nolint:ireturn
 func (l *GoLogger) With(fields ...Field) Logger {
 	if l == nil {
-		log.Print("[warn] nil GoLogger receiver on With")
 		return &NopLogger{}
 	}
 
@@ -69,7 +69,6 @@ func (l *GoLogger) With(fields ...Field) Logger {
 //nolint:ireturn
 func (l *GoLogger) WithGroup(name string) Logger {
 	if l == nil {
-		log.Print("[warn] nil GoLogger receiver on WithGroup")
 		return &NopLogger{}
 	}
 
