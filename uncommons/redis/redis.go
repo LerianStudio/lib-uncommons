@@ -13,9 +13,9 @@ import (
 
 	iamcredentials "cloud.google.com/go/iam/credentials/apiv1"
 	iamcredentialspb "cloud.google.com/go/iam/credentials/apiv1/credentialspb"
-	"github.com/LerianStudio/lib-uncommons/uncommons/assert"
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
-	"github.com/LerianStudio/lib-uncommons/uncommons/runtime"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/runtime"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
@@ -585,69 +585,84 @@ func (c *Client) usesGCPIAM() bool {
 }
 
 func normalizeConfig(cfg Config) (Config, error) {
-	if cfg.Logger == nil {
-		cfg.Logger = &log.NopLogger{}
-	}
-
-	if cfg.Options.PoolSize == 0 {
-		cfg.Options.PoolSize = 10
-	}
-
-	if cfg.Options.ReadTimeout == 0 {
-		cfg.Options.ReadTimeout = 3 * time.Second
-	}
-
-	if cfg.Options.WriteTimeout == 0 {
-		cfg.Options.WriteTimeout = 3 * time.Second
-	}
-
-	if cfg.Options.DialTimeout == 0 {
-		cfg.Options.DialTimeout = 5 * time.Second
-	}
-
-	if cfg.Options.PoolTimeout == 0 {
-		cfg.Options.PoolTimeout = 2 * time.Second
-	}
-
-	if cfg.Options.MaxRetries == 0 {
-		cfg.Options.MaxRetries = 3
-	}
-
-	if cfg.Options.MinRetryBackoff == 0 {
-		cfg.Options.MinRetryBackoff = 8 * time.Millisecond
-	}
-
-	if cfg.Options.MaxRetryBackoff == 0 {
-		cfg.Options.MaxRetryBackoff = 1 * time.Second
-	}
-
-	if cfg.TLS != nil && cfg.TLS.MinVersion == 0 {
-		cfg.TLS.MinVersion = tls.VersionTLS12
-	}
-
-	if cfg.Auth.GCPIAM != nil {
-		if cfg.Auth.GCPIAM.TokenLifetime == 0 {
-			cfg.Auth.GCPIAM.TokenLifetime = defaultTokenLifetime
-		}
-
-		if cfg.Auth.GCPIAM.RefreshEvery == 0 {
-			cfg.Auth.GCPIAM.RefreshEvery = defaultRefreshEvery
-		}
-
-		if cfg.Auth.GCPIAM.RefreshCheckInterval == 0 {
-			cfg.Auth.GCPIAM.RefreshCheckInterval = defaultRefreshCheckInterval
-		}
-
-		if cfg.Auth.GCPIAM.RefreshOperationTimeout == 0 {
-			cfg.Auth.GCPIAM.RefreshOperationTimeout = defaultRefreshOperationTimeout
-		}
-	}
+	normalizeLoggerDefault(&cfg)
+	normalizeConnectionOptionsDefaults(&cfg.Options)
+	normalizeTLSDefaults(cfg.TLS)
+	normalizeGCPIAMDefaults(cfg.Auth.GCPIAM)
 
 	if err := validateConfig(cfg); err != nil {
 		return Config{}, err
 	}
 
 	return cfg, nil
+}
+
+func normalizeLoggerDefault(cfg *Config) {
+	if cfg.Logger == nil {
+		cfg.Logger = &log.NopLogger{}
+	}
+}
+
+func normalizeConnectionOptionsDefaults(options *ConnectionOptions) {
+	if options.PoolSize == 0 {
+		options.PoolSize = 10
+	}
+
+	if options.ReadTimeout == 0 {
+		options.ReadTimeout = 3 * time.Second
+	}
+
+	if options.WriteTimeout == 0 {
+		options.WriteTimeout = 3 * time.Second
+	}
+
+	if options.DialTimeout == 0 {
+		options.DialTimeout = 5 * time.Second
+	}
+
+	if options.PoolTimeout == 0 {
+		options.PoolTimeout = 2 * time.Second
+	}
+
+	if options.MaxRetries == 0 {
+		options.MaxRetries = 3
+	}
+
+	if options.MinRetryBackoff == 0 {
+		options.MinRetryBackoff = 8 * time.Millisecond
+	}
+
+	if options.MaxRetryBackoff == 0 {
+		options.MaxRetryBackoff = 1 * time.Second
+	}
+}
+
+func normalizeTLSDefaults(tlsCfg *TLSConfig) {
+	if tlsCfg != nil && tlsCfg.MinVersion == 0 {
+		tlsCfg.MinVersion = tls.VersionTLS12
+	}
+}
+
+func normalizeGCPIAMDefaults(auth *GCPIAMAuth) {
+	if auth == nil {
+		return
+	}
+
+	if auth.TokenLifetime == 0 {
+		auth.TokenLifetime = defaultTokenLifetime
+	}
+
+	if auth.RefreshEvery == 0 {
+		auth.RefreshEvery = defaultRefreshEvery
+	}
+
+	if auth.RefreshCheckInterval == 0 {
+		auth.RefreshCheckInterval = defaultRefreshCheckInterval
+	}
+
+	if auth.RefreshOperationTimeout == 0 {
+		auth.RefreshOperationTimeout = defaultRefreshOperationTimeout
+	}
 }
 
 func validateConfig(cfg Config) error {

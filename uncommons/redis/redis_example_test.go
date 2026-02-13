@@ -3,7 +3,7 @@ package redis_test
 import (
 	"fmt"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/redis"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/redis"
 )
 
 func ExampleConfig() {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/redis"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/redis"
 )
 
 func ExampleConfig_gcpIAM() {
