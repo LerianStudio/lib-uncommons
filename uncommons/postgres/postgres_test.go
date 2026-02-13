@@ -8,6 +8,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -309,4 +310,889 @@ func TestMigratorUpRunsExplicitly(t *testing.T) {
 	err = migrator.Up(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), migrationCalls.Load())
+}
+
+// ---------------------------------------------------------------------------
+// Config.withDefaults
+// ---------------------------------------------------------------------------
+
+func TestConfigWithDefaults(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil logger gets default", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := Config{PrimaryDSN: "dsn", ReplicaDSN: "dsn"}.withDefaults()
+		assert.NotNil(t, cfg.Logger)
+	})
+
+	t.Run("zero MaxOpenConnections gets default", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := Config{PrimaryDSN: "dsn", ReplicaDSN: "dsn"}.withDefaults()
+		assert.Equal(t, defaultMaxOpenConns, cfg.MaxOpenConnections)
+	})
+
+	t.Run("zero MaxIdleConnections gets default", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := Config{PrimaryDSN: "dsn", ReplicaDSN: "dsn"}.withDefaults()
+		assert.Equal(t, defaultMaxIdleConns, cfg.MaxIdleConnections)
+	})
+
+	t.Run("custom values preserved", func(t *testing.T) {
+		t.Parallel()
+
+		logger := log.NewNop()
+		cfg := Config{
+			PrimaryDSN:         "dsn",
+			ReplicaDSN:         "dsn",
+			Logger:             logger,
+			MaxOpenConnections: 50,
+			MaxIdleConnections: 20,
+		}.withDefaults()
+
+		assert.Equal(t, logger, cfg.Logger)
+		assert.Equal(t, 50, cfg.MaxOpenConnections)
+		assert.Equal(t, 20, cfg.MaxIdleConnections)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Config.validate
+// ---------------------------------------------------------------------------
+
+func TestConfigValidate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty primary DSN", func(t *testing.T) {
+		t.Parallel()
+
+		err := Config{PrimaryDSN: "", ReplicaDSN: "dsn"}.validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidConfig)
+	})
+
+	t.Run("whitespace-only primary DSN", func(t *testing.T) {
+		t.Parallel()
+
+		err := Config{PrimaryDSN: "   ", ReplicaDSN: "dsn"}.validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidConfig)
+	})
+
+	t.Run("empty replica DSN", func(t *testing.T) {
+		t.Parallel()
+
+		err := Config{PrimaryDSN: "dsn", ReplicaDSN: ""}.validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidConfig)
+	})
+
+	t.Run("valid config", func(t *testing.T) {
+		t.Parallel()
+
+		err := Config{PrimaryDSN: "dsn", ReplicaDSN: "dsn"}.validate()
+		assert.NoError(t, err)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// New
+// ---------------------------------------------------------------------------
+
+func TestNew(t *testing.T) {
+	t.Run("valid config returns client", func(t *testing.T) {
+		t.Parallel()
+
+		client, err := New(validConfig())
+		require.NoError(t, err)
+		require.NotNil(t, client)
+	})
+
+	t.Run("invalid config returns error", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := New(Config{})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidConfig)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Client nil receiver safety
+// ---------------------------------------------------------------------------
+
+func TestClientNilReceiver(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Connect nil client", func(t *testing.T) {
+		t.Parallel()
+
+		var c *Client
+		err := c.Connect(context.Background())
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrNilClient)
+	})
+
+	t.Run("Resolver nil client", func(t *testing.T) {
+		t.Parallel()
+
+		var c *Client
+		_, err := c.Resolver(context.Background())
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrNilClient)
+	})
+
+	t.Run("Close nil client", func(t *testing.T) {
+		t.Parallel()
+
+		var c *Client
+		err := c.Close()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrNilClient)
+	})
+
+	t.Run("IsConnected nil client", func(t *testing.T) {
+		t.Parallel()
+
+		var c *Client
+		connected, err := c.IsConnected()
+		assert.False(t, connected)
+		assert.ErrorIs(t, err, ErrNilClient)
+	})
+
+	t.Run("Primary nil client", func(t *testing.T) {
+		t.Parallel()
+
+		var c *Client
+		_, err := c.Primary()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrNilClient)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Client nil context
+// ---------------------------------------------------------------------------
+
+func TestClientNilContext(t *testing.T) {
+	t.Run("Connect nil ctx", func(t *testing.T) {
+		client, err := New(validConfig())
+		require.NoError(t, err)
+
+		err = client.Connect(nil)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrNilContext)
+	})
+
+	t.Run("Resolver nil ctx", func(t *testing.T) {
+		client, err := New(validConfig())
+		require.NoError(t, err)
+
+		_, err = client.Resolver(nil)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrNilContext)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Connect with mock dbOpenFn errors
+// ---------------------------------------------------------------------------
+
+func TestConnectDbOpenError(t *testing.T) {
+	t.Run("primary open fails", func(t *testing.T) {
+		withPatchedDependencies(
+			t,
+			func(_, _ string) (*sql.DB, error) {
+				return nil, errors.New("connection refused")
+			},
+			func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return &fakeResolver{}, nil },
+			func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+		)
+
+		client, err := New(validConfig())
+		require.NoError(t, err)
+
+		err = client.Connect(context.Background())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to open database")
+	})
+
+	t.Run("replica open fails", func(t *testing.T) {
+		callCount := 0
+
+		withPatchedDependencies(
+			t,
+			func(_, _ string) (*sql.DB, error) {
+				callCount++
+				if callCount == 1 {
+					return testDB(t), nil
+				}
+
+				return nil, errors.New("replica down")
+			},
+			func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return &fakeResolver{}, nil },
+			func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+		)
+
+		client, err := New(validConfig())
+		require.NoError(t, err)
+
+		err = client.Connect(context.Background())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to open database")
+	})
+
+	t.Run("resolver creation fails", func(t *testing.T) {
+		withPatchedDependencies(
+			t,
+			func(_, _ string) (*sql.DB, error) { return testDB(t), nil },
+			func(*sql.DB, *sql.DB) (dbresolver.DB, error) {
+				return nil, errors.New("resolver error")
+			},
+			func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+		)
+
+		client, err := New(validConfig())
+		require.NoError(t, err)
+
+		err = client.Connect(context.Background())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to create resolver")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Resolver lazy connect - double-checked locking (second call returns cached)
+// ---------------------------------------------------------------------------
+
+func TestResolverCachesResolver(t *testing.T) {
+	resolver := &fakeResolver{}
+
+	withPatchedDependencies(
+		t,
+		func(_, _ string) (*sql.DB, error) { return testDB(t), nil },
+		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return resolver, nil },
+		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+	)
+
+	client, err := New(validConfig())
+	require.NoError(t, err)
+
+	// First call connects lazily.
+	r1, err := client.Resolver(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, resolver, r1)
+
+	// Second call returns cached (fast path).
+	r2, err := client.Resolver(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, r1, r2)
+
+	assert.NoError(t, client.Close())
+}
+
+// ---------------------------------------------------------------------------
+// Primary not connected
+// ---------------------------------------------------------------------------
+
+func TestPrimaryNotConnected(t *testing.T) {
+	t.Parallel()
+
+	client, err := New(validConfig())
+	require.NoError(t, err)
+
+	_, err = client.Primary()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNotConnected)
+}
+
+// ---------------------------------------------------------------------------
+// Close with error from resolver
+// ---------------------------------------------------------------------------
+
+func TestCloseResolverError(t *testing.T) {
+	resolver := &fakeResolver{closeErr: errors.New("close boom")}
+
+	client, err := New(validConfig())
+	require.NoError(t, err)
+	client.resolver = resolver
+
+	err = client.Close()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "close boom")
+}
+
+// ---------------------------------------------------------------------------
+// MigrationConfig
+// ---------------------------------------------------------------------------
+
+func TestMigrationConfigWithDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg := MigrationConfig{}.withDefaults()
+	assert.NotNil(t, cfg.Logger)
+}
+
+func TestMigrationConfigValidate(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty DSN", func(t *testing.T) {
+		t.Parallel()
+
+		err := MigrationConfig{DatabaseName: "ledger", MigrationsPath: "/tmp"}.validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidConfig)
+	})
+
+	t.Run("invalid DB name", func(t *testing.T) {
+		t.Parallel()
+
+		err := MigrationConfig{PrimaryDSN: "dsn", DatabaseName: "no-dashes", MigrationsPath: "/tmp"}.validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidDatabaseName)
+	})
+
+	t.Run("empty path and component", func(t *testing.T) {
+		t.Parallel()
+
+		err := MigrationConfig{PrimaryDSN: "dsn", DatabaseName: "ledger"}.validate()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidConfig)
+	})
+
+	t.Run("valid with path", func(t *testing.T) {
+		t.Parallel()
+
+		err := MigrationConfig{PrimaryDSN: "dsn", DatabaseName: "ledger", MigrationsPath: "/tmp"}.validate()
+		assert.NoError(t, err)
+	})
+
+	t.Run("valid with component", func(t *testing.T) {
+		t.Parallel()
+
+		err := MigrationConfig{PrimaryDSN: "dsn", DatabaseName: "ledger", Component: "ledger"}.validate()
+		assert.NoError(t, err)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// NewMigrator
+// ---------------------------------------------------------------------------
+
+func TestNewMigratorValid(t *testing.T) {
+	t.Parallel()
+
+	m, err := NewMigrator(MigrationConfig{
+		PrimaryDSN:     "dsn",
+		DatabaseName:   "ledger",
+		MigrationsPath: "/migrations",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, m)
+}
+
+func TestNewMigratorInvalid(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewMigrator(MigrationConfig{})
+	require.Error(t, err)
+}
+
+// ---------------------------------------------------------------------------
+// Migrator nil receiver and nil context
+// ---------------------------------------------------------------------------
+
+func TestMigratorNilReceiver(t *testing.T) {
+	t.Parallel()
+
+	var m *Migrator
+	err := m.Up(context.Background())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNilClient)
+}
+
+func TestMigratorNilContext(t *testing.T) {
+	m, err := NewMigrator(MigrationConfig{
+		PrimaryDSN:     "dsn",
+		DatabaseName:   "ledger",
+		MigrationsPath: "/migrations",
+	})
+	require.NoError(t, err)
+
+	err = m.Up(nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNilContext)
+}
+
+func TestMigratorUpDbOpenError(t *testing.T) {
+	withPatchedDependencies(
+		t,
+		func(_, _ string) (*sql.DB, error) {
+			return nil, errors.New("parse postgres://alice:supersecret@db:5432/main failed")
+		},
+		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return nil, nil },
+		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+	)
+
+	m, err := NewMigrator(MigrationConfig{
+		PrimaryDSN:     "postgres://alice:supersecret@db:5432/main?sslmode=disable",
+		DatabaseName:   "main",
+		MigrationsPath: "/migrations",
+	})
+	require.NoError(t, err)
+
+	err = m.Up(context.Background())
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "supersecret")
+}
+
+func TestMigratorUpResolvesPathFromComponent(t *testing.T) {
+	var capturedPath string
+
+	withPatchedDependencies(
+		t,
+		func(_, _ string) (*sql.DB, error) { return testDB(t), nil },
+		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return &fakeResolver{}, nil },
+		func(_ *sql.DB, path, _ string, _ bool, _ log.Logger) error {
+			capturedPath = path
+			return nil
+		},
+	)
+
+	m, err := NewMigrator(MigrationConfig{
+		PrimaryDSN:   "postgres://localhost/db",
+		DatabaseName:  "ledger",
+		Component:     "ledger",
+	})
+	require.NoError(t, err)
+
+	err = m.Up(context.Background())
+	require.NoError(t, err)
+	assert.Contains(t, capturedPath, "components")
+	assert.Contains(t, capturedPath, "ledger")
+	assert.Contains(t, capturedPath, "migrations")
+}
+
+func TestMigratorUpMigrationError(t *testing.T) {
+	withPatchedDependencies(
+		t,
+		func(_, _ string) (*sql.DB, error) { return testDB(t), nil },
+		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return &fakeResolver{}, nil },
+		func(_ *sql.DB, _, _ string, _ bool, _ log.Logger) error {
+			return errors.New("migration failed")
+		},
+	)
+
+	m, err := NewMigrator(MigrationConfig{
+		PrimaryDSN:     "postgres://localhost/db",
+		DatabaseName:   "ledger",
+		MigrationsPath: "/migrations",
+	})
+	require.NoError(t, err)
+
+	err = m.Up(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "migration failed")
+}
+
+// ---------------------------------------------------------------------------
+// sanitizeSensitiveError
+// ---------------------------------------------------------------------------
+
+func TestSanitizeSensitiveError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil error", func(t *testing.T) {
+		t.Parallel()
+
+		result := sanitizeSensitiveError(nil)
+		assert.Empty(t, result)
+	})
+
+	t.Run("masks user:password in DSN", func(t *testing.T) {
+		t.Parallel()
+
+		err := errors.New("failed to connect to postgres://alice:supersecret@db.internal:5432/main")
+		result := sanitizeSensitiveError(err)
+		assert.NotContains(t, result, "alice")
+		assert.NotContains(t, result, "supersecret")
+		assert.Contains(t, result, "://***@")
+	})
+
+	t.Run("masks password= param", func(t *testing.T) {
+		t.Parallel()
+
+		err := errors.New("connection error password=mysecret host=db")
+		result := sanitizeSensitiveError(err)
+		assert.NotContains(t, result, "mysecret")
+		assert.Contains(t, result, "password=***")
+	})
+
+	t.Run("error without credentials passes through", func(t *testing.T) {
+		t.Parallel()
+
+		err := errors.New("timeout connecting to database")
+		result := sanitizeSensitiveError(err)
+		assert.Equal(t, "timeout connecting to database", result)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// sanitizePath
+// ---------------------------------------------------------------------------
+
+func TestSanitizePath(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid path", func(t *testing.T) {
+		t.Parallel()
+
+		result, err := sanitizePath("components/ledger/migrations")
+		require.NoError(t, err)
+		assert.NotEmpty(t, result)
+	})
+
+	t.Run("path with traversal rejected", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := sanitizePath("../../etc/passwd")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid migrations path")
+	})
+
+	t.Run("absolute path accepted", func(t *testing.T) {
+		t.Parallel()
+
+		result, err := sanitizePath("/var/migrations")
+		require.NoError(t, err)
+		assert.Equal(t, "/var/migrations", result)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// validateDBName
+// ---------------------------------------------------------------------------
+
+func TestValidateDBName(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid names", func(t *testing.T) {
+		t.Parallel()
+
+		for _, name := range []string{"postgres", "ledger", "_private", "db_123", "A"} {
+			assert.NoError(t, validateDBName(name), "expected %q to be valid", name)
+		}
+	})
+
+	t.Run("invalid names", func(t *testing.T) {
+		t.Parallel()
+
+		for _, name := range []string{"", "no-dashes", "123start", "has space", "a;drop", "has.dot"} {
+			err := validateDBName(name)
+			require.Error(t, err, "expected %q to be invalid", name)
+			assert.ErrorIs(t, err, ErrInvalidDatabaseName)
+		}
+	})
+
+	t.Run("too long name", func(t *testing.T) {
+		t.Parallel()
+
+		longName := strings.Repeat("a", 64)
+		err := validateDBName(longName)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidDatabaseName)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// resolveMigrationsPath
+// ---------------------------------------------------------------------------
+
+func TestResolveMigrationsPath(t *testing.T) {
+	t.Parallel()
+
+	t.Run("explicit path used", func(t *testing.T) {
+		t.Parallel()
+
+		result, err := resolveMigrationsPath("components/ledger/migrations", "ignored")
+		require.NoError(t, err)
+		assert.NotEmpty(t, result)
+	})
+
+	t.Run("component-based path", func(t *testing.T) {
+		t.Parallel()
+
+		result, err := resolveMigrationsPath("", "ledger")
+		require.NoError(t, err)
+		assert.Contains(t, result, "components")
+		assert.Contains(t, result, "ledger")
+		assert.Contains(t, result, "migrations")
+	})
+
+	t.Run("invalid component (traversal stripped)", func(t *testing.T) {
+		t.Parallel()
+
+		// filepath.Base("../../etc") → "etc", which is valid, so no error.
+		result, err := resolveMigrationsPath("", "../../etc")
+		require.NoError(t, err)
+		assert.Contains(t, result, "etc")
+	})
+
+	t.Run("empty component and empty path", func(t *testing.T) {
+		t.Parallel()
+
+		// filepath.Base("") → ".", which triggers the guard.
+		_, err := resolveMigrationsPath("", "")
+		require.Error(t, err)
+	})
+
+	t.Run("dot-only component", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := resolveMigrationsPath("", ".")
+		require.Error(t, err)
+	})
+
+	t.Run("path with traversal rejected", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := resolveMigrationsPath("../../etc/passwd", "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid migrations path")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Close without resolver falls back to closing primary/replica directly
+// ---------------------------------------------------------------------------
+
+func TestCloseNoResolverClosesPrimaryAndReplica(t *testing.T) {
+	client, err := New(validConfig())
+	require.NoError(t, err)
+
+	primary := testDB(t)
+	replica := testDB(t)
+
+	client.primary = primary
+	client.replica = replica
+
+	err = client.Close()
+	assert.NoError(t, err)
+
+	// After Close(), primary and replica should be nil.
+	assert.Nil(t, client.primary)
+	assert.Nil(t, client.replica)
+}
+
+func TestCloseNoResolverOnlyPrimary(t *testing.T) {
+	client, err := New(validConfig())
+	require.NoError(t, err)
+
+	primary := testDB(t)
+	client.primary = primary
+
+	err = client.Close()
+	assert.NoError(t, err)
+	assert.Nil(t, client.primary)
+}
+
+func TestCloseNoResolverOnlyReplica(t *testing.T) {
+	client, err := New(validConfig())
+	require.NoError(t, err)
+
+	replica := testDB(t)
+	client.replica = replica
+
+	err = client.Close()
+	assert.NoError(t, err)
+	assert.Nil(t, client.replica)
+}
+
+// ---------------------------------------------------------------------------
+// connectLocked old resolver close error path
+// ---------------------------------------------------------------------------
+
+func TestConnectLockedOldResolverCloseError(t *testing.T) {
+	oldResolver := &fakeResolver{closeErr: errors.New("old close failed")}
+	newResolver := &fakeResolver{}
+
+	withPatchedDependencies(
+		t,
+		func(string, string) (*sql.DB, error) { return testDB(t), nil },
+		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return newResolver, nil },
+		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+	)
+
+	client, err := New(validConfig())
+	require.NoError(t, err)
+	client.resolver = oldResolver
+
+	// Should succeed — old resolver close error is logged but not returned.
+	err = client.Connect(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), oldResolver.closeCall.Load())
+
+	assert.NoError(t, client.Close())
+}
+
+// ---------------------------------------------------------------------------
+// Resolver lazy connect error path
+// ---------------------------------------------------------------------------
+
+func TestResolverLazyConnectError(t *testing.T) {
+	withPatchedDependencies(
+		t,
+		func(string, string) (*sql.DB, error) {
+			return nil, errors.New("cannot connect")
+		},
+		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return &fakeResolver{}, nil },
+		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+	)
+
+	client, err := New(validConfig())
+	require.NoError(t, err)
+
+	_, err = client.Resolver(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to open database")
+}
+
+// ---------------------------------------------------------------------------
+// Resolver double-checked locking — resolver set between RLock and Lock
+// ---------------------------------------------------------------------------
+
+func TestResolverDoubleCheckReturnsExisting(t *testing.T) {
+	resolver := &fakeResolver{}
+
+	withPatchedDependencies(
+		t,
+		func(string, string) (*sql.DB, error) { return testDB(t), nil },
+		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return resolver, nil },
+		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+	)
+
+	client, err := New(validConfig())
+	require.NoError(t, err)
+
+	// First call connects lazily
+	r1, err := client.Resolver(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, resolver, r1)
+
+	// Set resolver directly to simulate race (already set when write lock acquired)
+	newResolver := &fakeResolver{}
+	client.mu.Lock()
+	client.resolver = newResolver
+	client.mu.Unlock()
+
+	r2, err := client.Resolver(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, newResolver, r2)
+}
+
+// ---------------------------------------------------------------------------
+// Primary returns db when connected
+// ---------------------------------------------------------------------------
+
+func TestPrimaryReturnsDBWhenConnected(t *testing.T) {
+	withPatchedDependencies(
+		t,
+		func(string, string) (*sql.DB, error) { return testDB(t), nil },
+		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return &fakeResolver{}, nil },
+		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+	)
+
+	client, err := New(validConfig())
+	require.NoError(t, err)
+
+	err = client.Connect(context.Background())
+	require.NoError(t, err)
+
+	db, err := client.Primary()
+	require.NoError(t, err)
+	assert.NotNil(t, db)
+
+	assert.NoError(t, client.Close())
+}
+
+// ---------------------------------------------------------------------------
+// Migrator Up resolveMigrationsPath error
+// ---------------------------------------------------------------------------
+
+func TestMigratorUpResolveMigrationsPathError(t *testing.T) {
+	withPatchedDependencies(
+		t,
+		func(_, _ string) (*sql.DB, error) { return testDB(t), nil },
+		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return &fakeResolver{}, nil },
+		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+	)
+
+	m, err := NewMigrator(MigrationConfig{
+		PrimaryDSN:     "postgres://localhost/db",
+		DatabaseName:   "ledger",
+		MigrationsPath: "../../etc/passwd",
+	})
+	require.NoError(t, err)
+
+	err = m.Up(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid migrations path")
+}
+
+// ---------------------------------------------------------------------------
+// logf - nil logger doesn't panic
+// ---------------------------------------------------------------------------
+
+func TestLogfNilLogger(t *testing.T) {
+	t.Parallel()
+
+	assert.NotPanics(t, func() {
+		logf(nil, log.LevelInfo, "should not panic %s", "here")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// closeDB
+// ---------------------------------------------------------------------------
+
+func TestCloseDBNil(t *testing.T) {
+	t.Parallel()
+
+	err := closeDB(nil)
+	assert.NoError(t, err)
+}
+
+// ---------------------------------------------------------------------------
+// logger() helper on client
+// ---------------------------------------------------------------------------
+
+func TestClientLoggerHelper(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil client returns nop", func(t *testing.T) {
+		t.Parallel()
+
+		var c *Client
+		l := c.logger()
+		assert.NotNil(t, l)
+	})
+
+	t.Run("client with nil logger returns nop", func(t *testing.T) {
+		t.Parallel()
+
+		c := &Client{}
+		l := c.logger()
+		assert.NotNil(t, l)
+	})
+
+	t.Run("client with logger returns it", func(t *testing.T) {
+		t.Parallel()
+
+		logger := log.NewNop()
+		c := &Client{cfg: Config{Logger: logger}}
+		l := c.logger()
+		assert.Equal(t, logger, l)
+	})
 }
