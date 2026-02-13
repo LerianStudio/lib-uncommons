@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	stdlog "log"
 	"sync"
 
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry/metrics"
@@ -103,6 +104,7 @@ func (pm *PanicMetrics) RecordPanicRecovered(ctx context.Context, component, gor
 
 	counter, err := pm.factory.Counter(panicRecoveredMetric)
 	if err != nil {
+		stdlog.Printf("[WARN] runtime: failed to create panic metric counter: %v", err)
 		return
 	}
 
@@ -113,6 +115,7 @@ func (pm *PanicMetrics) RecordPanicRecovered(ctx context.Context, component, gor
 		}).
 		AddOne(ctx)
 	if err != nil {
+		stdlog.Printf("[WARN] runtime: failed to record panic metric: %v", err)
 		return
 	}
 }
