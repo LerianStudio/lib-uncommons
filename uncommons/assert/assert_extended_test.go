@@ -20,7 +20,8 @@ import (
 
 func newTestMetricsFactory() *metrics.MetricsFactory {
 	meter := noop.NewMeterProvider().Meter("test")
-	return metrics.NewMetricsFactory(meter, &libLog.NoneLogger{})
+	factory, _ := metrics.NewMetricsFactory(meter, &libLog.NopLogger{})
+	return factory
 }
 
 // --- AssertionError Tests ---
