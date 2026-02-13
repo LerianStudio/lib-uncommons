@@ -2,7 +2,6 @@ package log
 
 import (
 	"fmt"
-	"log"
 	"strings"
 )
 
@@ -60,9 +59,30 @@ const (
 	DebugLevel
 )
 
+func (level LogLevel) String() string {
+	switch level {
+	case PanicLevel:
+		return "panic"
+	case FatalLevel:
+		return "fatal"
+	case ErrorLevel:
+		return "error"
+	case WarnLevel:
+		return "warn"
+	case InfoLevel:
+		return "info"
+	case DebugLevel:
+		return "debug"
+	default:
+		return "unknown"
+	}
+}
+
 // ParseLevel takes a string level and returns a LogLevel constant.
 func ParseLevel(lvl string) (LogLevel, error) {
 	switch strings.ToLower(lvl) {
+	case "panic":
+		return PanicLevel, nil
 	case "fatal":
 		return FatalLevel, nil
 	case "error":
@@ -79,144 +99,3 @@ func ParseLevel(lvl string) (LogLevel, error) {
 
 	return l, fmt.Errorf("not a valid LogLevel: %q", lvl)
 }
-
-// GoLogger is the Go built-in (log) implementation of Logger interface.
-type GoLogger struct {
-	fields                 []any
-	Level                  LogLevel
-	defaultMessageTemplate string
-}
-
-// IsLevelEnabled checks if the given level is enabled.
-func (l *GoLogger) IsLevelEnabled(level LogLevel) bool {
-	return l.Level >= level
-}
-
-// Info implements Info Logger interface function.
-func (l *GoLogger) Info(args ...any) {
-	if l.IsLevelEnabled(InfoLevel) {
-		log.Print(args...)
-	}
-}
-
-// Infof implements Infof Logger interface function.
-func (l *GoLogger) Infof(format string, args ...any) {
-	if l.IsLevelEnabled(InfoLevel) {
-		log.Printf(format, args...)
-	}
-}
-
-// Infoln implements Infoln Logger interface function.
-func (l *GoLogger) Infoln(args ...any) {
-	if l.IsLevelEnabled(InfoLevel) {
-		log.Println(args...)
-	}
-}
-
-// Error implements Error Logger interface function.
-func (l *GoLogger) Error(args ...any) {
-	if l.IsLevelEnabled(ErrorLevel) {
-		log.Print(args...)
-	}
-}
-
-// Errorf implements Errorf Logger interface function.
-func (l *GoLogger) Errorf(format string, args ...any) {
-	if l.IsLevelEnabled(ErrorLevel) {
-		log.Printf(format, args...)
-	}
-}
-
-// Errorln implements Errorln Logger interface function.
-func (l *GoLogger) Errorln(args ...any) {
-	if l.IsLevelEnabled(ErrorLevel) {
-		log.Println(args...)
-	}
-}
-
-// Warn implements Warn Logger interface function.
-func (l *GoLogger) Warn(args ...any) {
-	if l.IsLevelEnabled(WarnLevel) {
-		log.Print(args...)
-	}
-}
-
-// Warnf implements Warnf Logger interface function.
-func (l *GoLogger) Warnf(format string, args ...any) {
-	if l.IsLevelEnabled(WarnLevel) {
-		log.Printf(format, args...)
-	}
-}
-
-// Warnln implements Warnln Logger interface function.
-func (l *GoLogger) Warnln(args ...any) {
-	if l.IsLevelEnabled(WarnLevel) {
-		log.Println(args...)
-	}
-}
-
-// Debug implements Debug Logger interface function.
-func (l *GoLogger) Debug(args ...any) {
-	if l.IsLevelEnabled(DebugLevel) {
-		log.Print(args...)
-	}
-}
-
-// Debugf implements Debugf Logger interface function.
-func (l *GoLogger) Debugf(format string, args ...any) {
-	if l.IsLevelEnabled(DebugLevel) {
-		log.Printf(format, args...)
-	}
-}
-
-// Debugln implements Debugln Logger interface function.
-func (l *GoLogger) Debugln(args ...any) {
-	if l.IsLevelEnabled(DebugLevel) {
-		log.Println(args...)
-	}
-}
-
-// Fatal implements Fatal Logger interface function.
-func (l *GoLogger) Fatal(args ...any) {
-	if l.IsLevelEnabled(FatalLevel) {
-		log.Fatal(args...)
-	}
-}
-
-// Fatalf implements Fatalf Logger interface function.
-func (l *GoLogger) Fatalf(format string, args ...any) {
-	if l.IsLevelEnabled(FatalLevel) {
-		log.Fatalf(format, args...)
-	}
-}
-
-// Fatalln implements Fatalln Logger interface function.
-func (l *GoLogger) Fatalln(args ...any) {
-	if l.IsLevelEnabled(FatalLevel) {
-		log.Fatalln(args...)
-	}
-}
-
-// WithFields implements WithFields Logger interface function
-//
-//nolint:ireturn
-func (l *GoLogger) WithFields(fields ...any) Logger {
-	return &GoLogger{
-		Level:                  l.Level,
-		fields:                 fields,
-		defaultMessageTemplate: l.defaultMessageTemplate,
-	}
-}
-
-func (l *GoLogger) WithDefaultMessageTemplate(message string) Logger {
-	return &GoLogger{
-		Level:                  l.Level,
-		fields:                 l.fields,
-		defaultMessageTemplate: message,
-	}
-}
-
-// Sync implements Sync Logger interface function.
-//
-//nolint:ireturn
-func (l *GoLogger) Sync() error { return nil }
