@@ -29,11 +29,14 @@ const (
 type MapClaims = map[string]any
 
 // Token represents a parsed JWT with its header, claims, and validation state.
-// Valid is true only when the token signature has been verified successfully.
+// SignatureValid is true only when the token's cryptographic signature has been
+// verified successfully. It does NOT indicate that time-based claims (exp, nbf,
+// iat) have been validated. Use ParseAndValidate for full validation, or call
+// Token.ValidateTimeClaims after Parse.
 type Token struct {
-	Claims MapClaims
-	Valid  bool
-	Header map[string]any
+	Claims         MapClaims
+	SignatureValid bool
+	Header         map[string]any
 }
 
 var (
@@ -58,10 +61,10 @@ var (
 // on success, or ErrInvalidToken, ErrUnsupportedAlgorithm, or ErrSignatureInvalid
 // on failure.
 //
-// Note: Token.Valid indicates only that the cryptographic signature has been
-// verified successfully. It does NOT validate time-based claims such as exp
-// (expiration) or nbf (not-before). Callers MUST validate those claims
-// separately after parsing.
+// Note: Token.SignatureValid indicates only that the cryptographic signature
+// has been verified successfully. It does NOT validate time-based claims such
+// as exp (expiration) or nbf (not-before). Use ParseAndValidate for a single-
+// step parse-and-validate flow, or call Token.ValidateTimeClaims after Parse.
 func Parse(tokenString string, secret []byte, allowedAlgorithms []string) (*Token, error) {
 	const maxTokenLength = 8192 // 8KB is generous for any legitimate JWT
 
@@ -93,10 +96,27 @@ func Parse(tokenString string, secret []byte, allowedAlgorithms []string) (*Toke
 	}
 
 	return &Token{
-		Claims: claims,
-		Valid:  true,
-		Header: header,
+		Claims:         claims,
+		SignatureValid: true,
+		Header:         header,
 	}, nil
+}
+
+// ParseAndValidate parses the JWT, verifies the cryptographic signature,
+// and validates time-based claims (exp, nbf, iat). This is the recommended
+// single-step validation for most use cases. It returns the token only if
+// both the signature and time claims are valid.
+func ParseAndValidate(tokenString string, secret []byte, allowedAlgorithms []string) (*Token, error) {
+	token, err := Parse(tokenString, secret, allowedAlgorithms)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := token.ValidateTimeClaims(); err != nil {
+		return nil, err
+	}
+
+	return token, nil
 }
 
 // parseHeader decodes and validates the JWT header part. It base64url-decodes
@@ -236,6 +256,18 @@ func computeHMAC(data, secret []byte, hashFunc func() hash.Hash) ([]byte, error)
 	}
 
 	return mac.Sum(nil), nil
+}
+
+// ValidateTimeClaims checks the standard JWT time-based claims (exp, nbf, iat)
+// on this token against the current UTC time.
+func (t Token) ValidateTimeClaims() error {
+	return ValidateTimeClaimsAt(t.Claims, time.Now().UTC())
+}
+
+// ValidateTimeClaimsAt checks the standard JWT time-based claims on this token
+// against the provided time.
+func (t Token) ValidateTimeClaimsAt(now time.Time) error {
+	return ValidateTimeClaimsAt(t.Claims, now)
 }
 
 // ValidateTimeClaimsAt checks the standard JWT time-based claims against the provided time.

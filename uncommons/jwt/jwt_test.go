@@ -28,7 +28,7 @@ func TestSign_Parse_RoundTrip_HS256(t *testing.T) {
 
 	token, err := Parse(tokenStr, secret, allAlgorithms)
 	require.NoError(t, err)
-	assert.True(t, token.Valid)
+	assert.True(t, token.SignatureValid)
 	assert.Equal(t, "user-1", token.Claims["sub"])
 	assert.Equal(t, "abc", token.Claims["tenant_id"])
 	assert.Equal(t, "HS256", token.Header["alg"])
@@ -45,7 +45,7 @@ func TestSign_Parse_RoundTrip_HS384(t *testing.T) {
 
 	token, err := Parse(tokenStr, secret, allAlgorithms)
 	require.NoError(t, err)
-	assert.True(t, token.Valid)
+	assert.True(t, token.SignatureValid)
 	assert.Equal(t, "user-2", token.Claims["sub"])
 	assert.Equal(t, "HS384", token.Header["alg"])
 }
@@ -61,7 +61,7 @@ func TestSign_Parse_RoundTrip_HS512(t *testing.T) {
 
 	token, err := Parse(tokenStr, secret, allAlgorithms)
 	require.NoError(t, err)
-	assert.True(t, token.Valid)
+	assert.True(t, token.SignatureValid)
 	assert.Equal(t, "user-3", token.Claims["sub"])
 	assert.Equal(t, "HS512", token.Header["alg"])
 }
@@ -163,7 +163,7 @@ func TestParse_ClaimsCorrectlyParsed(t *testing.T) {
 
 	token, err := Parse(tokenStr, secret, allAlgorithms)
 	require.NoError(t, err)
-	assert.True(t, token.Valid)
+	assert.True(t, token.SignatureValid)
 	assert.Equal(t, "550e8400-e29b-41d4-a716-446655440000", token.Claims["tenant_id"])
 	assert.Equal(t, "user-42", token.Claims["sub"])
 	assert.InEpsilon(t, float64(9999999999), token.Claims["exp"], 0.001)
