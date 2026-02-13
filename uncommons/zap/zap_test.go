@@ -125,13 +125,71 @@ func TestNilLoggerSafety(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	t.Run("WithFields returns self with nil Logger", func(t *testing.T) {
+	t.Run("WithFields returns usable zero-value logger with nil Logger", func(t *testing.T) {
 		result := nilLogger.WithFields("key", "value")
-		assert.Same(t, nilLogger, result)
+		assert.NotNil(t, result)
+
+		zapResult, ok := result.(*ZapWithTraceLogger)
+		assert.True(t, ok)
+		assert.NotNil(t, zapResult)
+		assert.Nil(t, zapResult.Logger)
 	})
 
 	t.Run("WithDefaultMessageTemplate does not panic with nil Logger", func(t *testing.T) {
 		assert.NotPanics(t, func() { nilLogger.WithDefaultMessageTemplate("template") })
+	})
+}
+
+func TestNilPointerZapLoggerSafety(t *testing.T) {
+	var nilLogger *ZapWithTraceLogger
+
+	t.Run("log methods on nil receiver do not panic", func(t *testing.T) {
+		methods := []struct {
+			name string
+			call func()
+		}{
+			{name: "Info", call: func() { nilLogger.Info("test") }},
+			{name: "Infof", call: func() { nilLogger.Infof("test %s", "val") }},
+			{name: "Infoln", call: func() { nilLogger.Infoln("test") }},
+			{name: "Error", call: func() { nilLogger.Error("test") }},
+			{name: "Errorf", call: func() { nilLogger.Errorf("test %s", "val") }},
+			{name: "Errorln", call: func() { nilLogger.Errorln("test") }},
+			{name: "Warn", call: func() { nilLogger.Warn("test") }},
+			{name: "Warnf", call: func() { nilLogger.Warnf("test %s", "val") }},
+			{name: "Warnln", call: func() { nilLogger.Warnln("test") }},
+			{name: "Debug", call: func() { nilLogger.Debug("test") }},
+			{name: "Debugf", call: func() { nilLogger.Debugf("test %s", "val") }},
+			{name: "Debugln", call: func() { nilLogger.Debugln("test") }},
+			{name: "Fatal", call: func() { nilLogger.Fatal("test") }},
+			{name: "Fatalf", call: func() { nilLogger.Fatalf("test %s", "val") }},
+			{name: "Fatalln", call: func() { nilLogger.Fatalln("test") }},
+		}
+
+		for _, tt := range methods {
+			t.Run(tt.name, func(t *testing.T) {
+				assert.NotPanics(t, tt.call)
+			})
+		}
+	})
+
+	t.Run("builder methods on nil receiver return usable zero-value logger", func(t *testing.T) {
+		assert.NotPanics(t, func() {
+			nilWithFields := nilLogger.WithFields("key", "value")
+
+			castWithFields, ok := nilWithFields.(*ZapWithTraceLogger)
+			assert.True(t, ok)
+			assert.NotNil(t, castWithFields)
+			assert.Nil(t, castWithFields.Logger) // zero-value: Logger field is nil
+
+			nilWithTemplate := nilLogger.WithDefaultMessageTemplate("template")
+
+			castWithTemplate, ok := nilWithTemplate.(*ZapWithTraceLogger)
+			assert.True(t, ok)
+			assert.NotNil(t, castWithTemplate)
+			assert.Nil(t, castWithTemplate.Logger) // zero-value: Logger field is nil
+		})
+
+		assert.NotPanics(t, func() { assert.Nil(t, nilLogger.Sync()) })
 	})
 }
 

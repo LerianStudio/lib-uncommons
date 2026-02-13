@@ -17,6 +17,10 @@ type ZapWithTraceLogger struct {
 // When no template is set, arguments are passed through unchanged to avoid prepending an empty string.
 // All string arguments are sanitized to prevent log injection (CWE-117).
 func (l *ZapWithTraceLogger) logWithHydration(logFunc func(...any), args ...any) {
+	if l == nil {
+		return
+	}
+
 	safe := sanitizeArgs(args)
 	if l.defaultMessageTemplate != "" {
 		logFunc(hydrateArgs(l.defaultMessageTemplate, safe)...)
@@ -29,6 +33,10 @@ func (l *ZapWithTraceLogger) logWithHydration(logFunc func(...any), args ...any)
 // When no template is set, the format string is passed through unchanged.
 // The format string is sanitized to prevent log injection (CWE-117).
 func (l *ZapWithTraceLogger) logfWithHydration(logFunc func(string, ...any), format string, args ...any) {
+	if l == nil {
+		return
+	}
+
 	safeFormat := sanitizeFormat(format)
 	safe := sanitizeArgs(args)
 
@@ -41,7 +49,7 @@ func (l *ZapWithTraceLogger) logfWithHydration(logFunc func(string, ...any), for
 
 // Info implements Info Logger interface function.
 func (l *ZapWithTraceLogger) Info(args ...any) {
-	if l.Logger == nil {
+	if l == nil || l.Logger == nil {
 		return
 	}
 
@@ -50,7 +58,7 @@ func (l *ZapWithTraceLogger) Info(args ...any) {
 
 // Infof implements Infof Logger interface function.
 func (l *ZapWithTraceLogger) Infof(format string, args ...any) {
-	if l.Logger == nil {
+	if l == nil || l.Logger == nil {
 		return
 	}
 
@@ -59,7 +67,7 @@ func (l *ZapWithTraceLogger) Infof(format string, args ...any) {
 
 // Infoln implements Infoln Logger interface function.
 func (l *ZapWithTraceLogger) Infoln(args ...any) {
-	if l.Logger == nil {
+	if l == nil || l.Logger == nil {
 		return
 	}
 
@@ -68,7 +76,7 @@ func (l *ZapWithTraceLogger) Infoln(args ...any) {
 
 // Error implements Error Logger interface function.
 func (l *ZapWithTraceLogger) Error(args ...any) {
-	if l.Logger == nil {
+	if l == nil || l.Logger == nil {
 		return
 	}
 
@@ -77,7 +85,7 @@ func (l *ZapWithTraceLogger) Error(args ...any) {
 
 // Errorf implements Errorf Logger interface function.
 func (l *ZapWithTraceLogger) Errorf(format string, args ...any) {
-	if l.Logger == nil {
+	if l == nil || l.Logger == nil {
 		return
 	}
 
@@ -86,7 +94,7 @@ func (l *ZapWithTraceLogger) Errorf(format string, args ...any) {
 
 // Errorln implements Errorln Logger interface function.
 func (l *ZapWithTraceLogger) Errorln(args ...any) {
-	if l.Logger == nil {
+	if l == nil || l.Logger == nil {
 		return
 	}
 
@@ -95,7 +103,7 @@ func (l *ZapWithTraceLogger) Errorln(args ...any) {
 
 // Warn implements Warn Logger interface function.
 func (l *ZapWithTraceLogger) Warn(args ...any) {
-	if l.Logger == nil {
+	if l == nil || l.Logger == nil {
 		return
 	}
 
@@ -104,7 +112,7 @@ func (l *ZapWithTraceLogger) Warn(args ...any) {
 
 // Warnf implements Warnf Logger interface function.
 func (l *ZapWithTraceLogger) Warnf(format string, args ...any) {
-	if l.Logger == nil {
+	if l == nil || l.Logger == nil {
 		return
 	}
 
@@ -113,7 +121,7 @@ func (l *ZapWithTraceLogger) Warnf(format string, args ...any) {
 
 // Warnln implements Warnln Logger interface function.
 func (l *ZapWithTraceLogger) Warnln(args ...any) {
-	if l.Logger == nil {
+	if l == nil || l.Logger == nil {
 		return
 	}
 
@@ -122,7 +130,7 @@ func (l *ZapWithTraceLogger) Warnln(args ...any) {
 
 // Debug implements Debug Logger interface function.
 func (l *ZapWithTraceLogger) Debug(args ...any) {
-	if l.Logger == nil {
+	if l == nil || l.Logger == nil {
 		return
 	}
 
@@ -131,7 +139,7 @@ func (l *ZapWithTraceLogger) Debug(args ...any) {
 
 // Debugf implements Debugf Logger interface function.
 func (l *ZapWithTraceLogger) Debugf(format string, args ...any) {
-	if l.Logger == nil {
+	if l == nil || l.Logger == nil {
 		return
 	}
 
@@ -140,7 +148,7 @@ func (l *ZapWithTraceLogger) Debugf(format string, args ...any) {
 
 // Debugln implements Debugln Logger interface function.
 func (l *ZapWithTraceLogger) Debugln(args ...any) {
-	if l.Logger == nil {
+	if l == nil || l.Logger == nil {
 		return
 	}
 
@@ -149,7 +157,7 @@ func (l *ZapWithTraceLogger) Debugln(args ...any) {
 
 // Fatal implements Fatal Logger interface function.
 func (l *ZapWithTraceLogger) Fatal(args ...any) {
-	if l.Logger == nil {
+	if l == nil || l.Logger == nil {
 		return
 	}
 
@@ -158,7 +166,7 @@ func (l *ZapWithTraceLogger) Fatal(args ...any) {
 
 // Fatalf implements Fatalf Logger interface function.
 func (l *ZapWithTraceLogger) Fatalf(format string, args ...any) {
-	if l.Logger == nil {
+	if l == nil || l.Logger == nil {
 		return
 	}
 
@@ -167,7 +175,7 @@ func (l *ZapWithTraceLogger) Fatalf(format string, args ...any) {
 
 // Fatalln implements Fatalln Logger interface function.
 func (l *ZapWithTraceLogger) Fatalln(args ...any) {
-	if l.Logger == nil {
+	if l == nil || l.Logger == nil {
 		return
 	}
 
@@ -178,8 +186,8 @@ func (l *ZapWithTraceLogger) Fatalln(args ...any) {
 //
 //nolint:ireturn
 func (l *ZapWithTraceLogger) WithFields(fields ...any) log.Logger {
-	if l.Logger == nil {
-		return l
+	if l == nil || l.Logger == nil {
+		return &ZapWithTraceLogger{}
 	}
 
 	return &ZapWithTraceLogger{
@@ -194,7 +202,7 @@ func (l *ZapWithTraceLogger) WithFields(fields ...any) log.Logger {
 // closing the logger provider used by open telemetry. Applications should take care to call
 // Sync before exiting.
 func (l *ZapWithTraceLogger) Sync() error {
-	if l.Logger == nil {
+	if l == nil || l.Logger == nil {
 		return nil
 	}
 
@@ -206,6 +214,10 @@ func (l *ZapWithTraceLogger) Sync() error {
 //
 //nolint:ireturn
 func (l *ZapWithTraceLogger) WithDefaultMessageTemplate(message string) log.Logger {
+	if l == nil || l.Logger == nil {
+		return &ZapWithTraceLogger{}
+	}
+
 	return &ZapWithTraceLogger{
 		Logger:                 l.Logger,
 		defaultMessageTemplate: message,
