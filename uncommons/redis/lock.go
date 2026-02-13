@@ -263,7 +263,7 @@ func (dl *DistributedLock) Unlock(ctx context.Context, mutex *redsync.Mutex) err
 	logger := libCommons.NewLoggerFromContext(ctx)
 
 	if mutex == nil {
-		return fmt.Errorf("mutex is nil")
+		return errors.New("mutex is nil")
 	}
 
 	ok, err := mutex.UnlockContext(ctx)
@@ -274,7 +274,7 @@ func (dl *DistributedLock) Unlock(ctx context.Context, mutex *redsync.Mutex) err
 
 	if !ok {
 		logger.Warnf("Mutex was not locked or already expired")
-		return fmt.Errorf("mutex was not locked")
+		return errors.New("mutex was not locked")
 	}
 
 	return nil

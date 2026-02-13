@@ -45,7 +45,7 @@ func (m *manager) GetOrCreate(serviceName string, config Config) CircuitBreaker 
 
 	// Create new circuit breaker with configuration
 	settings := gobreaker.Settings{
-		Name:        fmt.Sprintf("service-%s", serviceName),
+		Name:        "service-" + serviceName,
 		MaxRequests: config.MaxRequests,
 		Interval:    config.Interval,
 		Timeout:     config.Timeout,
@@ -164,7 +164,7 @@ func (m *manager) Reset(serviceName string) {
 
 		// Recreate circuit breaker with same configuration
 		settings := gobreaker.Settings{
-			Name:        fmt.Sprintf("service-%s", serviceName),
+			Name:        "service-" + serviceName,
 			MaxRequests: config.MaxRequests,
 			Interval:    config.Interval,
 			Timeout:     config.Timeout,
