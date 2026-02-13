@@ -1,5 +1,3 @@
-// Package jwt provides minimal HMAC-based JWT signing and verification.
-// It supports HS256, HS384, and HS512 algorithms using shared secrets.
 package jwt
 
 import (

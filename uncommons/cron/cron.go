@@ -1,15 +1,15 @@
-// Package cron provides a minimal cron expression parser and scheduler.
-// It supports standard 5-field expressions (minute, hour, day-of-month, month, day-of-week)
-// with wildcards, ranges, steps, and comma-separated lists.
 package cron
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/LerianStudio/lib-uncommons/uncommons/assert"
 )
 
 // ErrInvalidExpression is returned when a cron expression cannot be parsed
@@ -19,6 +19,9 @@ var ErrInvalidExpression = errors.New("invalid cron expression")
 // ErrNoMatch is returned when Next exhausts its iteration limit without
 // finding a time that satisfies all cron fields.
 var ErrNoMatch = errors.New("cron: no matching time found within iteration limit")
+
+// ErrNilSchedule is returned when Next is called on a nil schedule receiver.
+var ErrNilSchedule = errors.New("cron schedule is nil")
 
 // Cron field boundary constants.
 const (
@@ -103,7 +106,10 @@ func Parse(expr string) (Schedule, error) {
 // ErrNoMatch if no match is found within maxIterations.
 func (sched *schedule) Next(from time.Time) (time.Time, error) {
 	if sched == nil {
-		return time.Time{}, nil
+		asserter := assert.New(context.Background(), nil, "cron", "Next")
+		_ = asserter.NoError(context.Background(), ErrNilSchedule, "cannot calculate next run from nil schedule")
+
+		return time.Time{}, ErrNilSchedule
 	}
 
 	from = from.UTC()

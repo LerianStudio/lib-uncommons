@@ -1,6 +1,3 @@
-// Package errgroup provides a Group type for managing a collection of goroutines
-// working on subtasks of a common task, with coordinated cancellation and
-// first-error propagation.
 package errgroup
 
 import (
@@ -10,6 +7,7 @@ import (
 	"sync"
 
 	libLog "github.com/LerianStudio/lib-uncommons/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/uncommons/runtime"
 )
 
 // ErrPanicRecovered is returned when a goroutine in the group panics.
@@ -51,9 +49,7 @@ func (grp *Group) Go(fn func() error) {
 		defer grp.wg.Done()
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				if grp.logger != nil {
-					grp.logger.Errorf("errgroup: panic recovered in goroutine: %v", recovered)
-				}
+				runtime.HandlePanicValue(context.Background(), grp.logger, recovered, "errgroup", "group.Go")
 
 				grp.errOnce.Do(func() {
 					grp.err = fmt.Errorf("%w: %v", ErrPanicRecovered, recovered)

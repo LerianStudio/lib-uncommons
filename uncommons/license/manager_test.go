@@ -43,9 +43,9 @@ func TestSetHandlerWithNil(t *testing.T) {
 func TestDefaultHandler(t *testing.T) {
 	manager := license.New()
 
-	assert.Panics(t, func() {
+	assert.NotPanics(t, func() {
 		manager.Terminate("default handler test")
-	}, "Default handler should panic")
+	}, "Default handler should not panic")
 }
 
 func TestDefaultHandlerWithError(t *testing.T) {
@@ -89,14 +89,13 @@ func TestTerminateWithError_UninitializedManager(t *testing.T) {
 	assert.Contains(t, err.Error(), "test reason")
 }
 
-func TestTerminate_UninitializedManagerPanics(t *testing.T) {
-	// Terminate requires a handler to be set. On a zero-value manager,
-	// the handler is nil, causing a panic with ErrManagerNotInitialized.
+func TestTerminate_UninitializedManagerDoesNotPanic(t *testing.T) {
+	// Terminate on zero-value manager should fail safely without panic.
 	var manager license.ManagerShutdown
 
-	assert.Panics(t, func() {
+	assert.NotPanics(t, func() {
 		manager.Terminate("test reason")
-	}, "Terminate on uninitialized manager should panic")
+	}, "Terminate on uninitialized manager should not panic")
 }
 
 func TestDefaultHandlerWithError_EmptyReason(t *testing.T) {
@@ -141,10 +140,6 @@ func TestTerminateSafe_UninitializedManager(t *testing.T) {
 func TestTerminateSafe_WithDefaultHandler(t *testing.T) {
 	manager := license.New()
 
-	// Note: This will panic because DefaultHandler panics.
-	// TerminateSafe invokes the handler before returning nil,
-	// so the panic comes from the handler during TerminateSafe execution.
-	assert.Panics(t, func() {
-		_ = manager.TerminateSafe("test")
-	}, "Default handler should still panic when invoked via TerminateSafe")
+	err := manager.TerminateSafe("test")
+	assert.NoError(t, err)
 }
