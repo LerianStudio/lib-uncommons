@@ -130,4 +130,3 @@ func SetConfigFromEnvVars(s any) error {
 
 	return nil
 }
-

@@ -397,11 +397,11 @@ func TestIsSensitiveField_WordBoundaryPositivePath(t *testing.T) {
 		{"db_credential_store", true},    // "credential" with underscore boundaries
 		{"old_token_backup", true},       // "token" with underscore boundaries
 		// CamelCase that normalizes to word-boundary matchable form
-		{"SessionToken", true},  // -> "session_token" -> "token" boundary match
-		{"ExpiryDate", true},    // -> "expiry_date" -> exact map match via normalization
-		{"AccountNumber", true}, // -> "account_number" -> exact map match via normalization
-		{"CardNumber", true},    // -> "card_number" -> exact map match via normalization
-		{"PrivateKeyData", true},  // -> "private_key_data" -> "private_key" boundary match
+		{"SessionToken", true},   // -> "session_token" -> "token" boundary match
+		{"ExpiryDate", true},     // -> "expiry_date" -> exact map match via normalization
+		{"AccountNumber", true},  // -> "account_number" -> exact map match via normalization
+		{"CardNumber", true},     // -> "card_number" -> exact map match via normalization
+		{"PrivateKeyData", true}, // -> "private_key_data" -> "private_key" boundary match
 		// Should NOT match
 		{"mysecretvalue", false}, // no word boundaries around "secret"
 		{"deauthorize", false},   // "authorization" not present

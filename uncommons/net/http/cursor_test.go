@@ -185,12 +185,12 @@ func TestCursorDirectionRules_AllCombinations(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name              string
-		requestedSort     string
-		cursorDir         string
-		expectedOperator  string
-		expectedOrder     string
-		expectErr         bool
+		name             string
+		requestedSort    string
+		cursorDir        string
+		expectedOperator string
+		expectedOrder    string
+		expectErr        bool
 	}{
 		{
 			name:             "ASC + next",
