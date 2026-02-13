@@ -8,7 +8,7 @@ import (
 	"net/url"
 	"strings"
 
-	constant "github.com/LerianStudio/lib-uncommons/uncommons/constants"
+	constant "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 )
 
 var (

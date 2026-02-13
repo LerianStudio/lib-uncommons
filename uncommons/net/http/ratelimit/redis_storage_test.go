@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	libLog "github.com/LerianStudio/lib-uncommons/uncommons/log"
-	libRedis "github.com/LerianStudio/lib-uncommons/uncommons/redis"
+	libLog "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	libRedis "github.com/LerianStudio/lib-uncommons/v2/uncommons/redis"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"

@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/assert"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
 	"github.com/redis/go-redis/v9"
 
-	libRedis "github.com/LerianStudio/lib-uncommons/uncommons/redis"
+	libRedis "github.com/LerianStudio/lib-uncommons/v2/uncommons/redis"
 )
 
 const (

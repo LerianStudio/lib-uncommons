@@ -1,9 +1,10 @@
 package http
 
 import (
+	"log"
 	"strconv"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 )
@@ -25,8 +26,18 @@ func WithCORS() fiber.Handler {
 		allowCredentials = parsed
 	}
 
+	origins := uncommons.GetenvOrDefault("ACCESS_CONTROL_ALLOW_ORIGIN", defaultAccessControlAllowOrigin)
+
+	if origins == "*" || origins == "" {
+		log.Println("[WARN] CORS: AllowOrigins is set to wildcard (*). Consider restricting to specific origins in production.")
+	}
+
+	if origins == "*" && allowCredentials {
+		log.Println("[WARN] CORS: AllowOrigins=* with AllowCredentials=true is rejected by browsers per the CORS spec. Configure specific origins.")
+	}
+
 	return cors.New(cors.Config{
-		AllowOrigins:     uncommons.GetenvOrDefault("ACCESS_CONTROL_ALLOW_ORIGIN", defaultAccessControlAllowOrigin),
+		AllowOrigins:     origins,
 		AllowMethods:     uncommons.GetenvOrDefault("ACCESS_CONTROL_ALLOW_METHODS", defaultAccessControlAllowMethods),
 		AllowHeaders:     uncommons.GetenvOrDefault("ACCESS_CONTROL_ALLOW_HEADERS", defaultAccessControlAllowHeaders),
 		ExposeHeaders:    uncommons.GetenvOrDefault("ACCESS_CONTROL_EXPOSE_HEADERS", defaultAccessControlExposeHeaders),

@@ -39,6 +39,9 @@ var (
 	ErrContextLookupFailed = errors.New("context lookup failed")
 )
 
+// ErrVerifierNotConfigured indicates that no ownership verifier was provided.
+var ErrVerifierNotConfigured = errors.New("ownership verifier is not configured")
+
 // Sentinel errors for general resource ownership verification.
 // ErrLookupFailed indicates an ownership lookup failed unexpectedly.
 var ErrLookupFailed = errors.New("resource lookup failed")
@@ -81,7 +84,7 @@ func ParseAndVerifyTenantScopedID(
 	}
 
 	if verifier == nil {
-		return uuid.Nil, uuid.Nil, accessErr
+		return uuid.Nil, uuid.Nil, ErrVerifierNotConfigured
 	}
 
 	resourceID, ctx, tenantID, err := parseTenantAndResourceID(
@@ -121,7 +124,7 @@ func ParseAndVerifyResourceScopedID(
 	}
 
 	if verifier == nil {
-		return uuid.Nil, uuid.Nil, accessErr
+		return uuid.Nil, uuid.Nil, ErrVerifierNotConfigured
 	}
 
 	resourceID, ctx, tenantID, err := parseTenantAndResourceID(

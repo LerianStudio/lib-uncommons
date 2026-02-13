@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/http/httptest"
 
-	uhttp "github.com/LerianStudio/lib-uncommons/uncommons/net/http"
+	uhttp "github.com/LerianStudio/lib-uncommons/v2/uncommons/net/http"
 	"github.com/gofiber/fiber/v2"
 )
 

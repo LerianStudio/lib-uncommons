@@ -3,7 +3,7 @@ package http_test
 import (
 	"fmt"
 
-	uhttp "github.com/LerianStudio/lib-uncommons/uncommons/net/http"
+	uhttp "github.com/LerianStudio/lib-uncommons/v2/uncommons/net/http"
 )
 
 func ExampleEncodeCursor() {

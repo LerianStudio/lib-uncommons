@@ -3,16 +3,17 @@ package http
 import (
 	"context"
 	"encoding/json"
+	stdlog "log"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons"
-	cn "github.com/LerianStudio/lib-uncommons/uncommons/constants"
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
-	"github.com/LerianStudio/lib-uncommons/uncommons/security"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons"
+	cn "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/security"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
@@ -27,6 +28,12 @@ const maxObfuscationDepth = 32
 // logObfuscationDisabled caches the LOG_OBFUSCATION_DISABLED env var at init time
 // to avoid repeated syscalls on every request.
 var logObfuscationDisabled = os.Getenv("LOG_OBFUSCATION_DISABLED") == "true"
+
+func init() {
+	if logObfuscationDisabled {
+		stdlog.Println("[WARN] LOG_OBFUSCATION_DISABLED is set to true. Sensitive data may appear in logs. Ensure this is not enabled in production.")
+	}
+}
 
 // RequestInfo is a struct design to store http access log data.
 type RequestInfo struct {
@@ -244,7 +251,7 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 			log.String("duration", duration.String()),
 		}
 		if err != nil {
-			fields = append(fields, log.Any("error", err))
+			fields = append(fields, log.Err(err))
 		}
 
 		logger.Log(ctx, log.LevelInfo, "gRPC request finished", fields...)

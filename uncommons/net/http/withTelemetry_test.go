@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons"
-	"github.com/LerianStudio/lib-uncommons/uncommons/opentelemetry"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry"
 	"github.com/gofiber/fiber/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

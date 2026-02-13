@@ -1,14 +1,15 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"strings"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons"
-	libLog "github.com/LerianStudio/lib-uncommons/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons"
+	libLog "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 	"github.com/gofiber/fiber/v2"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -92,6 +93,10 @@ func FiberErrorHandler(c *fiber.Ctx, err error) error {
 			Title:   "request_failed",
 			Message: fe.Message,
 		})
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	logger := uncommons.NewLoggerFromContext(ctx)

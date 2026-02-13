@@ -570,6 +570,11 @@ func TestParseTimestampCursorPagination(t *testing.T) {
 			expectedLimit: 20,
 		},
 		{
+			name:          "negative limit uses default",
+			queryString:   "limit=-5",
+			expectedLimit: 20,
+		},
+		{
 			name:        "invalid cursor",
 			queryString: "cursor=invalid",
 			errContains: "invalid cursor format",
