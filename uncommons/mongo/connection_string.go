@@ -1,86 +1,84 @@
 package mongo
 
 import (
-	"fmt"
+	"errors"
 	"net/url"
+	"strconv"
 	"strings"
-
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
 )
 
-// BuildConnectionString constructs a properly formatted MongoDB connection string.
-//
-// Features:
-//   - URL-encodes credentials (handles special characters like @, :, /)
-//   - Omits port for mongodb+srv URIs (SRV discovery doesn't use ports)
-//   - Handles empty credentials gracefully (connects without auth)
-//   - Optionally logs masked connection string for debugging
-//
-// Parameters:
-//   - scheme: "mongodb" or "mongodb+srv"
-//   - user: username (will be URL-encoded)
-//   - password: password (will be URL-encoded)
-//   - host: MongoDB host address
-//   - port: port number (ignored for mongodb+srv)
-//   - parameters: query parameters (e.g., "replicaSet=rs0&authSource=admin")
-//   - logger: optional logger for debug output (credentials masked)
-//
-// Returns the complete connection string ready for use with MongoDB drivers.
-func BuildConnectionString(scheme, user, password, host, port, parameters string, logger log.Logger) string {
-	var connectionString string
+var (
+	ErrInvalidScheme        = errors.New("invalid mongo uri scheme")
+	ErrEmptyHost            = errors.New("mongo uri host cannot be empty")
+	ErrInvalidPort          = errors.New("mongo uri port is invalid")
+	ErrPortNotAllowedForSRV = errors.New("port cannot be set for mongodb+srv")
+	ErrPasswordWithoutUser  = errors.New("password requires username")
+)
 
-	credentialsPart := buildCredentialsPart(user, password)
-	hostPart := buildHostPart(scheme, host, port)
-
-	if credentialsPart != "" {
-		connectionString = fmt.Sprintf("%s://%s@%s/", scheme, credentialsPart, hostPart)
-	} else {
-		connectionString = fmt.Sprintf("%s://%s/", scheme, hostPart)
-	}
-
-	if parameters != "" {
-		connectionString += "?" + parameters
-	}
-
-	if logger != nil {
-		logMaskedConnectionString(logger, scheme, hostPart, parameters, credentialsPart != "")
-	}
-
-	return connectionString
+// URIConfig contains the components used to build a MongoDB URI.
+type URIConfig struct {
+	Scheme   string
+	Username string
+	Password string
+	Host     string
+	Port     string
+	Database string
+	Query    url.Values
 }
 
-func buildCredentialsPart(user, password string) string {
-	if user == "" {
-		return ""
+// BuildURI validates URIConfig and returns a canonical MongoDB connection URI.
+func BuildURI(cfg URIConfig) (string, error) {
+	scheme := strings.TrimSpace(cfg.Scheme)
+	host := strings.TrimSpace(cfg.Host)
+	port := strings.TrimSpace(cfg.Port)
+
+	if scheme != "mongodb" && scheme != "mongodb+srv" {
+		return "", ErrInvalidScheme
 	}
 
-	return url.UserPassword(user, password).String()
-}
-
-func buildHostPart(scheme, host, port string) string {
-	if strings.HasPrefix(scheme, "mongodb+srv") {
-		return host
+	if host == "" {
+		return "", ErrEmptyHost
 	}
+
+	if cfg.Username == "" && cfg.Password != "" {
+		return "", ErrPasswordWithoutUser
+	}
+
+	if scheme == "mongodb+srv" && port != "" {
+		return "", ErrPortNotAllowedForSRV
+	}
+
+	if scheme == "mongodb" && port != "" {
+		parsedPort, err := strconv.Atoi(port)
+		if err != nil || parsedPort < 1 || parsedPort > 65535 {
+			return "", ErrInvalidPort
+		}
+	}
+
+	uri := &url.URL{Scheme: scheme}
 
 	if port != "" {
-		return fmt.Sprintf("%s:%s", host, port)
-	}
-
-	return host
-}
-
-func logMaskedConnectionString(logger log.Logger, scheme, hostPart, parameters string, hasCredentials bool) {
-	var maskedConnStr string
-
-	if hasCredentials {
-		maskedConnStr = fmt.Sprintf("%s://<credentials>@%s/", scheme, hostPart)
+		uri.Host = host + ":" + port
 	} else {
-		maskedConnStr = fmt.Sprintf("%s://%s/", scheme, hostPart)
+		uri.Host = host
 	}
 
-	if parameters != "" {
-		maskedConnStr += "?" + parameters
+	if cfg.Username != "" {
+		// url.UserPassword encodes username:password in the URI.
+		// When Password is empty, this produces "username:@" which is valid per RFC 3986.
+		uri.User = url.UserPassword(cfg.Username, cfg.Password)
 	}
 
-	logger.Debugf("MongoDB connection string built: %s", maskedConnStr)
+	database := strings.TrimSpace(cfg.Database)
+	if database == "" {
+		uri.Path = "/"
+	} else {
+		uri.Path = "/" + url.PathEscape(database)
+	}
+
+	if len(cfg.Query) > 0 {
+		uri.RawQuery = cfg.Query.Encode()
+	}
+
+	return uri.String(), nil
 }
