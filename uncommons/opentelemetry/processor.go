@@ -2,10 +2,9 @@ package opentelemetry
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
@@ -83,7 +82,7 @@ func redactAttributesByKey(attrs []attribute.KeyValue, redactor *Redactor) []att
 		case RedactionDrop:
 			continue
 		case RedactionHash:
-			redacted = append(redacted, attribute.String(string(attr.Key), fmt.Sprintf("sha256:%x", hashString(attr.Value.Emit()))))
+			redacted = append(redacted, attribute.String(string(attr.Key), redactor.hashString(attr.Value.Emit())))
 		default:
 			redacted = append(redacted, attribute.String(string(attr.Key), redactor.maskValue))
 		}

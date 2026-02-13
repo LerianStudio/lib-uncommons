@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
 )

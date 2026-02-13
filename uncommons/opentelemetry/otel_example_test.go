@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/opentelemetry"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry"
 )
 
 func ExampleBuildAttributesFromValue() {

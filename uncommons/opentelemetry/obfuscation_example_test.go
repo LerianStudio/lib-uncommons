@@ -3,8 +3,9 @@ package opentelemetry_test
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/opentelemetry"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry"
 )
 
 func ExampleObfuscateStruct_customRules() {
@@ -27,9 +28,20 @@ func ExampleObfuscateStruct_customRules() {
 		return
 	}
 
+	m := masked.(map[string]any)
+
+	// password is masked, name is unchanged, email is HMAC-hashed with sha256: prefix
+	fmt.Println("name:", m["name"])
+	fmt.Println("password:", m["password"])
+	fmt.Println("email_prefix:", strings.HasPrefix(m["email"].(string), "sha256:"))
+
+	// Verify the JSON round-trips cleanly
 	b, _ := json.Marshal(masked)
-	fmt.Println(string(b))
+	fmt.Println("json_ok:", len(b) > 0)
 
 	// Output:
-	// {"email":"sha256:fb98d44ad7501a959f3f4f4a3f004fe2d9e581ea6207e218c4b02c08a4d75adf","name":"alice","password":"***"}
+	// name: alice
+	// password: ***
+	// email_prefix: true
+	// json_ok: true
 }

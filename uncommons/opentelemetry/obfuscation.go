@@ -2,14 +2,16 @@ package opentelemetry
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"regexp"
 
-	cn "github.com/LerianStudio/lib-uncommons/uncommons/constants"
-	"github.com/LerianStudio/lib-uncommons/uncommons/security"
+	cn "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/security"
 )
 
 // RedactionAction defines how sensitive values are transformed.
@@ -31,10 +33,14 @@ type RedactionRule struct {
 	pathRegex  *regexp.Regexp
 }
 
+// hmacKeySize is the byte length of the HMAC key generated for each Redactor.
+const hmacKeySize = 32
+
 // Redactor applies ordered redaction rules to structured payloads.
 type Redactor struct {
 	rules     []RedactionRule
 	maskValue string
+	hmacKey   []byte // per-instance key used by HMAC-SHA256 hashing
 }
 
 // NewDefaultRedactor builds a mask-based redactor from default sensitive fields.
@@ -51,7 +57,10 @@ func NewDefaultRedactor() *Redactor {
 		// WARNING: rule compilation failed; returning a minimal redactor that masks nothing.
 		// This should never happen with default rules as they use QuoteMeta patterns.
 		// If this occurs, investigate the DefaultSensitiveFields() patterns.
-		return &Redactor{maskValue: cn.ObfuscatedValue}
+		key := make([]byte, hmacKeySize)
+		_, _ = rand.Read(key)
+
+		return &Redactor{maskValue: cn.ObfuscatedValue, hmacKey: key}
 	}
 
 	return r
@@ -91,7 +100,12 @@ func NewRedactor(rules []RedactionRule, maskValue string) (*Redactor, error) {
 		compiled = append(compiled, rule)
 	}
 
-	return &Redactor{rules: compiled, maskValue: maskValue}, nil
+	key := make([]byte, hmacKeySize)
+	if _, err := rand.Read(key); err != nil {
+		return nil, fmt.Errorf("failed to generate HMAC key: %w", err)
+	}
+
+	return &Redactor{rules: compiled, maskValue: maskValue, hmacKey: key}, nil
 }
 
 func (r *Redactor) actionFor(path, fieldName string) (RedactionAction, bool) {
@@ -122,26 +136,42 @@ func (r *Redactor) actionFor(path, fieldName string) (RedactionAction, bool) {
 	return "", false
 }
 
-func (r *Redactor) redactValue(path, fieldName string, value any) (any, bool) {
+// redactValue applies the first matching redaction rule to a field value.
+// It returns the (possibly transformed) value, whether the field should be dropped,
+// and whether any redaction rule was applied (so the caller can skip expensive comparison).
+func (r *Redactor) redactValue(path, fieldName string, value any) (redacted any, drop bool, applied bool) {
 	action, ok := r.actionFor(path, fieldName)
 	if !ok {
-		return value, false
+		return value, false, false
 	}
 
 	switch action {
 	case RedactionDrop:
-		return nil, true
+		return nil, true, true
 	case RedactionHash:
-		return fmt.Sprintf("sha256:%x", hashString(fmt.Sprint(value))), false
+		return r.hashString(fmt.Sprint(value)), false, true
 	case RedactionMask:
 		fallthrough
 	default:
-		return r.maskValue, false
+		return r.maskValue, false, true
 	}
 }
 
-func hashString(v string) [32]byte {
-	return sha256.Sum256([]byte(v))
+// hashString computes an HMAC-SHA256 of v using the Redactor's per-instance key.
+// The result is a hex-encoded string prefixed with "sha256:" for identification.
+// Using HMAC prevents rainbow-table attacks against low-entropy PII.
+func (r *Redactor) hashString(v string) string {
+	if len(r.hmacKey) > 0 {
+		mac := hmac.New(sha256.New, r.hmacKey)
+		mac.Write([]byte(v))
+
+		return fmt.Sprintf("sha256:%s", hex.EncodeToString(mac.Sum(nil)))
+	}
+
+	// Fallback for zero-key edge case (should not happen with proper construction).
+	h := sha256.Sum256([]byte(v))
+
+	return fmt.Sprintf("sha256:%x", h)
 }
 
 // obfuscateStructFields recursively obfuscates sensitive fields in a struct or map.
@@ -157,12 +187,12 @@ func obfuscateStructFields(data any, path string, redactor *Redactor) any {
 			}
 
 			if redactor != nil {
-				redacted, drop := redactor.redactValue(childPath, key, value)
+				redacted, drop, applied := redactor.redactValue(childPath, key, value)
 				if drop {
 					continue
 				}
 
-				if !reflect.DeepEqual(redacted, value) {
+				if applied {
 					result[key] = redacted
 					continue
 				}

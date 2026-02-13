@@ -1,13 +1,13 @@
 package opentelemetry
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
-	cn "github.com/LerianStudio/lib-uncommons/uncommons/constants"
+	cn "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
@@ -27,10 +27,10 @@ func mustRedactor(t *testing.T, rules []RedactionRule, mask string) *Redactor {
 	return r
 }
 
-// sha256Hex returns the deterministic sha256 hex string used by RedactionHash.
-func sha256Hex(v string) string {
-	h := sha256.Sum256([]byte(v))
-	return fmt.Sprintf("sha256:%x", h)
+// hashVia returns the HMAC-SHA256 hash of v using the given redactor's key.
+// This replaces the old sha256Hex helper because hashing is now keyed per-Redactor.
+func hashVia(r *Redactor, v string) string {
+	return r.hashString(v)
 }
 
 // ===========================================================================
@@ -269,8 +269,9 @@ func TestRedactValue_Mask(t *testing.T) {
 		{FieldPattern: `(?i)^password$`, Action: RedactionMask},
 	}, "***")
 
-	val, drop := r.redactValue("", "password", "secret123")
+	val, drop, applied := r.redactValue("", "password", "secret123")
 	assert.False(t, drop)
+	assert.True(t, applied)
 	assert.Equal(t, "***", val)
 }
 
@@ -281,9 +282,10 @@ func TestRedactValue_Hash(t *testing.T) {
 		{FieldPattern: `(?i)^email$`, Action: RedactionHash},
 	}, "")
 
-	val, drop := r.redactValue("", "email", "alice@example.com")
+	val, drop, applied := r.redactValue("", "email", "alice@example.com")
 	assert.False(t, drop)
-	assert.Equal(t, sha256Hex("alice@example.com"), val)
+	assert.True(t, applied)
+	assert.Equal(t, hashVia(r, "alice@example.com"), val)
 }
 
 func TestRedactValue_Hash_Deterministic(t *testing.T) {
@@ -293,8 +295,8 @@ func TestRedactValue_Hash_Deterministic(t *testing.T) {
 		{FieldPattern: `(?i)^document$`, Action: RedactionHash},
 	}, "")
 
-	val1, _ := r.redactValue("", "document", "12345")
-	val2, _ := r.redactValue("", "document", "12345")
+	val1, _, _ := r.redactValue("", "document", "12345")
+	val2, _, _ := r.redactValue("", "document", "12345")
 	assert.Equal(t, val1, val2, "hashing the same value must be deterministic")
 }
 
@@ -305,8 +307,8 @@ func TestRedactValue_Hash_DifferentInputs(t *testing.T) {
 		{FieldPattern: `(?i)^document$`, Action: RedactionHash},
 	}, "")
 
-	val1, _ := r.redactValue("", "document", "abc")
-	val2, _ := r.redactValue("", "document", "def")
+	val1, _, _ := r.redactValue("", "document", "abc")
+	val2, _, _ := r.redactValue("", "document", "def")
 	assert.NotEqual(t, val1, val2, "different inputs must produce different hashes")
 }
 
@@ -317,8 +319,9 @@ func TestRedactValue_Drop(t *testing.T) {
 		{FieldPattern: `(?i)^token$`, Action: RedactionDrop},
 	}, "")
 
-	val, drop := r.redactValue("", "token", "tok_abc")
+	val, drop, applied := r.redactValue("", "token", "tok_abc")
 	assert.True(t, drop)
+	assert.True(t, applied)
 	assert.Nil(t, val)
 }
 
@@ -329,8 +332,9 @@ func TestRedactValue_NoMatch(t *testing.T) {
 		{FieldPattern: `^secret$`, Action: RedactionMask},
 	}, "")
 
-	val, drop := r.redactValue("", "name", "Alice")
+	val, drop, applied := r.redactValue("", "name", "Alice")
 	assert.False(t, drop)
+	assert.False(t, applied)
 	assert.Equal(t, "Alice", val)
 }
 
@@ -339,8 +343,9 @@ func TestRedactValue_NilRedactor(t *testing.T) {
 
 	var r *Redactor
 
-	val, drop := r.redactValue("", "password", "secret")
+	val, drop, applied := r.redactValue("", "password", "secret")
 	assert.False(t, drop)
+	assert.False(t, applied)
 	assert.Equal(t, "secret", val)
 }
 
@@ -351,24 +356,42 @@ func TestRedactValue_NilRedactor(t *testing.T) {
 func TestHashString_Deterministic(t *testing.T) {
 	t.Parallel()
 
-	h1 := hashString("hello")
-	h2 := hashString("hello")
+	r := mustRedactor(t, nil, "")
+
+	h1 := r.hashString("hello")
+	h2 := r.hashString("hello")
 	assert.Equal(t, h1, h2)
 }
 
 func TestHashString_DifferentInputs(t *testing.T) {
 	t.Parallel()
 
-	h1 := hashString("foo")
-	h2 := hashString("bar")
+	r := mustRedactor(t, nil, "")
+
+	h1 := r.hashString("foo")
+	h2 := r.hashString("bar")
 	assert.NotEqual(t, h1, h2)
 }
 
 func TestHashString_Empty(t *testing.T) {
 	t.Parallel()
 
-	h := hashString("")
-	assert.NotEqual(t, [32]byte{}, h, "hash of empty string is a valid non-zero hash")
+	r := mustRedactor(t, nil, "")
+
+	h := r.hashString("")
+	assert.NotEmpty(t, h, "hash of empty string should produce a non-empty output")
+	assert.True(t, strings.HasPrefix(h, "sha256:"), "hash should have sha256: prefix")
+}
+
+func TestHashString_DifferentRedactorsProduceDifferentHashes(t *testing.T) {
+	t.Parallel()
+
+	r1 := mustRedactor(t, nil, "")
+	r2 := mustRedactor(t, nil, "")
+
+	h1 := r1.hashString("same-input")
+	h2 := r2.hashString("same-input")
+	assert.NotEqual(t, h1, h2, "different Redactors use different HMAC keys and should produce different hashes")
 }
 
 // ===========================================================================
@@ -394,7 +417,7 @@ func TestObfuscateStructFields_FlatMap(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "alice", m["name"])
 	assert.Equal(t, "***", m["password"])
-	assert.Equal(t, sha256Hex("alice@example.com"), m["email"])
+	assert.Equal(t, hashVia(r, "alice@example.com"), m["email"])
 }
 
 func TestObfuscateStructFields_EmptyMap(t *testing.T) {
@@ -520,7 +543,7 @@ func TestObfuscateStructFields_ArrayOfObjects(t *testing.T) {
 
 	for i, item := range result {
 		m := item.(map[string]any)
-		assert.Equal(t, fmt.Sprintf("%d", i+1), m["id"])
+		assert.Equal(t, strconv.Itoa(i+1), m["id"])
 		assert.NotContains(t, m, "token")
 	}
 }
@@ -715,7 +738,7 @@ func TestObfuscateStruct_NestedStruct(t *testing.T) {
 
 	user := m["user"].(map[string]any)
 	assert.Equal(t, "***", user["password"])
-	assert.Equal(t, sha256Hex("alice@example.com"), user["email"])
+	assert.Equal(t, hashVia(r, "alice@example.com"), user["email"])
 	assert.Equal(t, "Alice", user["name"])
 }
 
@@ -744,7 +767,7 @@ func TestObfuscateStruct_ArrayOfStructs(t *testing.T) {
 
 	for i, item := range arr {
 		m := item.(map[string]any)
-		assert.Equal(t, fmt.Sprintf("%d", i+1), m["id"])
+		assert.Equal(t, strconv.Itoa(i+1), m["id"])
 		assert.NotContains(t, m, "token")
 	}
 }

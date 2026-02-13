@@ -7,15 +7,16 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons"
-	"github.com/LerianStudio/lib-uncommons/uncommons/assert"
-	constant "github.com/LerianStudio/lib-uncommons/uncommons/constants"
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
-	"github.com/LerianStudio/lib-uncommons/uncommons/opentelemetry/metrics"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
+	constant "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry/metrics"
 	"github.com/gofiber/fiber/v2"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -36,8 +37,11 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-const maxSpanAttributeStringLength = 4096
-const maxAttributeDepth = 32
+const (
+	maxSpanAttributeStringLength = 4096
+	maxAttributeDepth            = 32
+	maxAttributeCount            = 128
+)
 
 var (
 	ErrNilTelemetryLogger = errors.New("telemetry config logger cannot be nil")
@@ -112,6 +116,13 @@ func NewTelemetry(cfg TelemetryConfig) (*Telemetry, error) {
 			shutdown:        func() {},
 			shutdownCtx:     func(context.Context) error { return nil },
 		}, nil
+	}
+
+	if cfg.InsecureExporter && cfg.DeploymentEnv != "" &&
+		cfg.DeploymentEnv != "development" && cfg.DeploymentEnv != "local" {
+		cfg.Logger.Log(ctx, log.LevelWarn,
+			"InsecureExporter is enabled in non-development environment",
+			log.String("environment", cfg.DeploymentEnv))
 	}
 
 	r := cfg.newResource()
@@ -194,13 +205,12 @@ func (tl *Telemetry) Meter(name string) (metric.Meter, error) {
 
 // ShutdownTelemetry shuts down telemetry components using background context.
 func (tl *Telemetry) ShutdownTelemetry() {
-	if err := tl.ShutdownTelemetryWithContext(context.Background()); err != nil {
-		var logger log.Logger
-		if tl != nil {
-			logger = tl.Logger
-		}
+	if tl == nil {
+		return
+	}
 
-		asserter := assert.New(context.Background(), logger, "opentelemetry", "ShutdownTelemetry")
+	if err := tl.ShutdownTelemetryWithContext(context.Background()); err != nil {
+		asserter := assert.New(context.Background(), tl.Logger, "opentelemetry", "ShutdownTelemetry")
 		_ = asserter.NoError(context.Background(), err, "telemetry shutdown failed")
 
 		return
@@ -293,12 +303,24 @@ type shutdownable interface {
 	Shutdown(ctx context.Context) error
 }
 
+// isNilShutdownable checks for both untyped nil and interface-wrapped typed nil
+// (e.g., a concrete pointer that is nil but stored in a shutdownable interface).
+func isNilShutdownable(s shutdownable) bool {
+	if s == nil {
+		return true
+	}
+
+	v := reflect.ValueOf(s)
+
+	return v.Kind() == reflect.Ptr && v.IsNil()
+}
+
 func buildShutdownHandlers(l log.Logger, components ...shutdownable) (func(), func(context.Context) error) {
 	shutdown := func() {
 		ctx := context.Background()
 
 		for _, c := range components {
-			if c == nil {
+			if isNilShutdownable(c) {
 				continue
 			}
 
@@ -312,7 +334,7 @@ func buildShutdownHandlers(l log.Logger, components ...shutdownable) (func(), fu
 		var errs []error
 
 		for _, c := range components {
-			if c == nil {
+			if isNilShutdownable(c) {
 				continue
 			}
 
@@ -408,6 +430,10 @@ func BuildAttributesFromValue(prefix string, value any, redactor *Redactor) ([]a
 
 func flattenAttributes(attrs *[]attribute.KeyValue, prefix string, value any, depth int) {
 	if depth >= maxAttributeDepth {
+		return
+	}
+
+	if len(*attrs) >= maxAttributeCount {
 		return
 	}
 
