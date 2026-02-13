@@ -15,9 +15,9 @@ import (
 
 	// File system migration source. We need to import it to be able to use it as source in migrate.NewWithSourceInstance
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/assert"
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
-	"github.com/LerianStudio/lib-uncommons/uncommons/runtime"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/runtime"
 	"github.com/bxcodec/dbresolver/v2"
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
@@ -109,13 +109,11 @@ func (c Config) validate() error {
 
 // Client is the v2 postgres connection manager.
 type Client struct {
-	mu          sync.RWMutex
-	cfg         Config
-	resolver    dbresolver.DB
-	primary     *sql.DB
-	replica     *sql.DB
-	connectOnce sync.Once
-	connectErr  error
+	mu       sync.RWMutex
+	cfg      Config
+	resolver dbresolver.DB
+	primary  *sql.DB
+	replica  *sql.DB
 }
 
 // New creates a postgres client with immutable configuration.
@@ -147,12 +145,20 @@ func (c *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("postgres connect: %w", ErrNilContext)
 	}
 
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.connectLocked(ctx)
+}
+
+// connectLocked performs the actual connection logic.
+// The caller MUST hold c.mu (write lock) before calling this method.
+func (c *Client) connectLocked(ctx context.Context) error {
 	primary, replica, resolver, err := c.buildConnection(ctx)
 	if err != nil {
 		return err
 	}
 
-	c.mu.Lock()
 	oldResolver := c.resolver
 	oldPrimary := c.primary
 	oldReplica := c.replica
@@ -160,7 +166,6 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.resolver = resolver
 	c.primary = primary
 	c.replica = replica
-	c.mu.Unlock()
 
 	if oldResolver != nil {
 		if err := oldResolver.Close(); err != nil {
@@ -233,6 +238,9 @@ func (c *Client) newSQLDB(dsn string) (*sql.DB, error) {
 }
 
 // Resolver returns the resolver, connecting lazily if needed.
+// Unlike sync.Once, this uses double-checked locking so that a transient
+// failure on the first call does not permanently break the client --
+// subsequent calls will retry the connection.
 func (c *Client) Resolver(ctx context.Context) (dbresolver.DB, error) {
 	if c == nil {
 		return nil, fmt.Errorf("postgres resolver: %w", ErrNilClient)
@@ -242,6 +250,7 @@ func (c *Client) Resolver(ctx context.Context) (dbresolver.DB, error) {
 		return nil, fmt.Errorf("postgres resolver: %w", ErrNilContext)
 	}
 
+	// Fast path: already connected (read-lock only).
 	c.mu.RLock()
 	resolver := c.resolver
 	c.mu.RUnlock()
@@ -250,16 +259,17 @@ func (c *Client) Resolver(ctx context.Context) (dbresolver.DB, error) {
 		return resolver, nil
 	}
 
-	c.connectOnce.Do(func() {
-		c.connectErr = c.Connect(ctx)
-	})
+	// Slow path: acquire write lock and double-check before connecting.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	if c.connectErr != nil {
-		return nil, c.connectErr
+	if c.resolver != nil {
+		return c.resolver, nil
 	}
 
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	if err := c.connectLocked(ctx); err != nil {
+		return nil, err
+	}
 
 	if c.resolver == nil {
 		return nil, fmt.Errorf("postgres resolver: %w", ErrNotConnected)
