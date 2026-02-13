@@ -13,3 +13,6 @@ coverage.html
 
 # Security scan reports
 gosec-report.sarif
+
+docs/codereview/
+.codegraph/
