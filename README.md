@@ -1,94 +1,122 @@
 # lib-uncommons
 
-A comprehensive Go library providing uncommon utilities and components for building robust microservices and applications in the Lerian Studio ecosystem.
+`lib-uncommons` is Lerian's shared Go toolkit for service primitives, connectors, observability, and runtime safety.
 
-## Overview
+The current major API surface is **v2**. If you are migrating from older code, see `MIGRATION_MAP.md`.
 
-`lib-uncommons` is a utility library that provides a collection of reusable components and helpers for Go applications. It includes standardized implementations for database connections, message queuing, logging, context management, error handling, transaction processing, and more.
+## Requirements
 
-## Features
+- Go `1.25.7` or newer
 
-### Core Components
-
-- **App Management**: Framework for managing application lifecycle and runtime (`app.go`)
-- **Context Utilities**: Enhanced context management with support for logging, tracing, and header IDs (`context.go`)
-- **Error Handling**: Standardized business error handling and responses (`errors.go`)
-
-### Database Connectors
-
-- **PostgreSQL**: Connection management, migrations, and utilities for PostgreSQL databases
-- **MongoDB**: Connection management and utilities for MongoDB
-- **Redis**: Client implementation and utilities for Redis
-
-### Messaging
-
-- **RabbitMQ**: Client implementation and utilities for RabbitMQ
-
-### Observability
-
-- **Logging**: Pluggable logging interface with multiple implementations
-- **Logging Obfuscation**: Dynamic environment variable to obfuscate specific fields from the request payload logging
-  - `SECURE_LOG_FIELDS=password,apiKey`
-- **OpenTelemetry**: Integrated tracing, metrics, and logs through OpenTelemetry
-- **Zap**: Integration with Uber's Zap logging library
-
-### Utilities
-
-- **String Utilities**: Common string manipulation functions
-- **Type Conversion**: Safe type conversion utilities
-- **Time Helpers**: Date and time manipulation functions
-- **OS Utilities**: Operating system related utilities
-- **Pointer Utilities**: Helper functions for pointer type operations
-- **Transaction Processing**: Utilities for financial transaction processing and validation
-
-### Resilience
-
-- **Circuit Breaker**: Circuit breaker pattern with health checking and state management
-- **Backoff**: Exponential backoff implementation
-- **Rate Limiting**: Redis-backed rate limiter with Fiber middleware support
-- **Distributed Locking**: RedLock algorithm for distributed lock management
-
-### Safety
-
-- **Safe Math**: Overflow-protected arithmetic operations
-- **Safe Regex**: Safe regular expression utilities
-- **Safe Slices**: Nil-safe slice operations
-- **Assertion Framework**: Production-safe assertions with telemetry integration
-
-### Runtime
-
-- **Goroutine Management**: Safe goroutine launching with panic recovery
-- **Panic Metrics**: OpenTelemetry metrics for recovered panics
-- **Error Reporting**: Pluggable error reporter integration (e.g., Sentry)
-
-## Getting Started
-
-### Prerequisites
-
-- Go 1.25 or higher
-
-### Installation
+## Installation
 
 ```bash
 go get github.com/LerianStudio/lib-uncommons
 ```
 
-## Usage
+## What is in this library
+
+### Core (`uncommons`)
+
+- `app.go`: launcher and app lifecycle helpers
+- `context.go`: safe timeout helpers and request-scoped logger/tracer/metrics/header-id tracking (deprecated context helpers `NewTracerFromContext`, `NewMetricFactoryFromContext`, `NewHeaderIDFromContext`, and `WithTimeout` are now removed)
+- `errors.go`: standardized business error mapping
+- `utils.go`, `stringUtils.go`, `time.go`, `os.go`: utility set used across Lerian services
+- `uncommons/constants`: shared constants for datasources, errors, headers, metadata, pagination, transactions, etc.
+
+### Observability and logging
+
+- `uncommons/opentelemetry`: telemetry bootstrap (`NewTelemetry`), propagation, span helpers, redaction
+- `uncommons/opentelemetry/metrics`: fluent metrics factory with explicit error returns
+- `uncommons/log`: v2 logging interface (`Logger` with `Log`/`With`/`WithGroup`/`Enabled`/`Sync`), typed `Field` constructors, log-injection prevention
+- `uncommons/zap`: zap adapter for `uncommons/log` with OTEL bridge support and explicit `Config`-based construction with `New()`
+
+### Data and messaging connectors
+
+- `uncommons/postgres`: explicit `Config` constructor + `Migrator` with thread-safe connection manager
+- `uncommons/mongo`: `Config`-based client with functional options, URI builder, and index helpers
+- `uncommons/redis`: topology-based `Config` (standalone/sentinel/cluster) + IAM auth and distributed locking (Redsync)
+- `uncommons/rabbitmq`: connection/channel/health helpers for AMQP with context-aware methods
+
+### HTTP and server utilities
+
+- `uncommons/net/http`: Fiber HTTP helpers (response/error/context parsing/SSRF-protected reverse proxy/middleware)
+- `uncommons/net/http/ratelimit`: Redis-backed rate limit storage utilities
+- `uncommons/server`: `ServerManager`-based graceful shutdown and lifecycle helpers
+
+### Resilience and safety
+
+- `uncommons/circuitbreaker`: service-level circuit breaker manager and health checker with error-returning constructors
+- `uncommons/backoff`: exponential backoff with jitter and context-aware sleep
+- `uncommons/errgroup`: error-group concurrency helpers with panic recovery
+- `uncommons/runtime`: panic recovery, panic metrics, safe goroutine wrappers
+- `uncommons/assert`: production-safe assertion primitives with telemetry integration
+- `uncommons/safe`: panic-safe wrappers (math/regex/slice operations)
+- `uncommons/security`: sensitive field handling and obfuscation helpers
+
+### Domain and support packages
+
+- `uncommons/transaction`: intent-based transaction planning, balance eligibility validation, and posting flow
+- `uncommons/crypto`: hashing and symmetric encryption helpers
+- `uncommons/jwt`: HS256/384/512 JWT signing and verification
+- `uncommons/license`: license validation and enforcement helpers
+- `uncommons/pointers`: pointer helper utilities
+- `uncommons/cron`: cron expression parser and scheduler
+
+## Minimal v2 usage
 
 ```go
 import (
-    "github.com/LerianStudio/lib-uncommons/uncommons"
+    "context"
+
     "github.com/LerianStudio/lib-uncommons/uncommons/log"
-    "github.com/LerianStudio/lib-uncommons/uncommons/postgres"
-    "github.com/LerianStudio/lib-uncommons/uncommons/redis"
     "github.com/LerianStudio/lib-uncommons/uncommons/opentelemetry"
 )
+
+func bootstrap() error {
+    logger := log.NewNop()
+
+    tl, err := opentelemetry.NewTelemetry(opentelemetry.TelemetryConfig{
+        LibraryName:               "my-service",
+        ServiceName:               "my-service-api",
+        ServiceVersion:            "2.0.0",
+        DeploymentEnv:             "local",
+        CollectorExporterEndpoint: "localhost:4317",
+        EnableTelemetry:           false,
+        InsecureExporter:          true,
+        Logger:                    logger,
+    })
+    if err != nil {
+        return err
+    }
+    defer tl.ShutdownTelemetry()
+
+    tl.ApplyGlobals()
+
+    _ = context.Background()
+
+    return nil
+}
 ```
 
-## Contributing
+## Development commands
 
-Please read the contributing guidelines before submitting pull requests.
+- `make test` - run all tests
+- `make test-unit` - run unit tests
+- `make test-integration` - run integration tests with testcontainers
+- `make test-all` - run all tests (unit + integration)
+- `make coverage-unit` - run unit tests with coverage report
+- `make coverage-integration` - run integration tests with coverage report
+- `make coverage` - run all coverage targets
+- `make lint` - run lint checks
+- `make lint-fix` - auto-fix lint issues
+- `make format` - format code
+- `make build` - build all packages
+- `make clean` - clean build artifacts
+- `make tidy` - clean dependencies
+- `make sec` - run security checks using gosec
+- `make tools` - install test tools (gotestsum)
 
 ## License
 
-This project is licensed under the terms found in the LICENSE file in the root directory.
+This project is licensed under the terms in `LICENSE`.
