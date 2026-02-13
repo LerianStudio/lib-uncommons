@@ -31,54 +31,99 @@ func BuildURI(cfg URIConfig) (string, error) {
 	scheme := strings.TrimSpace(cfg.Scheme)
 	host := strings.TrimSpace(cfg.Host)
 	port := strings.TrimSpace(cfg.Port)
+	database := strings.TrimSpace(cfg.Database)
 
-	if scheme != "mongodb" && scheme != "mongodb+srv" {
-		return "", ErrInvalidScheme
+	if err := validateBuildURIInput(scheme, host, port, cfg.Username, cfg.Password); err != nil {
+		return "", err
+	}
+
+	uri := buildURL(scheme, host, port, cfg.Username, cfg.Password, database, cfg.Query)
+
+	return uri.String(), nil
+}
+
+func validateBuildURIInput(scheme, host, port, username, password string) error {
+	if err := validateScheme(scheme); err != nil {
+		return err
 	}
 
 	if host == "" {
-		return "", ErrEmptyHost
+		return ErrEmptyHost
 	}
 
-	if cfg.Username == "" && cfg.Password != "" {
-		return "", ErrPasswordWithoutUser
+	if username == "" && password != "" {
+		return ErrPasswordWithoutUser
 	}
 
 	if scheme == "mongodb+srv" && port != "" {
-		return "", ErrPortNotAllowedForSRV
+		return ErrPortNotAllowedForSRV
 	}
 
-	if scheme == "mongodb" && port != "" {
-		parsedPort, err := strconv.Atoi(port)
-		if err != nil || parsedPort < 1 || parsedPort > 65535 {
-			return "", ErrInvalidPort
+	if scheme == "mongodb" {
+		if err := validateMongoPort(port); err != nil {
+			return err
 		}
 	}
 
+	return nil
+}
+
+func validateScheme(scheme string) error {
+	if scheme != "mongodb" && scheme != "mongodb+srv" {
+		return ErrInvalidScheme
+	}
+
+	return nil
+}
+
+func validateMongoPort(port string) error {
+	if port == "" {
+		return nil
+	}
+
+	parsedPort, err := strconv.Atoi(port)
+	if err != nil || parsedPort < 1 || parsedPort > 65535 {
+		return ErrInvalidPort
+	}
+
+	return nil
+}
+
+func buildURL(scheme, host, port, username, password, database string, query url.Values) *url.URL {
 	uri := &url.URL{Scheme: scheme}
+	uri.Host = buildHost(host, port)
+	uri.User = buildUser(username, password)
+	uri.Path = buildPath(database)
 
-	if port != "" {
-		uri.Host = host + ":" + port
-	} else {
-		uri.Host = host
+	if len(query) > 0 {
+		uri.RawQuery = query.Encode()
 	}
 
-	if cfg.Username != "" {
-		// url.UserPassword encodes username:password in the URI.
-		// When Password is empty, this produces "username:@" which is valid per RFC 3986.
-		uri.User = url.UserPassword(cfg.Username, cfg.Password)
+	return uri
+}
+
+func buildHost(host, port string) string {
+	if port == "" {
+		return host
 	}
 
-	database := strings.TrimSpace(cfg.Database)
+	return host + ":" + port
+}
+
+func buildUser(username, password string) *url.Userinfo {
+	if username == "" {
+		return nil
+	}
+
+	// url.UserPassword encodes username:password in the URI.
+	// When Password is empty, this produces "username:@" which is valid per RFC 3986.
+	return url.UserPassword(username, password)
+}
+
+func buildPath(database string) string {
 	if database == "" {
-		uri.Path = "/"
-	} else {
-		uri.Path = "/" + url.PathEscape(database)
+		return "/"
 	}
 
-	if len(cfg.Query) > 0 {
-		uri.RawQuery = cfg.Query.Encode()
-	}
-
-	return uri.String(), nil
+	return "/" + url.PathEscape(database)
 }

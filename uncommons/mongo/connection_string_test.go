@@ -61,6 +61,19 @@ func TestBuildURI_SuccessCases(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "mongodb://127.0.0.1:27017/", uri)
 	})
+
+	t.Run("username without password", func(t *testing.T) {
+		t.Parallel()
+
+		uri, err := BuildURI(URIConfig{
+			Scheme:   "mongodb",
+			Username: "readonly",
+			Host:     "localhost",
+			Port:     "27017",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "mongodb://readonly:@localhost:27017/", uri)
+	})
 }
 
 func TestBuildURI_Validation(t *testing.T) {

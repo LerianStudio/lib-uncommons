@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/mongo"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/mongo"
 )
 
 func ExampleBuildURI() {
