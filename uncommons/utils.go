@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"os/exec"
 	"reflect"
@@ -12,7 +13,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 	"github.com/google/uuid"
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/mem"
@@ -36,6 +37,8 @@ func CheckMetadataKeyAndValueLength(limit int, metadata map[string]any) error {
 		var value string
 
 		switch t := v.(type) {
+		case nil:
+			continue // nil values are valid, skip length check
 		case int:
 			value = strconv.Itoa(t)
 		case float64:
@@ -44,6 +47,8 @@ func CheckMetadataKeyAndValueLength(limit int, metadata map[string]any) error {
 			value = t
 		case bool:
 			value = strconv.FormatBool(t)
+		default:
+			value = fmt.Sprintf("%v", t) // convert unknown types to string for length check
 		}
 
 		if len(value) > limit {
@@ -130,11 +135,10 @@ func IsUUID(s string) bool {
 	return err == nil
 }
 
-// GenerateUUIDv7 generate a new uuid v7 using google/uuid package and return it. If an error occurs, it will return the error.
-func GenerateUUIDv7() uuid.UUID {
-	u := uuid.Must(uuid.NewV7())
-
-	return u
+// GenerateUUIDv7 generates a new UUID v7 using the google/uuid package.
+// Returns the generated UUID or an error if crypto/rand fails.
+func GenerateUUIDv7() (uuid.UUID, error) {
+	return uuid.NewV7()
 }
 
 // StructToJSONString convert a struct to json string

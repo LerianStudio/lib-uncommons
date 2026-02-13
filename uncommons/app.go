@@ -7,18 +7,19 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/assert"
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
-	"github.com/LerianStudio/lib-uncommons/uncommons/runtime"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/runtime"
 )
 
 // ErrLoggerNil is returned when the Logger is nil and cannot proceed.
 var ErrLoggerNil = errors.New("logger is nil")
 
 var (
-	ErrNilLauncher = errors.New("launcher is nil")
-	ErrEmptyApp    = errors.New("app name is empty")
-	ErrNilApp      = errors.New("app is nil")
+	ErrNilLauncher  = errors.New("launcher is nil")
+	ErrEmptyApp     = errors.New("app name is empty")
+	ErrNilApp       = errors.New("app is nil")
+	ErrConfigFailed = errors.New("launcher configuration failed")
 )
 
 // App represents an application that will run as a deployable component.
@@ -40,21 +41,27 @@ func WithLogger(logger log.Logger) LauncherOption {
 	}
 }
 
-// RunApp start all process registered before to the launcher.
+// RunApp registers an application with the launcher.
+// If registration fails, the error is collected and surfaced when RunWithError is called.
 func RunApp(name string, app App) LauncherOption {
 	return func(l *Launcher) {
-		if err := l.Add(name, app); err != nil && l != nil && l.Logger != nil {
-			l.Logger.Log(context.Background(), log.LevelError, fmt.Sprintf("Launcher add app error: %v", err))
+		if err := l.Add(name, app); err != nil {
+			l.configErrors = append(l.configErrors, fmt.Errorf("add app %q: %w", name, err))
+
+			if l.Logger != nil {
+				l.Logger.Log(context.Background(), log.LevelError, fmt.Sprintf("Launcher add app error: %v", err))
+			}
 		}
 	}
 }
 
 // Launcher manages apps.
 type Launcher struct {
-	Logger  log.Logger
-	apps    map[string]App
-	wg      *sync.WaitGroup
-	Verbose bool
+	Logger       log.Logger
+	apps         map[string]App
+	wg           *sync.WaitGroup
+	configErrors []error
+	Verbose      bool
 }
 
 // Add runs an application in a goroutine.
@@ -104,11 +111,26 @@ func (l *Launcher) Run() {
 	}
 }
 
-// RunWithError runs all applications and returns an error if Logger is nil.
-// Use this method when you need explicit error handling for launcher initialization.
+// RunWithError runs all applications and returns an error if Logger is nil
+// or if any configuration errors were collected during option application.
+// Safe to call on a Launcher created without NewLauncher (fields are lazy-initialized).
 func (l *Launcher) RunWithError() error {
 	if l.Logger == nil {
 		return ErrLoggerNil
+	}
+
+	// Lazy-init guards: safe to use even if constructed without NewLauncher.
+	if l.wg == nil {
+		l.wg = new(sync.WaitGroup)
+	}
+
+	if l.apps == nil {
+		l.apps = make(map[string]App)
+	}
+
+	// Surface any errors collected during option application.
+	if len(l.configErrors) > 0 {
+		return fmt.Errorf("%w: %v", ErrConfigFailed, errors.Join(l.configErrors...))
 	}
 
 	count := len(l.apps)

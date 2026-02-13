@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/assert"
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
-	"github.com/LerianStudio/lib-uncommons/uncommons/opentelemetry/metrics"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry/metrics"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -275,4 +275,3 @@ func WithTimeoutSafe(parent context.Context, timeout time.Duration) (context.Con
 
 	return ctx, cancel, nil
 }
-
