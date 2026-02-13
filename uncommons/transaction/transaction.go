@@ -19,6 +19,18 @@ const (
 )
 
 // TransactionStatus represents the lifecycle state of a transaction intent.
+//
+// Semantics:
+//   - CREATED: intent recorded but not yet submitted for processing.
+//   - APPROVED: intent approved for execution but not yet applied.
+//   - PENDING: intent currently being processed (balance updates in flight).
+//   - CANCELED: intent rejected or rolled back; terminal state.
+//
+// Typical transitions:
+//
+//	CREATED → APPROVED | CANCELED
+//	APPROVED → PENDING | CANCELED
+//	PENDING → (terminal; see associated Posting status for settlement)
 type TransactionStatus string
 
 const (
@@ -47,6 +59,7 @@ const (
 	ErrorTransactionValueMismatch            ErrorCode = "0073"
 	ErrorTransactionAmbiguous                ErrorCode = "0090"
 	ErrorOnHoldExternalAccount               ErrorCode = "0098"
+	ErrorDataCorruption                      ErrorCode = "0099"
 	ErrorInvalidInput                        ErrorCode = "1001"
 	ErrorInvalidStateTransition              ErrorCode = "1002"
 )
@@ -111,11 +124,11 @@ func (t LedgerTarget) validate(field string) error {
 
 // Allocation defines how part of the transaction total is assigned.
 type Allocation struct {
-	Target    LedgerTarget `json:"target"`
+	Target    LedgerTarget     `json:"target"`
 	Amount    *decimal.Decimal `json:"amount,omitempty"`
 	Share     *decimal.Decimal `json:"share,omitempty"`
-	Remainder bool   `json:"remainder"`
-	Route     string `json:"route,omitempty"`
+	Remainder bool             `json:"remainder"`
+	Route     string           `json:"route,omitempty"`
 }
 
 // TransactionIntentInput is the user input used to build a deterministic plan.

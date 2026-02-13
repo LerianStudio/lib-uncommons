@@ -3,7 +3,7 @@ package transaction_test
 import (
 	"fmt"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/transaction"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/transaction"
 	"github.com/shopspring/decimal"
 )
 

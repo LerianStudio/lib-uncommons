@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/transaction"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/transaction"
 )
 
 func ExampleNewDomainError() {

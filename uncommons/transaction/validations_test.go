@@ -16,8 +16,10 @@ import (
 // ---------------------------------------------------------------------------
 
 // decPtr returns a pointer to a decimal value parsed from a string.
-func decPtr(s string) *decimal.Decimal {
-	d, _ := decimal.NewFromString(s)
+func decPtr(t *testing.T, s string) *decimal.Decimal {
+	t.Helper()
+	d, err := decimal.NewFromString(s)
+	require.NoError(t, err, "decPtr: invalid decimal string %q", s)
 	return &d
 }
 
@@ -701,11 +703,11 @@ func TestBuildIntentPlan_HighPrecisionDecimals(t *testing.T) {
 	t.Parallel()
 
 	// 0.001 precision
-	amt := decPtr("0.001")
+	amt := decPtr(t, "0.001")
 
 	input := TransactionIntentInput{
 		Asset: "BTC",
-		Total: *decPtr("0.001"),
+		Total: *decPtr(t, "0.001"),
 		Sources: []Allocation{
 			{Target: LedgerTarget{AccountID: "a", BalanceID: "b"}, Amount: amt},
 		},
@@ -716,17 +718,17 @@ func TestBuildIntentPlan_HighPrecisionDecimals(t *testing.T) {
 
 	plan, err := BuildIntentPlan(input, StatusCreated)
 	require.NoError(t, err)
-	assert.True(t, plan.Total.Equal(*decPtr("0.001")))
+	assert.True(t, plan.Total.Equal(*decPtr(t, "0.001")))
 }
 
 func TestBuildIntentPlan_VeryLargeAmount(t *testing.T) {
 	t.Parallel()
 
-	amt := decPtr("999999999999.99")
+	amt := decPtr(t, "999999999999.99")
 
 	input := TransactionIntentInput{
 		Asset: "USD",
-		Total: *decPtr("999999999999.99"),
+		Total: *decPtr(t, "999999999999.99"),
 		Sources: []Allocation{
 			{Target: LedgerTarget{AccountID: "a", BalanceID: "b"}, Amount: amt},
 		},
@@ -737,18 +739,18 @@ func TestBuildIntentPlan_VeryLargeAmount(t *testing.T) {
 
 	plan, err := BuildIntentPlan(input, StatusCreated)
 	require.NoError(t, err)
-	assert.True(t, plan.Sources[0].Amount.Equal(*decPtr("999999999999.99")))
+	assert.True(t, plan.Sources[0].Amount.Equal(*decPtr(t, "999999999999.99")))
 }
 
 func TestBuildIntentPlan_ManyDecimalPlaces(t *testing.T) {
 	t.Parallel()
 
 	// 18 decimal places - crypto-level precision
-	amt := decPtr("0.000000000000000001")
+	amt := decPtr(t, "0.000000000000000001")
 
 	input := TransactionIntentInput{
 		Asset: "ETH",
-		Total: *decPtr("0.000000000000000001"),
+		Total: *decPtr(t, "0.000000000000000001"),
 		Sources: []Allocation{
 			{Target: LedgerTarget{AccountID: "a", BalanceID: "b"}, Amount: amt},
 		},
@@ -759,14 +761,14 @@ func TestBuildIntentPlan_ManyDecimalPlaces(t *testing.T) {
 
 	plan, err := BuildIntentPlan(input, StatusCreated)
 	require.NoError(t, err)
-	assert.True(t, plan.Sources[0].Amount.Equal(*decPtr("0.000000000000000001")))
+	assert.True(t, plan.Sources[0].Amount.Equal(*decPtr(t, "0.000000000000000001")))
 }
 
 func TestBuildIntentPlan_ShareProducesDecimalAmount(t *testing.T) {
 	t.Parallel()
 
 	// 33.33% of 100 = 33.33; remainder picks up the rest.
-	share := *decPtr("33.33")
+	share := *decPtr(t, "33.33")
 
 	input := TransactionIntentInput{
 		Asset: "USD",
@@ -1541,8 +1543,8 @@ func TestValidateBalanceEligibility_ExternalDestinationNegativeAvailable(t *test
 	}
 
 	err := ValidateBalanceEligibility(plan, balances)
-	de := assertDomainError(t, err, ErrorInsufficientFunds)
-	assert.Equal(t, "destinations", de.Field)
+	de := assertDomainError(t, err, ErrorDataCorruption)
+	assert.Equal(t, "balance", de.Field)
 }
 
 // ---------------------------------------------------------------------------
@@ -1554,12 +1556,12 @@ func TestIntentPlan_JSONRoundTrip(t *testing.T) {
 
 	original := IntentPlan{
 		Asset:   "BRL",
-		Total:   *decPtr("1234.56"),
+		Total:   *decPtr(t, "1234.56"),
 		Pending: true,
 		Sources: []Posting{{
 			Target:    LedgerTarget{AccountID: "a", BalanceID: "b"},
 			Asset:     "BRL",
-			Amount:    *decPtr("1234.56"),
+			Amount:    *decPtr(t, "1234.56"),
 			Operation: OperationOnHold,
 			Status:    StatusPending,
 			Route:     "pix",
@@ -1567,7 +1569,7 @@ func TestIntentPlan_JSONRoundTrip(t *testing.T) {
 		Destinations: []Posting{{
 			Target:    LedgerTarget{AccountID: "c", BalanceID: "d"},
 			Asset:     "BRL",
-			Amount:    *decPtr("1234.56"),
+			Amount:    *decPtr(t, "1234.56"),
 			Operation: OperationCredit,
 			Status:    StatusPending,
 		}},
@@ -1599,8 +1601,8 @@ func TestBalance_JSONRoundTrip(t *testing.T) {
 		LedgerID:       "led-1",
 		AccountID:      "acc-1",
 		Asset:          "BTC",
-		Available:      *decPtr("0.00123456"),
-		OnHold:         *decPtr("0.00000001"),
+		Available:      *decPtr(t, "0.00123456"),
+		OnHold:         *decPtr(t, "0.00000001"),
 		Version:        42,
 		AccountType:    AccountTypeInternal,
 		AllowSending:   true,

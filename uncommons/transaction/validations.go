@@ -107,8 +107,14 @@ func ValidateBalanceEligibility(plan IntentPlan, balances map[string]Balance) er
 			return NewDomainError(ErrorAccountStatusTransactionRestriction, "destinations", "destination balance is not allowed to receive")
 		}
 
-		if !balance.Available.IsZero() && balance.AccountType == AccountTypeExternal {
-			return NewDomainError(ErrorInsufficientFunds, "destinations", "external destination must have zero available balance")
+		if balance.AccountType == AccountTypeExternal {
+			if balance.Available.IsNegative() {
+				return NewDomainError(ErrorDataCorruption, "balance", "external destination account has negative balance, indicating data corruption")
+			}
+
+			if balance.Available.IsPositive() {
+				return NewDomainError(ErrorInsufficientFunds, "destinations", "external destination must have zero available balance")
+			}
 		}
 	}
 
@@ -117,82 +123,131 @@ func ValidateBalanceEligibility(plan IntentPlan, balances map[string]Balance) er
 
 // ApplyPosting applies a posting transition to a balance and returns the new state.
 func ApplyPosting(balance Balance, posting Posting) (Balance, error) {
-	if err := posting.Target.validate("posting.target"); err != nil {
+	if err := validatePostingAgainstBalance(balance, posting); err != nil {
 		return Balance{}, err
-	}
-
-	if balance.ID != posting.Target.BalanceID {
-		return Balance{}, NewDomainError(ErrorAccountIneligibility, "posting.target.balanceId", "posting does not belong to the provided balance")
-	}
-
-	if balance.AccountID != posting.Target.AccountID {
-		return Balance{}, NewDomainError(ErrorAccountIneligibility, "posting.target.accountId", "posting account does not match balance account")
-	}
-
-	if balance.Asset != posting.Asset {
-		return Balance{}, NewDomainError(ErrorAssetCodeNotFound, "posting.asset", "posting asset does not match balance asset")
-	}
-
-	if !posting.Amount.IsPositive() {
-		return Balance{}, NewDomainError(ErrorInvalidInput, "posting.amount", "posting amount must be greater than zero")
 	}
 
 	result := balance
 
+	updated, err := applyPostingOperation(result, posting)
+	if err != nil {
+		return Balance{}, err
+	}
+
+	if err := validatePostingResult(updated); err != nil {
+		return Balance{}, err
+	}
+
+	updated.Version++
+
+	return updated, nil
+}
+
+func validatePostingAgainstBalance(balance Balance, posting Posting) error {
+	if err := posting.Target.validate("posting.target"); err != nil {
+		return err
+	}
+
+	if balance.ID != posting.Target.BalanceID {
+		return NewDomainError(ErrorAccountIneligibility, "posting.target.balanceId", "posting does not belong to the provided balance")
+	}
+
+	if balance.AccountID != posting.Target.AccountID {
+		return NewDomainError(ErrorAccountIneligibility, "posting.target.accountId", "posting account does not match balance account")
+	}
+
+	if balance.Asset != posting.Asset {
+		return NewDomainError(ErrorAssetCodeNotFound, "posting.asset", "posting asset does not match balance asset")
+	}
+
+	if !posting.Amount.IsPositive() {
+		return NewDomainError(ErrorInvalidInput, "posting.amount", "posting amount must be greater than zero")
+	}
+
+	return nil
+}
+
+func applyPostingOperation(balance Balance, posting Posting) (Balance, error) {
+	result := balance
+
 	switch posting.Operation {
 	case OperationOnHold:
-		if posting.Status != StatusPending {
-			return Balance{}, NewDomainError(ErrorInvalidStateTransition, "posting.status", "ON_HOLD requires PENDING status")
-		}
-
-		result.Available = result.Available.Sub(posting.Amount)
-		result.OnHold = result.OnHold.Add(posting.Amount)
+		return applyOnHold(result, posting)
 	case OperationRelease:
-		if posting.Status != StatusCanceled {
-			return Balance{}, NewDomainError(ErrorInvalidStateTransition, "posting.status", "RELEASE requires CANCELED status")
-		}
-
-		result.OnHold = result.OnHold.Sub(posting.Amount)
-		result.Available = result.Available.Add(posting.Amount)
+		return applyRelease(result, posting)
 	case OperationDebit:
-		switch posting.Status {
-		case StatusApproved:
-			result.OnHold = result.OnHold.Sub(posting.Amount)
-		case StatusCreated:
-			result.Available = result.Available.Sub(posting.Amount)
-		default:
-			return Balance{}, NewDomainError(
-				ErrorInvalidStateTransition,
-				"posting.status",
-				"DEBIT only supports CREATED or APPROVED status",
-			)
-		}
+		return applyDebit(result, posting)
 	case OperationCredit:
-		switch posting.Status {
-		case StatusCreated, StatusApproved, StatusPending:
-			result.Available = result.Available.Add(posting.Amount)
-		default:
-			return Balance{}, NewDomainError(
-				ErrorInvalidStateTransition,
-				"posting.status",
-				"CREDIT only supports CREATED, APPROVED, or PENDING status",
-			)
-		}
+		return applyCredit(result, posting)
 	default:
 		return Balance{}, NewDomainError(ErrorInvalidInput, "posting.operation", "unsupported operation")
 	}
+}
 
-	if result.Available.IsNegative() {
-		return Balance{}, NewDomainError(ErrorInsufficientFunds, "posting.amount", "operation would result in negative available balance")
+func applyOnHold(balance Balance, posting Posting) (Balance, error) {
+	if posting.Status != StatusPending {
+		return Balance{}, NewDomainError(ErrorInvalidStateTransition, "posting.status", "ON_HOLD requires PENDING status")
 	}
 
-	if result.OnHold.IsNegative() {
-		return Balance{}, NewDomainError(ErrorInsufficientFunds, "posting.amount", "operation would result in negative on-hold balance")
+	balance.Available = balance.Available.Sub(posting.Amount)
+	balance.OnHold = balance.OnHold.Add(posting.Amount)
+
+	return balance, nil
+}
+
+func applyRelease(balance Balance, posting Posting) (Balance, error) {
+	if posting.Status != StatusCanceled {
+		return Balance{}, NewDomainError(ErrorInvalidStateTransition, "posting.status", "RELEASE requires CANCELED status")
 	}
 
-	result.Version++
+	balance.OnHold = balance.OnHold.Sub(posting.Amount)
+	balance.Available = balance.Available.Add(posting.Amount)
 
-	return result, nil
+	return balance, nil
+}
+
+func applyDebit(balance Balance, posting Posting) (Balance, error) {
+	switch posting.Status {
+	case StatusApproved:
+		balance.OnHold = balance.OnHold.Sub(posting.Amount)
+	case StatusCreated:
+		balance.Available = balance.Available.Sub(posting.Amount)
+	default:
+		return Balance{}, NewDomainError(
+			ErrorInvalidStateTransition,
+			"posting.status",
+			"DEBIT only supports CREATED or APPROVED status",
+		)
+	}
+
+	return balance, nil
+}
+
+func applyCredit(balance Balance, posting Posting) (Balance, error) {
+	switch posting.Status {
+	case StatusCreated, StatusApproved, StatusPending:
+		balance.Available = balance.Available.Add(posting.Amount)
+	default:
+		return Balance{}, NewDomainError(
+			ErrorInvalidStateTransition,
+			"posting.status",
+			"CREDIT only supports CREATED, APPROVED, or PENDING status",
+		)
+	}
+
+	return balance, nil
+}
+
+func validatePostingResult(balance Balance) error {
+	if balance.Available.IsNegative() {
+		return NewDomainError(ErrorInsufficientFunds, "posting.amount", "operation would result in negative available balance")
+	}
+
+	if balance.OnHold.IsNegative() {
+		return NewDomainError(ErrorInsufficientFunds, "posting.amount", "operation would result in negative on-hold balance")
+	}
+
+	return nil
 }
 
 // ResolveOperation resolves the posting operation from pending/source/status semantics.
@@ -241,94 +296,166 @@ func buildPostings(asset string, total decimal.Decimal, pending bool, status Tra
 
 	for i, allocation := range allocations {
 		field := fmt.Sprintf("allocations[%d]", i)
-		if err := allocation.Target.validate(field + ".target"); err != nil {
-			return nil, err
-		}
 
-		strategyCount := 0
-		if allocation.Amount != nil {
-			strategyCount++
-		}
-
-		if allocation.Share != nil {
-			strategyCount++
-		}
-
-		if allocation.Remainder {
-			strategyCount++
-		}
-
-		if strategyCount != 1 {
-			return nil, NewDomainError(ErrorInvalidInput, field, "allocation must define exactly one strategy: amount, share, or remainder")
-		}
-
-		operation, err := ResolveOperation(pending, isSource, status)
+		posting, amount, usesRemainder, err := buildPostingFromAllocation(
+			asset,
+			total,
+			pending,
+			status,
+			isSource,
+			allocation,
+			field,
+		)
 		if err != nil {
 			return nil, err
 		}
 
-		postings[i] = Posting{
-			Target:    allocation.Target,
-			Asset:     asset,
-			Operation: operation,
-			Status:    status,
-			Route:     allocation.Route,
-		}
+		postings[i] = posting
 
-		if allocation.Amount != nil {
-			if !allocation.Amount.IsPositive() {
-				return nil, NewDomainError(ErrorInvalidInput, field+".amount", "amount must be greater than zero")
+		if usesRemainder {
+			if remainderIndex >= 0 {
+				return nil, NewDomainError(ErrorInvalidInput, field+".remainder", "only one remainder allocation is allowed")
 			}
 
-			postings[i].Amount = *allocation.Amount
-			allocated = allocated.Add(*allocation.Amount)
+			remainderIndex = i
 
 			continue
 		}
 
-		if allocation.Share != nil {
-			share := *allocation.Share
-			if !share.IsPositive() || share.GreaterThan(oneHundred) {
-				return nil, NewDomainError(ErrorInvalidInput, field+".share", "share must be greater than 0 and at most 100")
-			}
-
-			amount := total.Mul(share.Div(oneHundred))
-			if !amount.IsPositive() {
-				return nil, NewDomainError(ErrorInvalidInput, field+".share", "share produces a non-positive amount")
-			}
-
-			postings[i].Amount = amount
-			allocated = allocated.Add(amount)
-
-			continue
-		}
-
-		if remainderIndex >= 0 {
-			return nil, NewDomainError(ErrorInvalidInput, field+".remainder", "only one remainder allocation is allowed")
-		}
-
-		remainderIndex = i
+		allocated = allocated.Add(amount)
 	}
 
 	if remainderIndex >= 0 {
-		remainder := total.Sub(allocated)
-		if !remainder.IsPositive() {
-			return nil, NewDomainError(ErrorTransactionValueMismatch, "allocations", "remainder is zero or negative")
+		remainder, err := computeRemainderAllocation(total, allocated)
+		if err != nil {
+			return nil, err
 		}
 
 		postings[remainderIndex].Amount = remainder
 		allocated = allocated.Add(remainder)
 	}
 
+	if err := validateAllocatedTotal(allocated, total); err != nil {
+		return nil, err
+	}
+
+	return postings, nil
+}
+
+func buildPostingFromAllocation(
+	asset string,
+	total decimal.Decimal,
+	pending bool,
+	status TransactionStatus,
+	isSource bool,
+	allocation Allocation,
+	field string,
+) (Posting, decimal.Decimal, bool, error) {
+	if err := allocation.Target.validate(field + ".target"); err != nil {
+		return Posting{}, decimal.Zero, false, err
+	}
+
+	if err := validateAllocationStrategy(allocation, field); err != nil {
+		return Posting{}, decimal.Zero, false, err
+	}
+
+	operation, err := ResolveOperation(pending, isSource, status)
+	if err != nil {
+		return Posting{}, decimal.Zero, false, err
+	}
+
+	posting := Posting{
+		Target:    allocation.Target,
+		Asset:     asset,
+		Operation: operation,
+		Status:    status,
+		Route:     allocation.Route,
+	}
+
+	amount, usesRemainder, err := resolveAllocationAmount(total, allocation, field)
+	if err != nil {
+		return Posting{}, decimal.Zero, false, err
+	}
+
+	if usesRemainder {
+		return posting, decimal.Zero, true, nil
+	}
+
+	posting.Amount = amount
+
+	return posting, amount, false, nil
+}
+
+func validateAllocationStrategy(allocation Allocation, field string) error {
+	strategyCount := 0
+	if allocation.Amount != nil {
+		strategyCount++
+	}
+
+	if allocation.Share != nil {
+		strategyCount++
+	}
+
+	if allocation.Remainder {
+		strategyCount++
+	}
+
+	if strategyCount != 1 {
+		return NewDomainError(ErrorInvalidInput, field, "allocation must define exactly one strategy: amount, share, or remainder")
+	}
+
+	return nil
+}
+
+func resolveAllocationAmount(total decimal.Decimal, allocation Allocation, field string) (decimal.Decimal, bool, error) {
+	if allocation.Amount != nil {
+		if !allocation.Amount.IsPositive() {
+			return decimal.Zero, false, NewDomainError(ErrorInvalidInput, field+".amount", "amount must be greater than zero")
+		}
+
+		return *allocation.Amount, false, nil
+	}
+
+	if allocation.Share != nil {
+		share := *allocation.Share
+		if !share.IsPositive() || share.GreaterThan(oneHundred) {
+			return decimal.Zero, false, NewDomainError(ErrorInvalidInput, field+".share", "share must be greater than 0 and at most 100")
+		}
+
+		amount := total.Mul(share.Div(oneHundred))
+		if !amount.IsPositive() {
+			return decimal.Zero, false, NewDomainError(ErrorInvalidInput, field+".share", "share produces a non-positive amount")
+		}
+
+		return amount, false, nil
+	}
+
+	if allocation.Remainder {
+		return decimal.Zero, true, nil
+	}
+
+	return decimal.Zero, false, NewDomainError(ErrorInvalidInput, field, "allocation must define exactly one strategy: amount, share, or remainder")
+}
+
+func computeRemainderAllocation(total decimal.Decimal, allocated decimal.Decimal) (decimal.Decimal, error) {
+	remainder := total.Sub(allocated)
+	if !remainder.IsPositive() {
+		return decimal.Zero, NewDomainError(ErrorTransactionValueMismatch, "allocations", "remainder is zero or negative")
+	}
+
+	return remainder, nil
+}
+
+func validateAllocatedTotal(allocated decimal.Decimal, total decimal.Decimal) error {
 	if !allocated.Equal(total) {
-		return nil, NewDomainError(
+		return NewDomainError(
 			ErrorTransactionValueMismatch,
 			"allocations",
 			fmt.Sprintf("allocated=%s expected=%s", allocated, total),
 		)
 	}
 
-	return postings, nil
+	return nil
 }
 
 func sumPostings(postings []Posting) decimal.Decimal {
