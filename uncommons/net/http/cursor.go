@@ -112,13 +112,11 @@ func PaginateRecords[T any](
 		limit = len(items)
 	}
 
-	paginated := items[:limit]
+	paginated := make([]T, limit)
+	copy(paginated, items[:limit])
 
 	if !isFirstPage && cursorDirection == CursorDirectionPrev {
-		reversed := make([]T, len(paginated))
-		copy(reversed, paginated)
-
-		return uncommons.Reverse(reversed)
+		return uncommons.Reverse(paginated)
 	}
 
 	return paginated

@@ -41,7 +41,7 @@ func WithBasicAuth(f BasicAuthFunc, realm string) fiber.Handler {
 		}
 
 		parts := strings.SplitN(auth, " ", 2)
-		if len(parts) != 2 || parts[0] != constant.Basic {
+		if len(parts) != 2 || !strings.EqualFold(parts[0], constant.Basic) {
 			return unauthorizedResponse(c, safeRealm)
 		}
 
