@@ -15,7 +15,9 @@ import (
 
 	// File system migration source. We need to import it to be able to use it as source in migrate.NewWithSourceInstance
 
+	"github.com/LerianStudio/lib-uncommons/uncommons/assert"
 	"github.com/LerianStudio/lib-uncommons/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/uncommons/runtime"
 	"github.com/bxcodec/dbresolver/v2"
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
@@ -31,11 +33,19 @@ const (
 )
 
 var (
+	ErrNilClient           = errors.New("postgres client is nil")
+	ErrNilContext          = errors.New("context is nil")
+	ErrInvalidConfig       = errors.New("invalid postgres config")
+	ErrNotConnected        = errors.New("postgres client is not connected")
+	ErrInvalidDatabaseName = errors.New("invalid database name")
+	ErrMigrationDirty      = errors.New("postgres migration dirty")
+
 	dbOpenFn = sql.Open
 
 	createResolverFn = func(primaryDB, replicaDB *sql.DB) (_ dbresolver.DB, err error) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
+				runtime.HandlePanicValue(context.Background(), log.NewNop(), recovered, "postgres", "create_resolver")
 				err = fmt.Errorf("failed to create resolver: %v", recovered)
 			}
 		}()
@@ -60,229 +70,385 @@ var (
 	dbNamePattern                      = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]{0,62}$`)
 )
 
-// PostgresConnection is a hub which deal with postgres connections.
-type PostgresConnection struct {
-	ConnectionStringPrimary string
-	ConnectionStringReplica string
-	PrimaryDBName           string
-	Component               string
-	MigrationsPath          string
-	AllowMultiStatements    bool
-	Logger                  log.Logger
-	MaxOpenConnections      int
-	MaxIdleConnections      int
-	connectionDB            dbresolver.DB
-	connected               bool
-	mu                      sync.RWMutex
+// Config stores immutable connection options for a postgres client.
+type Config struct {
+	PrimaryDSN         string
+	ReplicaDSN         string
+	Logger             log.Logger
+	MaxOpenConnections int
+	MaxIdleConnections int
 }
 
-// initDefaults sets sane default values for zero-value fields.
-func (pc *PostgresConnection) initDefaults() {
-	if pc.Logger == nil {
-		pc.Logger = &log.NoneLogger{}
+func (c Config) withDefaults() Config {
+	if c.Logger == nil {
+		c.Logger = log.NewNop()
 	}
 
-	if pc.MaxOpenConnections <= 0 {
-		pc.MaxOpenConnections = defaultMaxOpenConns
+	if c.MaxOpenConnections <= 0 {
+		c.MaxOpenConnections = defaultMaxOpenConns
 	}
 
-	if pc.MaxIdleConnections <= 0 {
-		pc.MaxIdleConnections = defaultMaxIdleConns
+	if c.MaxIdleConnections <= 0 {
+		c.MaxIdleConnections = defaultMaxIdleConns
 	}
+
+	return c
 }
 
-// Connect keeps a singleton connection with postgres.
-func (pc *PostgresConnection) Connect(ctxs ...context.Context) error {
-	pc.mu.Lock()
-	defer pc.mu.Unlock()
-
-	ctx := contextFrom(ctxs...)
-
-	return pc.connectLocked(ctx)
-}
-
-// connectLocked performs the actual connection. Caller must hold pc.mu write lock.
-func (pc *PostgresConnection) connectLocked(ctx context.Context) error {
-	ctx = contextFrom(ctx)
-
-	pc.initDefaults()
-
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("context canceled before database connection: %w", err)
+func (c Config) validate() error {
+	if strings.TrimSpace(c.PrimaryDSN) == "" {
+		return fmt.Errorf("%w: primary dsn cannot be empty", ErrInvalidConfig)
 	}
 
-	if pc.connectionDB != nil {
-		if err := pc.closeLocked(); err != nil {
-			pc.Logger.Warnf("failed to close previous connection before reconnect: %v", err)
-		}
-	}
-
-	pc.Logger.Info("Connecting to primary and replica databases...")
-
-	dbPrimary, err := dbOpenFn("pgx", pc.ConnectionStringPrimary)
-	if err != nil {
-		sanitizedErr := sanitizeSensitiveError(err)
-		pc.Logger.Errorf("failed to connect to primary database: %s", sanitizedErr)
-
-		return fmt.Errorf("failed to connect to primary database: %s", sanitizedErr)
-	}
-
-	// Ensure primary is cleaned up if anything downstream fails.
-	var success bool
-
-	defer func() {
-		if !success {
-			dbPrimary.Close()
-		}
-	}()
-
-	dbPrimary.SetMaxOpenConns(pc.MaxOpenConnections)
-	dbPrimary.SetMaxIdleConns(pc.MaxIdleConnections)
-	dbPrimary.SetConnMaxLifetime(defaultConnMaxLifetime)
-	dbPrimary.SetConnMaxIdleTime(defaultConnMaxIdleTime)
-
-	dbReadOnlyReplica, err := dbOpenFn("pgx", pc.ConnectionStringReplica)
-	if err != nil {
-		sanitizedErr := sanitizeSensitiveError(err)
-		pc.Logger.Errorf("failed to connect to replica database: %s", sanitizedErr)
-
-		return fmt.Errorf("failed to connect to replica database: %s", sanitizedErr)
-	}
-
-	// Ensure replica is cleaned up if anything downstream fails.
-	defer func() {
-		if !success {
-			dbReadOnlyReplica.Close()
-		}
-	}()
-
-	dbReadOnlyReplica.SetMaxOpenConns(pc.MaxOpenConnections)
-	dbReadOnlyReplica.SetMaxIdleConns(pc.MaxIdleConnections)
-	dbReadOnlyReplica.SetConnMaxLifetime(defaultConnMaxLifetime)
-	dbReadOnlyReplica.SetConnMaxIdleTime(defaultConnMaxIdleTime)
-
-	connectionDB, err := createResolverFn(dbPrimary, dbReadOnlyReplica)
-	if err != nil {
-		pc.Logger.Errorf("failed to create resolver: %v", err)
-		return fmt.Errorf("failed to create resolver: %w", err)
-	}
-
-	migrationsPath, err := pc.getMigrationsPath()
-	if err != nil {
-		pc.Logger.Errorf("failed to resolve migration path: %v", err)
-		return err
-	}
-
-	if err := runMigrationsFn(dbPrimary, migrationsPath, pc.PrimaryDBName, pc.AllowMultiStatements, pc.Logger); err != nil {
-		return err
-	}
-
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("context canceled before ping: %w", err)
-	}
-
-	if err := connectionDB.PingContext(ctx); err != nil {
-		pc.Logger.Errorf("failed to ping database: %v", err)
-		return fmt.Errorf("failed to ping database: %w", err)
-	}
-
-	pc.connected = true
-	pc.connectionDB = connectionDB
-
-	pc.Logger.Info("Connected to postgres")
-
-	success = true
-
-	return nil
-}
-
-// GetDB returns a pointer to the postgres connection, initializing it if necessary.
-func (pc *PostgresConnection) GetDB(ctxs ...context.Context) (dbresolver.DB, error) {
-	ctx := contextFrom(ctxs...)
-
-	pc.mu.RLock()
-
-	if pc.connectionDB != nil {
-		db := pc.connectionDB
-		pc.mu.RUnlock()
-
-		return db, nil
-	}
-
-	pc.mu.RUnlock()
-
-	pc.mu.Lock()
-	defer pc.mu.Unlock()
-
-	// Double-check after acquiring write lock.
-	if pc.connectionDB != nil {
-		return pc.connectionDB, nil
-	}
-
-	if err := pc.connectLocked(ctx); err != nil {
-		return nil, err
-	}
-
-	return pc.connectionDB, nil
-}
-
-// Close releases database connection resources.
-func (pc *PostgresConnection) Close() error {
-	pc.mu.Lock()
-	defer pc.mu.Unlock()
-
-	return pc.closeLocked()
-}
-
-func (pc *PostgresConnection) closeLocked() error {
-	if pc.connectionDB != nil {
-		err := pc.connectionDB.Close()
-		pc.connectionDB = nil
-		pc.connected = false
-
-		return err
+	if strings.TrimSpace(c.ReplicaDSN) == "" {
+		return fmt.Errorf("%w: replica dsn cannot be empty", ErrInvalidConfig)
 	}
 
 	return nil
 }
 
-// IsConnected reports whether the database resolver is initialized.
-func (pc *PostgresConnection) IsConnected() bool {
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
-
-	return pc.connected
+// Client is the v2 postgres connection manager.
+type Client struct {
+	mu          sync.RWMutex
+	cfg         Config
+	resolver    dbresolver.DB
+	primary     *sql.DB
+	replica     *sql.DB
+	connectOnce sync.Once
+	connectErr  error
 }
 
-// getMigrationsPath returns the path to migration files, calculating it if not explicitly provided.
-func (pc *PostgresConnection) getMigrationsPath() (string, error) {
-	if pc.MigrationsPath != "" {
-		return sanitizePath(pc.MigrationsPath)
+// New creates a postgres client with immutable configuration.
+func New(cfg Config) (*Client, error) {
+	cfg = cfg.withDefaults()
+
+	if err := cfg.validate(); err != nil {
+		return nil, fmt.Errorf("postgres new: %w", err)
 	}
 
-	// Sanitize Component to prevent path traversal (CWE-22).
+	return &Client{cfg: cfg}, nil
+}
+
+func (c *Client) logger() log.Logger {
+	if c == nil || c.cfg.Logger == nil {
+		return log.NewNop()
+	}
+
+	return c.cfg.Logger
+}
+
+// Connect establishes a new primary/replica resolver and swaps it atomically.
+func (c *Client) Connect(ctx context.Context) error {
+	if c == nil {
+		return fmt.Errorf("postgres connect: %w", ErrNilClient)
+	}
+
+	if ctx == nil {
+		return fmt.Errorf("postgres connect: %w", ErrNilContext)
+	}
+
+	primary, replica, resolver, err := c.buildConnection(ctx)
+	if err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	oldResolver := c.resolver
+	oldPrimary := c.primary
+	oldReplica := c.replica
+
+	c.resolver = resolver
+	c.primary = primary
+	c.replica = replica
+	c.mu.Unlock()
+
+	if oldResolver != nil {
+		if err := oldResolver.Close(); err != nil {
+			logf(c.logger(), log.LevelWarn, "failed to close previous resolver after swap: %v", err)
+		}
+	}
+
+	// Always close old primary/replica explicitly to prevent leaks.
+	// The resolver may not own the underlying sql.DB connections.
+	_ = closeDB(oldPrimary)
+	_ = closeDB(oldReplica)
+
+	logf(c.logger(), log.LevelInfo, "Connected to postgres")
+
+	return nil
+}
+
+func (c *Client) buildConnection(ctx context.Context) (*sql.DB, *sql.DB, dbresolver.DB, error) {
+	logf(c.logger(), log.LevelInfo, "Connecting to primary and replica databases...")
+
+	primary, err := c.newSQLDB(c.cfg.PrimaryDSN)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("postgres connect: %w", err)
+	}
+
+	replica, err := c.newSQLDB(c.cfg.ReplicaDSN)
+	if err != nil {
+		_ = closeDB(primary)
+		return nil, nil, nil, fmt.Errorf("postgres connect: %w", err)
+	}
+
+	resolver, err := createResolverFn(primary, replica)
+	if err != nil {
+		_ = closeDB(primary)
+		_ = closeDB(replica)
+
+		logf(c.logger(), log.LevelError, "failed to create resolver: %v", err)
+
+		return nil, nil, nil, fmt.Errorf("postgres connect: failed to create resolver: %w", err)
+	}
+
+	if err := resolver.PingContext(ctx); err != nil {
+		_ = resolver.Close()
+		_ = closeDB(primary)
+		_ = closeDB(replica)
+
+		logf(c.logger(), log.LevelError, "failed to ping database: %v", err)
+
+		return nil, nil, nil, fmt.Errorf("postgres connect: failed to ping database: %w", err)
+	}
+
+	return primary, replica, resolver, nil
+}
+
+func (c *Client) newSQLDB(dsn string) (*sql.DB, error) {
+	db, err := dbOpenFn("pgx", dsn)
+	if err != nil {
+		sanitizedErr := sanitizeSensitiveError(err)
+		logf(c.logger(), log.LevelError, "failed to open database: %s", sanitizedErr)
+
+		return nil, fmt.Errorf("failed to open database: %s", sanitizedErr)
+	}
+
+	db.SetMaxOpenConns(c.cfg.MaxOpenConnections)
+	db.SetMaxIdleConns(c.cfg.MaxIdleConnections)
+	db.SetConnMaxLifetime(defaultConnMaxLifetime)
+	db.SetConnMaxIdleTime(defaultConnMaxIdleTime)
+
+	return db, nil
+}
+
+// Resolver returns the resolver, connecting lazily if needed.
+func (c *Client) Resolver(ctx context.Context) (dbresolver.DB, error) {
+	if c == nil {
+		return nil, fmt.Errorf("postgres resolver: %w", ErrNilClient)
+	}
+
+	if ctx == nil {
+		return nil, fmt.Errorf("postgres resolver: %w", ErrNilContext)
+	}
+
+	c.mu.RLock()
+	resolver := c.resolver
+	c.mu.RUnlock()
+
+	if resolver != nil {
+		return resolver, nil
+	}
+
+	c.connectOnce.Do(func() {
+		c.connectErr = c.Connect(ctx)
+	})
+
+	if c.connectErr != nil {
+		return nil, c.connectErr
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.resolver == nil {
+		return nil, fmt.Errorf("postgres resolver: %w", ErrNotConnected)
+	}
+
+	return c.resolver, nil
+}
+
+// Primary returns the current primary sql.DB, useful for admin operations.
+func (c *Client) Primary() (*sql.DB, error) {
+	if c == nil {
+		return nil, fmt.Errorf("postgres primary: %w", ErrNilClient)
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.primary == nil {
+		return nil, fmt.Errorf("postgres primary: %w", ErrNotConnected)
+	}
+
+	return c.primary, nil
+}
+
+// Close releases database resources.
+func (c *Client) Close() error {
+	if c == nil {
+		return fmt.Errorf("postgres close: %w", ErrNilClient)
+	}
+
+	c.mu.Lock()
+	resolver := c.resolver
+	primary := c.primary
+	replica := c.replica
+
+	c.resolver = nil
+	c.primary = nil
+	c.replica = nil
+	c.mu.Unlock()
+
+	if resolver != nil {
+		if err := resolver.Close(); err != nil {
+			return fmt.Errorf("postgres close: %w", err)
+		}
+
+		return nil
+	}
+
+	if err := closeDB(primary); err != nil {
+		return fmt.Errorf("postgres close: %w", err)
+	}
+
+	if err := closeDB(replica); err != nil {
+		return fmt.Errorf("postgres close: %w", err)
+	}
+
+	return nil
+}
+
+// IsConnected reports whether the resolver is currently initialized.
+func (c *Client) IsConnected() (bool, error) {
+	if c == nil {
+		asserter := assert.New(context.Background(), nil, "postgres", "IsConnected")
+		_ = asserter.Never(context.Background(), "postgres client receiver is nil")
+
+		return false, ErrNilClient
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.resolver != nil, nil
+}
+
+func closeDB(db *sql.DB) error {
+	if db == nil {
+		return nil
+	}
+
+	return db.Close()
+}
+
+func logf(logger log.Logger, level log.Level, format string, args ...any) {
+	if logger == nil {
+		logger = log.NewNop()
+	}
+
+	logger.Log(context.Background(), level, fmt.Sprintf(format, args...))
+}
+
+// MigrationConfig stores migration-only settings.
+type MigrationConfig struct {
+	PrimaryDSN           string
+	DatabaseName         string
+	MigrationsPath       string
+	Component            string
+	AllowMultiStatements bool
+	Logger               log.Logger
+}
+
+func (c MigrationConfig) withDefaults() MigrationConfig {
+	if c.Logger == nil {
+		c.Logger = log.NewNop()
+	}
+
+	return c
+}
+
+func (c MigrationConfig) validate() error {
+	if strings.TrimSpace(c.PrimaryDSN) == "" {
+		return fmt.Errorf("%w: primary dsn cannot be empty", ErrInvalidConfig)
+	}
+
+	if err := validateDBName(c.DatabaseName); err != nil {
+		return err
+	}
+
+	if strings.TrimSpace(c.MigrationsPath) == "" && strings.TrimSpace(c.Component) == "" {
+		return fmt.Errorf("%w: migrations_path or component is required", ErrInvalidConfig)
+	}
+
+	return nil
+}
+
+// Migrator runs schema migrations explicitly.
+type Migrator struct {
+	cfg MigrationConfig
+}
+
+// NewMigrator creates a migrator with explicit migration config.
+func NewMigrator(cfg MigrationConfig) (*Migrator, error) {
+	cfg = cfg.withDefaults()
+
+	if err := cfg.validate(); err != nil {
+		return nil, fmt.Errorf("postgres new_migrator: %w", err)
+	}
+
+	return &Migrator{cfg: cfg}, nil
+}
+
+// Up runs all up migrations.
+func (m *Migrator) Up(ctx context.Context) error {
+	if m == nil {
+		return fmt.Errorf("postgres migrate_up: %w", ErrNilClient)
+	}
+
+	if ctx == nil {
+		return fmt.Errorf("postgres migrate_up: %w", ErrNilContext)
+	}
+
+	db, err := dbOpenFn("pgx", m.cfg.PrimaryDSN)
+	if err != nil {
+		sanitizedErr := sanitizeSensitiveError(err)
+		logf(m.cfg.Logger, log.LevelError, "failed to open migration database: %s", sanitizedErr)
+
+		return fmt.Errorf("postgres migrate_up: failed to open migration database: %s", sanitizedErr)
+	}
+	defer db.Close()
+
+	migrationsPath, err := resolveMigrationsPath(m.cfg.MigrationsPath, m.cfg.Component)
+	if err != nil {
+		logf(m.cfg.Logger, log.LevelError, "failed to resolve migration path: %v", err)
+		return fmt.Errorf("postgres migrate_up: %w", err)
+	}
+
+	if err := runMigrationsFn(db, migrationsPath, m.cfg.DatabaseName, m.cfg.AllowMultiStatements, m.cfg.Logger); err != nil {
+		return fmt.Errorf("postgres migrate_up: %w", err)
+	}
+
+	return nil
+}
+
+func resolveMigrationsPath(migrationsPath, component string) (string, error) {
+	if strings.TrimSpace(migrationsPath) != "" {
+		return sanitizePath(migrationsPath)
+	}
+
 	// filepath.Base strips directory components, so "../../etc" becomes "etc".
-	sanitized := filepath.Base(pc.Component)
-	if sanitized == "." || sanitized == string(filepath.Separator) {
-		return "", fmt.Errorf("invalid component name: %q", pc.Component)
+	sanitized := filepath.Base(component)
+	if sanitized == "." || sanitized == string(filepath.Separator) || sanitized == "" {
+		return "", fmt.Errorf("invalid component name: %q", component)
 	}
 
 	calculatedPath, err := filepath.Abs(filepath.Join("components", sanitized, "migrations"))
 	if err != nil {
-		pc.Logger.Errorf("failed to get migration filepath: %v", err)
-
 		return "", err
 	}
 
 	return calculatedPath, nil
-}
-
-func contextFrom(ctxs ...context.Context) context.Context {
-	if len(ctxs) == 0 || ctxs[0] == nil {
-		return context.Background()
-	}
-
-	return ctxs[0]
 }
 
 func sanitizeSensitiveError(err error) string {
@@ -316,7 +482,7 @@ func sanitizePath(path string) (string, error) {
 
 func validateDBName(name string) error {
 	if !dbNamePattern.MatchString(name) {
-		return fmt.Errorf("invalid database name: %q", name)
+		return fmt.Errorf("%w: %q", ErrInvalidDatabaseName, name)
 	}
 
 	return nil
@@ -324,13 +490,13 @@ func validateDBName(name string) error {
 
 func runMigrations(dbPrimary *sql.DB, migrationsPath, primaryDBName string, allowMultiStatements bool, logger log.Logger) error {
 	if err := validateDBName(primaryDBName); err != nil {
-		logger.Errorf("invalid primary database name: %v", err)
+		logf(logger, log.LevelError, "invalid primary database name: %v", err)
 		return err
 	}
 
 	primaryURL, err := url.Parse(filepath.ToSlash(migrationsPath))
 	if err != nil {
-		logger.Errorf("failed to parse migrations url: %v", err)
+		logf(logger, log.LevelError, "failed to parse migrations url: %v", err)
 		return fmt.Errorf("failed to parse migrations url: %w", err)
 	}
 
@@ -342,34 +508,34 @@ func runMigrations(dbPrimary *sql.DB, migrationsPath, primaryDBName string, allo
 		SchemaName:            "public",
 	})
 	if err != nil {
-		logger.Errorf("failed to create postgres driver instance: %v", err)
+		logf(logger, log.LevelError, "failed to create postgres driver instance: %v", err)
 		return fmt.Errorf("failed to create postgres driver instance: %w", err)
 	}
 
 	m, err := migrate.NewWithDatabaseInstance(primaryURL.String(), primaryDBName, primaryDriver)
 	if err != nil {
-		logger.Errorf("failed to get migrations: %v", err)
+		logf(logger, log.LevelError, "failed to get migrations: %v", err)
 		return fmt.Errorf("failed to create migration instance: %w", err)
 	}
 
 	if err := m.Up(); err != nil {
 		if errors.Is(err, migrate.ErrNoChange) {
-			logger.Info("No new migrations found. Skipping...")
+			logf(logger, log.LevelInfo, "No new migrations found. Skipping...")
 			return nil
 		}
 
 		if errors.Is(err, os.ErrNotExist) {
-			logger.Warn("No migration files found. Skipping migration step...")
+			logf(logger, log.LevelWarn, "No migration files found. Skipping migration step...")
 			return nil
 		}
 
 		var dirtyErr migrate.ErrDirty
 		if errors.As(err, &dirtyErr) {
-			logger.Errorf("Migration failed with dirty version %d", dirtyErr.Version)
-			return fmt.Errorf("migration failed: dirty database version %d", dirtyErr.Version)
+			logf(logger, log.LevelError, "Migration failed with dirty version %d", dirtyErr.Version)
+			return fmt.Errorf("%w: database version %d", ErrMigrationDirty, dirtyErr.Version)
 		}
 
-		logger.Errorf("Migration failed: %v", err)
+		logf(logger, log.LevelError, "Migration failed: %v", err)
 
 		return fmt.Errorf("migration failed: %w", err)
 	}

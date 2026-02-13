@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
-	"sync"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -88,12 +88,21 @@ func (f *fakeResolver) Stats() sql.DBStats { return sql.DBStats{} }
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
 
-	db, err := sql.Open("pgx", "postgres://postgres:secret@localhost:5432/postgres?sslmode=disable")
-	require.NoError(t, err)
+	dsn := os.Getenv("POSTGRES_DSN")
+	if dsn == "" {
+		dsn = "postgres://postgres:secret@localhost:5432/postgres?sslmode=disable"
+	}
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Skipf("skipping: cannot open postgres connection (set POSTGRES_DSN to configure): %v", err)
+	}
 
 	return db
 }
 
+// withPatchedDependencies replaces package-level dependency functions for testing.
+// WARNING: Tests using this helper must NOT call t.Parallel() as it mutates global state.
 func withPatchedDependencies(t *testing.T, openFn func(string, string) (*sql.DB, error), resolverFn func(*sql.DB, *sql.DB) (dbresolver.DB, error), migrateFn func(*sql.DB, string, string, bool, log.Logger) error) {
 	t.Helper()
 
@@ -112,92 +121,48 @@ func withPatchedDependencies(t *testing.T, openFn func(string, string) (*sql.DB,
 	})
 }
 
-func TestInitDefaults(t *testing.T) {
-	t.Run("sets logger and defaults for non-positive values", func(t *testing.T) {
-		pc := &PostgresConnection{
-			MaxOpenConnections: -1,
-			MaxIdleConnections: 0,
-		}
-
-		pc.initDefaults()
-
-		assert.NotNil(t, pc.Logger)
-		assert.Equal(t, defaultMaxOpenConns, pc.MaxOpenConnections)
-		assert.Equal(t, defaultMaxIdleConns, pc.MaxIdleConnections)
-	})
-
-	t.Run("preserves explicit values", func(t *testing.T) {
-		logger := &log.NoneLogger{}
-		pc := &PostgresConnection{
-			Logger:             logger,
-			MaxOpenConnections: 77,
-			MaxIdleConnections: 22,
-		}
-
-		pc.initDefaults()
-
-		assert.Equal(t, logger, pc.Logger)
-		assert.Equal(t, 77, pc.MaxOpenConnections)
-		assert.Equal(t, 22, pc.MaxIdleConnections)
-	})
+func validConfig() Config {
+	return Config{
+		PrimaryDSN: "postgres://postgres:secret@localhost:5432/postgres?sslmode=disable",
+		ReplicaDSN: "postgres://postgres:secret@localhost:5432/postgres?sslmode=disable",
+	}
 }
 
-func TestGetMigrationsPath(t *testing.T) {
-	t.Run("sanitizes explicit path and rejects traversal", func(t *testing.T) {
-		pc := &PostgresConnection{MigrationsPath: "../../etc/passwd", Logger: &log.NoneLogger{}}
-
-		_, err := pc.getMigrationsPath()
+func TestNewConfigValidationAndDefaults(t *testing.T) {
+	t.Run("rejects missing dsn", func(t *testing.T) {
+		_, err := New(Config{})
 
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid migrations path")
+		assert.ErrorIs(t, err, ErrInvalidConfig)
 	})
 
-	t.Run("sanitizes component", func(t *testing.T) {
-		pc := &PostgresConnection{Component: "../../ledger", Logger: &log.NoneLogger{}}
-
-		path, err := pc.getMigrationsPath()
+	t.Run("applies defaults", func(t *testing.T) {
+		client, err := New(validConfig())
 
 		require.NoError(t, err)
-		assert.NotContains(t, path, "..")
-		assert.Contains(t, path, "components")
-		assert.Contains(t, path, "ledger")
-	})
-
-	t.Run("rejects empty component", func(t *testing.T) {
-		pc := &PostgresConnection{Component: "", Logger: &log.NoneLogger{}}
-
-		_, err := pc.getMigrationsPath()
-
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid component name")
+		require.NotNil(t, client)
+		assert.NotNil(t, client.cfg.Logger)
+		assert.Equal(t, defaultMaxOpenConns, client.cfg.MaxOpenConnections)
+		assert.Equal(t, defaultMaxIdleConns, client.cfg.MaxIdleConnections)
 	})
 }
 
-func TestConnectUsesBackgroundContextWhenNil(t *testing.T) {
-	resolver := &fakeResolver{}
-
-	withPatchedDependencies(
-		t,
-		func(string, string) (*sql.DB, error) { return testDB(t), nil },
-		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return resolver, nil },
-		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
-	)
-
-	pc := &PostgresConnection{
-		ConnectionStringPrimary: "postgres://postgres:secret@localhost:5432/postgres?sslmode=disable",
-		ConnectionStringReplica: "postgres://postgres:secret@localhost:5432/postgres?sslmode=disable",
-		PrimaryDBName:           "postgres",
-		Component:               "ledger",
-		MigrationsPath:          "components/ledger/migrations",
-	}
-
-	err := pc.Connect(nil)
+func TestConnectRequiresContext(t *testing.T) {
+	client, err := New(validConfig())
 	require.NoError(t, err)
 
-	assert.True(t, pc.IsConnected())
-	assert.NotNil(t, resolver.pingCtx)
+	err = client.Connect(nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNilContext)
+}
 
-	assert.NoError(t, pc.Close())
+func TestDBRequiresContext(t *testing.T) {
+	client, err := New(validConfig())
+	require.NoError(t, err)
+
+	_, err = client.Resolver(nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNilContext)
 }
 
 func TestConnectSanitizesSensitiveError(t *testing.T) {
@@ -210,119 +175,136 @@ func TestConnectSanitizesSensitiveError(t *testing.T) {
 		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
 	)
 
-	pc := &PostgresConnection{Logger: &log.NoneLogger{}}
+	client, err := New(validConfig())
+	require.NoError(t, err)
 
-	err := pc.Connect(context.Background())
+	err = client.Connect(context.Background())
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "supersecret")
 	assert.Contains(t, err.Error(), "://***@")
 	assert.Contains(t, err.Error(), "password=***")
 }
 
-func TestConnectClosesPreviousResolverOnReconnect(t *testing.T) {
-	previous := &fakeResolver{}
-	next := &fakeResolver{}
+func TestConnectAtomicSwapKeepsOldOnFailure(t *testing.T) {
+	oldResolver := &fakeResolver{}
+	newResolver := &fakeResolver{pingErr: errors.New("boom")}
 
 	withPatchedDependencies(
 		t,
 		func(string, string) (*sql.DB, error) { return testDB(t), nil },
-		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return next, nil },
+		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return newResolver, nil },
 		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
 	)
 
-	pc := &PostgresConnection{
-		ConnectionStringPrimary: "postgres://postgres:secret@localhost:5432/postgres?sslmode=disable",
-		ConnectionStringReplica: "postgres://postgres:secret@localhost:5432/postgres?sslmode=disable",
-		PrimaryDBName:           "postgres",
-		MigrationsPath:          "components/ledger/migrations",
-		connectionDB:            previous,
-		connected:               true,
-	}
-
-	err := pc.Connect(context.Background())
+	client, err := New(validConfig())
 	require.NoError(t, err)
-	assert.Equal(t, int32(1), previous.closeCall.Load())
+	client.resolver = oldResolver
 
-	assert.NoError(t, pc.Close())
-}
-
-func TestConnectFailsWithCancelledContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	pc := &PostgresConnection{}
-
-	err := pc.Connect(ctx)
-
+	err = client.Connect(context.Background())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "context canceled")
+	assert.Equal(t, oldResolver, client.resolver)
+	assert.Equal(t, int32(0), oldResolver.closeCall.Load())
+	assert.Equal(t, int32(1), newResolver.closeCall.Load())
 }
 
-func TestGetDBConcurrentSingleInitialization(t *testing.T) {
-	resolver := &fakeResolver{}
-	var migrationsCalls atomic.Int32
-	var openCalls atomic.Int32
+func TestConnectAtomicSwapClosesPreviousOnSuccess(t *testing.T) {
+	oldResolver := &fakeResolver{}
+	newResolver := &fakeResolver{}
 
 	withPatchedDependencies(
 		t,
-		func(string, string) (*sql.DB, error) {
-			openCalls.Add(1)
-			return testDB(t), nil
-		},
-		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return resolver, nil },
-		func(*sql.DB, string, string, bool, log.Logger) error {
-			migrationsCalls.Add(1)
-			return nil
-		},
+		func(string, string) (*sql.DB, error) { return testDB(t), nil },
+		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return newResolver, nil },
+		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
 	)
 
-	pc := &PostgresConnection{
-		ConnectionStringPrimary: "postgres://postgres:secret@localhost:5432/postgres?sslmode=disable",
-		ConnectionStringReplica: "postgres://postgres:secret@localhost:5432/postgres?sslmode=disable",
-		PrimaryDBName:           "postgres",
-		MigrationsPath:          "components/ledger/migrations",
-	}
+	client, err := New(validConfig())
+	require.NoError(t, err)
+	client.resolver = oldResolver
 
-	const workers = 50
-	var wg sync.WaitGroup
-	errCh := make(chan error, workers)
-	wg.Add(workers)
+	err = client.Connect(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), oldResolver.closeCall.Load())
+	connected, err := client.IsConnected()
+	require.NoError(t, err)
+	assert.True(t, connected)
 
-	for i := 0; i < workers; i++ {
-		go func() {
-			defer wg.Done()
-			_, err := pc.GetDB()
-			errCh <- err
-		}()
-	}
+	assert.NoError(t, client.Close())
+}
 
-	wg.Wait()
-	close(errCh)
+func TestDBLazyConnect(t *testing.T) {
+	resolver := &fakeResolver{}
 
-	for err := range errCh {
-		require.NoError(t, err)
-	}
+	withPatchedDependencies(
+		t,
+		func(string, string) (*sql.DB, error) { return testDB(t), nil },
+		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return resolver, nil },
+		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+	)
 
-	assert.Equal(t, int32(1), migrationsCalls.Load())
-	assert.Equal(t, int32(2), openCalls.Load())
+	client, err := New(validConfig())
+	require.NoError(t, err)
 
-	assert.NoError(t, pc.Close())
+	db, err := client.Resolver(context.Background())
+	require.NoError(t, err)
+	assert.NotNil(t, db)
+	assert.NotNil(t, resolver.pingCtx)
+
+	assert.NoError(t, client.Close())
 }
 
 func TestCloseIsIdempotent(t *testing.T) {
 	resolver := &fakeResolver{}
 
-	pc := &PostgresConnection{connectionDB: resolver, connected: true}
+	client, err := New(validConfig())
+	require.NoError(t, err)
+	client.resolver = resolver
 
-	require.NoError(t, pc.Close())
-	require.NoError(t, pc.Close())
-	assert.False(t, pc.IsConnected())
+	require.NoError(t, client.Close())
+	require.NoError(t, client.Close())
+	connected, err := client.IsConnected()
+	require.NoError(t, err)
+	assert.False(t, connected)
 	assert.Equal(t, int32(1), resolver.closeCall.Load())
 }
 
-func TestValidateDBName(t *testing.T) {
-	require.NoError(t, validateDBName("ledger_db"))
-	require.Error(t, validateDBName(""))
-	require.Error(t, validateDBName("bad-name"))
-	require.Error(t, validateDBName("1ledger"))
+func TestNewMigratorValidation(t *testing.T) {
+	t.Run("requires db name", func(t *testing.T) {
+		_, err := NewMigrator(MigrationConfig{PrimaryDSN: "postgres://localhost:5432/postgres"})
+
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidDatabaseName)
+	})
+
+	t.Run("requires component or path", func(t *testing.T) {
+		_, err := NewMigrator(MigrationConfig{PrimaryDSN: "postgres://localhost:5432/postgres", DatabaseName: "ledger"})
+
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidConfig)
+	})
+}
+
+func TestMigratorUpRunsExplicitly(t *testing.T) {
+	var migrationCalls atomic.Int32
+
+	withPatchedDependencies(
+		t,
+		func(string, string) (*sql.DB, error) { return testDB(t), nil },
+		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return &fakeResolver{}, nil },
+		func(*sql.DB, string, string, bool, log.Logger) error {
+			migrationCalls.Add(1)
+			return nil
+		},
+	)
+
+	migrator, err := NewMigrator(MigrationConfig{
+		PrimaryDSN:     "postgres://postgres:secret@localhost:5432/postgres?sslmode=disable",
+		DatabaseName:   "postgres",
+		MigrationsPath: "components/ledger/migrations",
+	})
+	require.NoError(t, err)
+
+	err = migrator.Up(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), migrationCalls.Load())
 }
