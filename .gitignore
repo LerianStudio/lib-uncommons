@@ -16,3 +16,4 @@ gosec-report.sarif
 
 docs/codereview/
 .codegraph/
+vendor/
