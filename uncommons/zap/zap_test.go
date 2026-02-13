@@ -1,9 +1,11 @@
 package zap
 
 import (
+	"errors"
+	"strings"
 	"testing"
+	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -11,418 +13,324 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// Compile-time interface compliance check.
-var _ log.Logger = (*ZapWithTraceLogger)(nil)
+func newObservedLogger(level zapcore.Level) (*Logger, *observer.ObservedLogs) {
+	core, observed := observer.New(level)
 
-// newTestLogger creates an observable zap.SugaredLogger for assertions on log output.
-// The observer captures all log entries so tests can verify message content, level, and fields.
-func newTestLogger(level zapcore.Level) (*ZapWithTraceLogger, *observer.ObservedLogs) {
-	core, obs := observer.New(level)
-	sugar := zap.New(core).Sugar()
-
-	return &ZapWithTraceLogger{
-		Logger: sugar,
-	}, obs
+	return &Logger{logger: zap.New(core)}, observed
 }
 
-// newTestLoggerWithTemplate creates an observable logger with a default message template.
-func newTestLoggerWithTemplate(level zapcore.Level, template string) (*ZapWithTraceLogger, *observer.ObservedLogs) {
-	core, obs := observer.New(level)
-	sugar := zap.New(core).Sugar()
+// newBufferedLogger creates a Logger that writes JSON to a buffer for output
+// inspection (e.g., verifying CWE-117 sanitization in serialized output).
+func newBufferedLogger(level zapcore.Level) (*Logger, *strings.Builder) {
+	buf := &strings.Builder{}
+	ws := zapcore.AddSync(buf)
 
-	return &ZapWithTraceLogger{
-		Logger:                 sugar,
-		defaultMessageTemplate: template,
-	}, obs
+	encoderCfg := zap.NewProductionEncoderConfig()
+	encoderCfg.TimeKey = "" // omit timestamp for deterministic test output
+	core := zapcore.NewCore(
+		zapcore.NewJSONEncoder(encoderCfg),
+		ws,
+		level,
+	)
+
+	return &Logger{logger: zap.New(core)}, buf
 }
 
-// --- hydrateArgs unit tests ---
+func TestLoggerNilReceiverFallsBackToNop(t *testing.T) {
+	var nilLogger *Logger
 
-func TestHydrateArgs(t *testing.T) {
-	t.Run("prepends template to args", func(t *testing.T) {
-		result := hydrateArgs("prefix: ", []any{"hello", "world"})
-		require.Len(t, result, 3)
-		assert.Equal(t, "prefix: ", result[0])
-		assert.Equal(t, "hello", result[1])
-		assert.Equal(t, "world", result[2])
-	})
-
-	t.Run("with empty template still prepends", func(t *testing.T) {
-		result := hydrateArgs("", []any{"hello"})
-		require.Len(t, result, 2)
-		assert.Equal(t, "", result[0])
-		assert.Equal(t, "hello", result[1])
-	})
-
-	t.Run("with nil args returns slice with only template", func(t *testing.T) {
-		result := hydrateArgs("template", nil)
-		require.Len(t, result, 1)
-		assert.Equal(t, "template", result[0])
-	})
-
-	t.Run("with empty args returns slice with only template", func(t *testing.T) {
-		result := hydrateArgs("template", []any{})
-		require.Len(t, result, 1)
-		assert.Equal(t, "template", result[0])
+	assert.NotPanics(t, func() {
+		nilLogger.Info("message")
 	})
 }
 
-// --- Nil-safety tests ---
+func TestLoggerNilUnderlyingFallsBackToNop(t *testing.T) {
+	logger := &Logger{}
 
-func TestNilLoggerSafety(t *testing.T) {
-	nilLogger := &ZapWithTraceLogger{}
-
-	t.Run("Info does not panic with nil Logger", func(t *testing.T) {
-		assert.NotPanics(t, func() { nilLogger.Info("test") })
-	})
-
-	t.Run("Infof does not panic with nil Logger", func(t *testing.T) {
-		assert.NotPanics(t, func() { nilLogger.Infof("test %s", "val") })
-	})
-
-	t.Run("Infoln does not panic with nil Logger", func(t *testing.T) {
-		assert.NotPanics(t, func() { nilLogger.Infoln("test") })
-	})
-
-	t.Run("Error does not panic with nil Logger", func(t *testing.T) {
-		assert.NotPanics(t, func() { nilLogger.Error("test") })
-	})
-
-	t.Run("Errorf does not panic with nil Logger", func(t *testing.T) {
-		assert.NotPanics(t, func() { nilLogger.Errorf("test %s", "val") })
-	})
-
-	t.Run("Errorln does not panic with nil Logger", func(t *testing.T) {
-		assert.NotPanics(t, func() { nilLogger.Errorln("test") })
-	})
-
-	t.Run("Warn does not panic with nil Logger", func(t *testing.T) {
-		assert.NotPanics(t, func() { nilLogger.Warn("test") })
-	})
-
-	t.Run("Warnf does not panic with nil Logger", func(t *testing.T) {
-		assert.NotPanics(t, func() { nilLogger.Warnf("test %s", "val") })
-	})
-
-	t.Run("Warnln does not panic with nil Logger", func(t *testing.T) {
-		assert.NotPanics(t, func() { nilLogger.Warnln("test") })
-	})
-
-	t.Run("Debug does not panic with nil Logger", func(t *testing.T) {
-		assert.NotPanics(t, func() { nilLogger.Debug("test") })
-	})
-
-	t.Run("Debugf does not panic with nil Logger", func(t *testing.T) {
-		assert.NotPanics(t, func() { nilLogger.Debugf("test %s", "val") })
-	})
-
-	t.Run("Debugln does not panic with nil Logger", func(t *testing.T) {
-		assert.NotPanics(t, func() { nilLogger.Debugln("test") })
-	})
-
-	t.Run("Sync returns nil with nil Logger", func(t *testing.T) {
-		err := nilLogger.Sync()
-		assert.NoError(t, err)
-	})
-
-	t.Run("WithFields returns usable zero-value logger with nil Logger", func(t *testing.T) {
-		result := nilLogger.WithFields("key", "value")
-		assert.NotNil(t, result)
-
-		zapResult, ok := result.(*ZapWithTraceLogger)
-		assert.True(t, ok)
-		assert.NotNil(t, zapResult)
-		assert.Nil(t, zapResult.Logger)
-	})
-
-	t.Run("WithDefaultMessageTemplate does not panic with nil Logger", func(t *testing.T) {
-		assert.NotPanics(t, func() { nilLogger.WithDefaultMessageTemplate("template") })
+	assert.NotPanics(t, func() {
+		logger.Info("message")
 	})
 }
 
-func TestNilPointerZapLoggerSafety(t *testing.T) {
-	var nilLogger *ZapWithTraceLogger
+func TestStructuredLoggingMethods(t *testing.T) {
+	logger, observed := newObservedLogger(zapcore.DebugLevel)
 
-	t.Run("log methods on nil receiver do not panic", func(t *testing.T) {
-		methods := []struct {
-			name string
-			call func()
-		}{
-			{name: "Info", call: func() { nilLogger.Info("test") }},
-			{name: "Infof", call: func() { nilLogger.Infof("test %s", "val") }},
-			{name: "Infoln", call: func() { nilLogger.Infoln("test") }},
-			{name: "Error", call: func() { nilLogger.Error("test") }},
-			{name: "Errorf", call: func() { nilLogger.Errorf("test %s", "val") }},
-			{name: "Errorln", call: func() { nilLogger.Errorln("test") }},
-			{name: "Warn", call: func() { nilLogger.Warn("test") }},
-			{name: "Warnf", call: func() { nilLogger.Warnf("test %s", "val") }},
-			{name: "Warnln", call: func() { nilLogger.Warnln("test") }},
-			{name: "Debug", call: func() { nilLogger.Debug("test") }},
-			{name: "Debugf", call: func() { nilLogger.Debugf("test %s", "val") }},
-			{name: "Debugln", call: func() { nilLogger.Debugln("test") }},
-			{name: "Fatal", call: func() { nilLogger.Fatal("test") }},
-			{name: "Fatalf", call: func() { nilLogger.Fatalf("test %s", "val") }},
-			{name: "Fatalln", call: func() { nilLogger.Fatalln("test") }},
-		}
+	logger.Debug("debug message")
+	logger.Info("info message", String("request_id", "req-1"))
+	logger.Warn("warn message")
+	logger.Error("error message", ErrorField(errors.New("boom")))
 
-		for _, tt := range methods {
-			t.Run(tt.name, func(t *testing.T) {
-				assert.NotPanics(t, tt.call)
-			})
-		}
-	})
+	entries := observed.All()
+	require.Len(t, entries, 4)
 
-	t.Run("builder methods on nil receiver return usable zero-value logger", func(t *testing.T) {
-		assert.NotPanics(t, func() {
-			nilWithFields := nilLogger.WithFields("key", "value")
+	assert.Equal(t, zapcore.DebugLevel, entries[0].Level)
+	assert.Equal(t, "debug message", entries[0].Message)
 
-			castWithFields, ok := nilWithFields.(*ZapWithTraceLogger)
-			assert.True(t, ok)
-			assert.NotNil(t, castWithFields)
-			assert.Nil(t, castWithFields.Logger) // zero-value: Logger field is nil
+	assert.Equal(t, zapcore.InfoLevel, entries[1].Level)
+	assert.Equal(t, "info message", entries[1].Message)
+	assert.Equal(t, "req-1", entries[1].ContextMap()["request_id"])
 
-			nilWithTemplate := nilLogger.WithDefaultMessageTemplate("template")
+	assert.Equal(t, zapcore.WarnLevel, entries[2].Level)
+	assert.Equal(t, "warn message", entries[2].Message)
 
-			castWithTemplate, ok := nilWithTemplate.(*ZapWithTraceLogger)
-			assert.True(t, ok)
-			assert.NotNil(t, castWithTemplate)
-			assert.Nil(t, castWithTemplate.Logger) // zero-value: Logger field is nil
+	assert.Equal(t, zapcore.ErrorLevel, entries[3].Level)
+	assert.Equal(t, "error message", entries[3].Message)
+}
+
+func TestWithAddsFieldsWithoutMutatingParent(t *testing.T) {
+	logger, observed := newObservedLogger(zapcore.DebugLevel)
+	child := logger.With(String("tenant_id", "t-1"))
+
+	logger.Info("parent")
+	child.Info("child")
+
+	entries := observed.All()
+	require.Len(t, entries, 2)
+
+	_, parentHasTenant := entries[0].ContextMap()["tenant_id"]
+	assert.False(t, parentHasTenant)
+	assert.Equal(t, "t-1", entries[1].ContextMap()["tenant_id"])
+}
+
+func TestSyncReturnsErrorFromUnderlyingLogger(t *testing.T) {
+	logger, _ := newObservedLogger(zapcore.DebugLevel)
+
+	assert.NoError(t, logger.Sync())
+}
+
+func TestFieldHelpers(t *testing.T) {
+	logger, observed := newObservedLogger(zapcore.DebugLevel)
+	logger.Info(
+		"helpers",
+		String("s", "value"),
+		Int("i", 42),
+		Bool("b", true),
+		Duration("d", 2*time.Second),
+	)
+
+	entries := observed.All()
+	require.Len(t, entries, 1)
+	ctx := entries[0].ContextMap()
+
+	assert.Equal(t, "value", ctx["s"])
+	assert.Equal(t, int64(42), ctx["i"])
+	assert.Equal(t, true, ctx["b"])
+	assert.Equal(t, 2*time.Second, ctx["d"])
+}
+
+// ===========================================================================
+// CWE-117: Log Injection Prevention for Zap Adapter
+//
+// Zap serializes output as JSON, which inherently escapes control characters
+// in string values. These tests verify that behavior is preserved and that
+// injection attempts cannot split log lines or forge entries.
+// ===========================================================================
+
+// TestCWE117_ZapMessageNewlineInjection verifies that newlines in log messages
+// are properly escaped in JSON output, preventing log line splitting.
+func TestCWE117_ZapMessageNewlineInjection(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{
+			name:    "LF in message",
+			message: "legitimate\n{\"level\":\"error\",\"msg\":\"forged entry\"}",
+		},
+		{
+			name:    "CR in message",
+			message: "legitimate\r{\"level\":\"error\",\"msg\":\"forged entry\"}",
+		},
+		{
+			name:    "CRLF in message",
+			message: "legitimate\r\n{\"level\":\"error\",\"msg\":\"forged entry\"}",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger, buf := newBufferedLogger(zapcore.DebugLevel)
+			logger.Info(tt.message)
+			_ = logger.Sync()
+
+			out := buf.String()
+			// JSON output from zap should be a single line per entry
+			lines := strings.Split(strings.TrimSpace(out), "\n")
+			assert.Len(t, lines, 1,
+				"CWE-117: zap JSON output must be a single line, got %d lines:\n%s", len(lines), out)
+
+			// The raw newline characters should not appear in the JSON output
+			// (JSON encoder escapes them as \n, \r)
+			assert.NotContains(t, out, "forged entry\"}",
+				"forged JSON entry must not appear as a separate parseable line")
 		})
+	}
+}
 
-		assert.NotPanics(t, func() { assert.Nil(t, nilLogger.Sync()) })
+// TestCWE117_ZapFieldValueInjection verifies field values with newlines
+// are escaped by zap's JSON encoder.
+func TestCWE117_ZapFieldValueInjection(t *testing.T) {
+	logger, buf := newBufferedLogger(zapcore.DebugLevel)
+
+	maliciousValue := "user123\n{\"level\":\"error\",\"msg\":\"ADMIN ACCESS GRANTED\"}"
+	logger.Info("login", String("user_id", maliciousValue))
+	_ = logger.Sync()
+
+	out := buf.String()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	assert.Len(t, lines, 1,
+		"CWE-117: field value injection must not create extra JSON lines")
+}
+
+// TestCWE117_ZapFieldNameInjection verifies that field names with control
+// characters are escaped by zap's JSON encoder.
+func TestCWE117_ZapFieldNameInjection(t *testing.T) {
+	logger, buf := newBufferedLogger(zapcore.DebugLevel)
+
+	// Field name with embedded newline
+	logger.Info("event", zap.String("key\ninjected", "value"))
+	_ = logger.Sync()
+
+	out := buf.String()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	assert.Len(t, lines, 1,
+		"CWE-117: field name injection must not create extra JSON lines")
+}
+
+// TestCWE117_ZapNullByteInMessage verifies null bytes in messages are handled.
+func TestCWE117_ZapNullByteInMessage(t *testing.T) {
+	logger, buf := newBufferedLogger(zapcore.DebugLevel)
+	logger.Info("before\x00after")
+	_ = logger.Sync()
+
+	out := buf.String()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	assert.Len(t, lines, 1, "null byte must not split log output")
+}
+
+// TestCWE117_ZapANSIEscapeInMessage verifies ANSI escapes don't break output.
+func TestCWE117_ZapANSIEscapeInMessage(t *testing.T) {
+	logger, buf := newBufferedLogger(zapcore.DebugLevel)
+	logger.Info("normal \x1b[31mRED\x1b[0m normal")
+	_ = logger.Sync()
+
+	out := buf.String()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	assert.Len(t, lines, 1, "ANSI escape must not split log output")
+}
+
+// TestCWE117_ZapTabInMessage verifies tab characters are handled in JSON output.
+func TestCWE117_ZapTabInMessage(t *testing.T) {
+	logger, buf := newBufferedLogger(zapcore.DebugLevel)
+	logger.Info("col1\tcol2\tcol3")
+	_ = logger.Sync()
+
+	out := buf.String()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	assert.Len(t, lines, 1, "tabs must not split log output")
+	// JSON encoder escapes tabs as \t in the JSON string
+	assert.Contains(t, out, "col1")
+	assert.Contains(t, out, "col2")
+}
+
+// TestCWE117_ZapWithPreservesSanitization verifies that child loggers created
+// via With() still properly handle injection attempts.
+func TestCWE117_ZapWithPreservesSanitization(t *testing.T) {
+	logger, buf := newBufferedLogger(zapcore.DebugLevel)
+	child := logger.With(String("session", "sess\n{\"forged\":true}"))
+	child.Info("child message")
+	_ = logger.Sync()
+
+	out := buf.String()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	assert.Len(t, lines, 1,
+		"CWE-117: With() must not allow field injection to split lines")
+}
+
+// TestCWE117_ZapMultipleVectorsSimultaneously combines multiple attack vectors.
+func TestCWE117_ZapMultipleVectorsSimultaneously(t *testing.T) {
+	logger, buf := newBufferedLogger(zapcore.DebugLevel)
+
+	// Message with injection
+	msg := "event\n{\"level\":\"error\",\"msg\":\"forged\"}\ttab\r\nmore"
+	// Fields with injection
+	logger.Info(msg,
+		zap.String("user\nfake", "val\nfake"),
+		zap.String("safe_key", "safe_val"))
+	_ = logger.Sync()
+
+	out := buf.String()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	assert.Len(t, lines, 1,
+		"CWE-117: combined attack vectors must not create multiple JSON lines")
+}
+
+// ===========================================================================
+// Zap Level Filtering Tests
+// ===========================================================================
+
+// TestZapLevelFiltering verifies that the observed logger correctly filters
+// by log level.
+func TestZapLevelFiltering(t *testing.T) {
+	t.Run("info level suppresses debug", func(t *testing.T) {
+		logger, observed := newObservedLogger(zapcore.InfoLevel)
+		logger.Debug("should be suppressed")
+		logger.Info("should appear")
+
+		entries := observed.All()
+		require.Len(t, entries, 1)
+		assert.Equal(t, "should appear", entries[0].Message)
+	})
+
+	t.Run("error level suppresses warn and below", func(t *testing.T) {
+		logger, observed := newObservedLogger(zapcore.ErrorLevel)
+		logger.Debug("suppressed")
+		logger.Info("suppressed")
+		logger.Warn("suppressed")
+		logger.Error("visible")
+
+		entries := observed.All()
+		require.Len(t, entries, 1)
+		assert.Equal(t, "visible", entries[0].Message)
 	})
 }
 
-// --- Logging method behavioral tests ---
-
-func TestInfoMethods(t *testing.T) {
-	t.Run("Info logs message at info level", func(t *testing.T) {
-		zapLogger, obs := newTestLogger(zapcore.DebugLevel)
-		zapLogger.Info("hello world")
-
-		entries := obs.All()
-		require.Len(t, entries, 1)
-		assert.Equal(t, zapcore.InfoLevel, entries[0].Level)
-		assert.Contains(t, entries[0].Message, "hello world")
-	})
-
-	t.Run("Infof logs formatted message at info level", func(t *testing.T) {
-		zapLogger, obs := newTestLogger(zapcore.DebugLevel)
-		zapLogger.Infof("count: %d", 42)
-
-		entries := obs.All()
-		require.Len(t, entries, 1)
-		assert.Equal(t, zapcore.InfoLevel, entries[0].Level)
-		assert.Equal(t, "count: 42", entries[0].Message)
-	})
-
-	t.Run("Infoln logs message at info level", func(t *testing.T) {
-		zapLogger, obs := newTestLogger(zapcore.DebugLevel)
-		zapLogger.Infoln("hello", "world")
-
-		entries := obs.All()
-		require.Len(t, entries, 1)
-		assert.Equal(t, zapcore.InfoLevel, entries[0].Level)
-	})
+// TestZapRawReturnsUnderlyingLogger verifies Raw() returns the inner zap.Logger.
+func TestZapRawReturnsUnderlyingLogger(t *testing.T) {
+	logger, _ := newObservedLogger(zapcore.DebugLevel)
+	raw := logger.Raw()
+	assert.NotNil(t, raw)
 }
 
-func TestErrorMethods(t *testing.T) {
-	t.Run("Error logs message at error level", func(t *testing.T) {
-		zapLogger, obs := newTestLogger(zapcore.DebugLevel)
-		zapLogger.Error("something failed")
-
-		entries := obs.All()
-		require.Len(t, entries, 1)
-		assert.Equal(t, zapcore.ErrorLevel, entries[0].Level)
-		assert.Contains(t, entries[0].Message, "something failed")
-	})
-
-	t.Run("Errorf logs formatted message at error level", func(t *testing.T) {
-		zapLogger, obs := newTestLogger(zapcore.DebugLevel)
-		zapLogger.Errorf("error code: %d", 500)
-
-		entries := obs.All()
-		require.Len(t, entries, 1)
-		assert.Equal(t, zapcore.ErrorLevel, entries[0].Level)
-		assert.Equal(t, "error code: 500", entries[0].Message)
-	})
-
-	t.Run("Errorln logs message at error level", func(t *testing.T) {
-		zapLogger, obs := newTestLogger(zapcore.DebugLevel)
-		zapLogger.Errorln("error", "detail")
-
-		entries := obs.All()
-		require.Len(t, entries, 1)
-		assert.Equal(t, zapcore.ErrorLevel, entries[0].Level)
-	})
+// TestZapRawOnNilReturnsNop verifies Raw() on nil returns nop logger.
+func TestZapRawOnNilReturnsNop(t *testing.T) {
+	var logger *Logger
+	raw := logger.Raw()
+	assert.NotNil(t, raw, "Raw() on nil logger should return nop, not nil")
 }
 
-func TestWarnMethods(t *testing.T) {
-	t.Run("Warn logs message at warn level", func(t *testing.T) {
-		zapLogger, obs := newTestLogger(zapcore.DebugLevel)
-		zapLogger.Warn("be careful")
+// TestZapErrorFieldHelper verifies the ErrorField helper.
+func TestZapErrorFieldHelper(t *testing.T) {
+	logger, observed := newObservedLogger(zapcore.DebugLevel)
+	testErr := errors.New("test error")
+	logger.Error("failed", ErrorField(testErr))
 
-		entries := obs.All()
-		require.Len(t, entries, 1)
-		assert.Equal(t, zapcore.WarnLevel, entries[0].Level)
-		assert.Contains(t, entries[0].Message, "be careful")
-	})
-
-	t.Run("Warnf logs formatted message at warn level", func(t *testing.T) {
-		zapLogger, obs := newTestLogger(zapcore.DebugLevel)
-		zapLogger.Warnf("threshold: %d%%", 90)
-
-		entries := obs.All()
-		require.Len(t, entries, 1)
-		assert.Equal(t, zapcore.WarnLevel, entries[0].Level)
-		assert.Equal(t, "threshold: 90%", entries[0].Message)
-	})
-
-	t.Run("Warnln logs message at warn level", func(t *testing.T) {
-		zapLogger, obs := newTestLogger(zapcore.DebugLevel)
-		zapLogger.Warnln("warning", "issued")
-
-		entries := obs.All()
-		require.Len(t, entries, 1)
-		assert.Equal(t, zapcore.WarnLevel, entries[0].Level)
-	})
+	entries := observed.All()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "test error", entries[0].ContextMap()["error"].(string))
 }
 
-func TestDebugMethods(t *testing.T) {
-	t.Run("Debug logs message at debug level", func(t *testing.T) {
-		zapLogger, obs := newTestLogger(zapcore.DebugLevel)
-		zapLogger.Debug("trace info")
+// TestZapAnyFieldHelper verifies the Any helper with various types.
+func TestZapAnyFieldHelper(t *testing.T) {
+	logger, observed := newObservedLogger(zapcore.DebugLevel)
+	logger.Info("test",
+		Any("slice", []string{"a", "b"}),
+		Any("map", map[string]int{"x": 1}))
 
-		entries := obs.All()
-		require.Len(t, entries, 1)
-		assert.Equal(t, zapcore.DebugLevel, entries[0].Level)
-		assert.Contains(t, entries[0].Message, "trace info")
-	})
-
-	t.Run("Debugf logs formatted message at debug level", func(t *testing.T) {
-		zapLogger, obs := newTestLogger(zapcore.DebugLevel)
-		zapLogger.Debugf("step %d of %d", 3, 5)
-
-		entries := obs.All()
-		require.Len(t, entries, 1)
-		assert.Equal(t, zapcore.DebugLevel, entries[0].Level)
-		assert.Equal(t, "step 3 of 5", entries[0].Message)
-	})
-
-	t.Run("Debugln logs message at debug level", func(t *testing.T) {
-		zapLogger, obs := newTestLogger(zapcore.DebugLevel)
-		zapLogger.Debugln("debug", "detail")
-
-		entries := obs.All()
-		require.Len(t, entries, 1)
-		assert.Equal(t, zapcore.DebugLevel, entries[0].Level)
-	})
-}
-
-// --- Template hydration behavioral tests ---
-
-func TestTemplateHydration(t *testing.T) {
-	t.Run("Info without template does not prepend empty string", func(t *testing.T) {
-		zapLogger, obs := newTestLogger(zapcore.DebugLevel)
-		zapLogger.Info("clean message")
-
-		entries := obs.All()
-		require.Len(t, entries, 1)
-		// The key fix: no leading space when template is empty
-		assert.Equal(t, "clean message", entries[0].Message)
-	})
-
-	t.Run("Info with template prepends template", func(t *testing.T) {
-		zapLogger, obs := newTestLoggerWithTemplate(zapcore.DebugLevel, "REQ-123 | ")
-		zapLogger.Info("processing request")
-
-		entries := obs.All()
-		require.Len(t, entries, 1)
-		assert.Contains(t, entries[0].Message, "REQ-123 | ")
-		assert.Contains(t, entries[0].Message, "processing request")
-	})
-
-	t.Run("Infof without template passes format unchanged", func(t *testing.T) {
-		zapLogger, obs := newTestLogger(zapcore.DebugLevel)
-		zapLogger.Infof("processed %d items", 100)
-
-		entries := obs.All()
-		require.Len(t, entries, 1)
-		assert.Equal(t, "processed 100 items", entries[0].Message)
-	})
-
-	t.Run("Infof with template prepends template to format", func(t *testing.T) {
-		zapLogger, obs := newTestLoggerWithTemplate(zapcore.DebugLevel, "REQ-456 | ")
-		zapLogger.Infof("processed %d items in %dms", 100, 250)
-
-		entries := obs.All()
-		require.Len(t, entries, 1)
-		assert.Equal(t, "REQ-456 | processed 100 items in 250ms", entries[0].Message)
-	})
-}
-
-// --- Builder method tests ---
-
-func TestWithFields(t *testing.T) {
-	t.Run("returns new logger preserving template", func(t *testing.T) {
-		zapLogger, _ := newTestLoggerWithTemplate(zapcore.DebugLevel, "template: ")
-		newLogger := zapLogger.WithFields("key", "value")
-
-		require.NotNil(t, newLogger)
-
-		typed, ok := newLogger.(*ZapWithTraceLogger)
-		require.True(t, ok, "WithFields should return *ZapWithTraceLogger")
-		assert.Equal(t, "template: ", typed.defaultMessageTemplate)
-		assert.NotSame(t, zapLogger.Logger, typed.Logger, "WithFields must return a new SugaredLogger instance")
-	})
-
-	t.Run("original logger is not mutated", func(t *testing.T) {
-		zapLogger, obs := newTestLoggerWithTemplate(zapcore.DebugLevel, "")
-		_ = zapLogger.WithFields("extra_key", "extra_value")
-
-		// Log from the original — should NOT have the extra field
-		zapLogger.Info("original")
-		entries := obs.All()
-		require.Len(t, entries, 1)
-
-		for _, field := range entries[0].ContextMap() {
-			assert.NotEqual(t, "extra_value", field)
-		}
-	})
-}
-
-func TestWithDefaultMessageTemplate(t *testing.T) {
-	t.Run("returns new logger with updated template", func(t *testing.T) {
-		zapLogger, _ := newTestLogger(zapcore.DebugLevel)
-		newLogger := zapLogger.WithDefaultMessageTemplate("new-template: ")
-
-		require.NotNil(t, newLogger)
-
-		typed, ok := newLogger.(*ZapWithTraceLogger)
-		require.True(t, ok)
-		assert.Equal(t, "new-template: ", typed.defaultMessageTemplate)
-	})
-
-	t.Run("original logger template unchanged", func(t *testing.T) {
-		zapLogger, _ := newTestLoggerWithTemplate(zapcore.DebugLevel, "original: ")
-		_ = zapLogger.WithDefaultMessageTemplate("new: ")
-
-		assert.Equal(t, "original: ", zapLogger.defaultMessageTemplate)
-	})
-
-	t.Run("shares underlying Logger instance", func(t *testing.T) {
-		zapLogger, _ := newTestLogger(zapcore.DebugLevel)
-		newLogger := zapLogger.WithDefaultMessageTemplate("prefix: ")
-
-		typed := newLogger.(*ZapWithTraceLogger)
-		assert.Same(t, zapLogger.Logger, typed.Logger, "WithDefaultMessageTemplate should share the same SugaredLogger")
-	})
-}
-
-func TestSync(t *testing.T) {
-	t.Run("returns nil on success", func(t *testing.T) {
-		zapLogger, _ := newTestLogger(zapcore.DebugLevel)
-		err := zapLogger.Sync()
-		assert.NoError(t, err)
-	})
+	entries := observed.All()
+	require.Len(t, entries, 1)
+	// Verify fields exist (exact format depends on zap encoding)
+	ctx := entries[0].ContextMap()
+	assert.NotNil(t, ctx["slice"])
+	assert.NotNil(t, ctx["map"])
 }
