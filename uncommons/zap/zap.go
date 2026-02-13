@@ -5,6 +5,7 @@ import (
 	"time"
 
 	logpkg "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -36,8 +37,19 @@ func (l *Logger) must() *zap.Logger {
 // ---------------------------------------------------------------------------
 
 // Log implements log.Logger. It dispatches to the appropriate zap level.
-func (l *Logger) Log(_ context.Context, level logpkg.Level, msg string, fields ...logpkg.Field) {
+// If ctx carries an active OpenTelemetry span, trace_id and span_id are
+// automatically appended so logs correlate with distributed traces.
+func (l *Logger) Log(ctx context.Context, level logpkg.Level, msg string, fields ...logpkg.Field) {
 	zapFields := logFieldsToZap(fields)
+
+	if ctx != nil {
+		if sc := trace.SpanFromContext(ctx).SpanContext(); sc.IsValid() {
+			zapFields = append(zapFields,
+				zap.String("trace_id", sc.TraceID().String()),
+				zap.String("span_id", sc.SpanID().String()),
+			)
+		}
+	}
 
 	switch level {
 	case logpkg.LevelDebug:
@@ -80,6 +92,10 @@ func (l *Logger) Enabled(level logpkg.Level) bool {
 
 // Sync flushes buffered logs, respecting context cancellation.
 func (l *Logger) Sync(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	done := make(chan error, 1)
 
 	go func() {
