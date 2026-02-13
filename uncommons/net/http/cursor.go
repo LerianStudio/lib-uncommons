@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/LerianStudio/lib-uncommons/uncommons"
-	"github.com/LerianStudio/lib-uncommons/uncommons/constants"
+	constant "github.com/LerianStudio/lib-uncommons/uncommons/constants"
 	"github.com/Masterminds/squirrel"
 )
 
@@ -158,7 +158,7 @@ func CalculateCursor(
 			if err != nil {
 				return CursorPagination{}, err
 			}
-			
+
 			pagination.Prev = base64.StdEncoding.EncodeToString(cursorBytesPrev)
 		}
 	}

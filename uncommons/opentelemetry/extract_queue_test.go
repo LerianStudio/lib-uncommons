@@ -25,7 +25,7 @@ func TestExtractTraceContextFromQueueHeaders(t *testing.T) {
 
 	// Inject trace headers (what producer would do)
 	traceHeaders := InjectQueueTraceContext(rootCtx)
-	
+
 	// Convert to amqp.Table format (simulating RabbitMQ headers)
 	amqpHeaders := make(map[string]any)
 	for k, v := range traceHeaders {
@@ -60,7 +60,7 @@ func TestExtractTraceContextFromQueueHeaders(t *testing.T) {
 
 func TestExtractTraceContextFromQueueHeadersWithEmptyHeaders(t *testing.T) {
 	baseCtx := context.Background()
-	
+
 	// Test with nil headers
 	extractedCtx := ExtractTraceContextFromQueueHeaders(baseCtx, nil)
 	if extractedCtx != baseCtx {
@@ -76,7 +76,7 @@ func TestExtractTraceContextFromQueueHeadersWithEmptyHeaders(t *testing.T) {
 
 func TestExtractTraceContextFromQueueHeadersWithNonStringValues(t *testing.T) {
 	baseCtx := context.Background()
-	
+
 	// Test with headers containing non-string values
 	amqpHeaders := map[string]any{
 		"X-Request-Id": "test-123",
@@ -86,7 +86,7 @@ func TestExtractTraceContextFromQueueHeadersWithNonStringValues(t *testing.T) {
 	}
 
 	extractedCtx := ExtractTraceContextFromQueueHeaders(baseCtx, amqpHeaders)
-	
+
 	// Should return base context since no valid trace headers
 	if extractedCtx != baseCtx {
 		t.Error("Expected same context when no valid trace headers present")
@@ -112,7 +112,7 @@ func TestExtractTraceContextFromQueueHeadersWithMixedTypes(t *testing.T) {
 	// Create span and get trace headers
 	rootCtx, rootSpan := tracer.Start(context.Background(), "test-span")
 	defer rootSpan.End()
-	
+
 	traceHeaders := InjectQueueTraceContext(rootCtx)
 
 	// Create mixed-type headers (simulating real RabbitMQ scenario)
@@ -121,7 +121,7 @@ func TestExtractTraceContextFromQueueHeadersWithMixedTypes(t *testing.T) {
 		"Retry-Count":  42,
 		"Enabled":      true,
 	}
-	
+
 	// Add trace headers as strings
 	for k, v := range traceHeaders {
 		amqpHeaders[k] = v

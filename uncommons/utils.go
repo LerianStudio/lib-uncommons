@@ -21,9 +21,11 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-const beginningKey = "{"
-const keySeparator = ":"
-const endKey = "}"
+const (
+	beginningKey = "{"
+	keySeparator = ":"
+	endKey       = "}"
+)
 
 var internalServicePattern = regexp.MustCompile(`^[\w-]+/[\d.]+\s+LerianStudio$`)
 

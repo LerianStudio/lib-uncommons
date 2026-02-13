@@ -162,7 +162,6 @@ func TestWithTimeoutSafe_ParentDeadlineShorter(t *testing.T) {
 func TestWithTimeoutSafe_CancelWorks(t *testing.T) {
 	parent := context.Background()
 	ctx, cancel, err := WithTimeoutSafe(parent, 5*time.Second)
-
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

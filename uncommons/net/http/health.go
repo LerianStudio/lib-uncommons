@@ -2,7 +2,7 @@ package http
 
 import (
 	"github.com/LerianStudio/lib-uncommons/uncommons/circuitbreaker"
-	"github.com/LerianStudio/lib-uncommons/uncommons/constants"
+	constant "github.com/LerianStudio/lib-uncommons/uncommons/constants"
 	"github.com/gofiber/fiber/v2"
 )
 

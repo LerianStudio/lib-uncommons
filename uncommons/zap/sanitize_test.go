@@ -1,7 +1,7 @@
 package zap
 
 import (
-	"fmt"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -68,7 +68,7 @@ func TestSanitizeArgs(t *testing.T) {
 	t.Run("non-string types pass through", func(t *testing.T) {
 		t.Parallel()
 
-		err := fmt.Errorf("error with\nnewline")
+		err := errors.New("error with\nnewline")
 		args := []any{42, 3.14, err, nil}
 		result := sanitizeArgs(args)
 

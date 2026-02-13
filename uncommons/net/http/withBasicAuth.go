@@ -3,10 +3,11 @@ package http
 import (
 	"crypto/subtle"
 	"encoding/base64"
-	"github.com/LerianStudio/lib-uncommons/uncommons"
-	"github.com/LerianStudio/lib-uncommons/uncommons/constants"
 	"net/http"
 	"strings"
+
+	"github.com/LerianStudio/lib-uncommons/uncommons"
+	constant "github.com/LerianStudio/lib-uncommons/uncommons/constants"
 
 	"github.com/gofiber/fiber/v2"
 )
