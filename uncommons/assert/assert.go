@@ -16,10 +16,10 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
-	"github.com/LerianStudio/lib-uncommons/uncommons/opentelemetry/metrics"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry/metrics"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/runtime"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/runtime"
 )
 
 // Logger defines the minimal logging interface required by assertions.
@@ -402,13 +402,16 @@ func (am *AssertionMetrics) RecordAssertionFailed(
 		return
 	}
 
-	counter.
+	err = counter.
 		WithLabels(map[string]string{
 			"component": sanitizeLabel(component),
 			"operation": sanitizeLabel(operation),
 			"assertion": sanitizeLabel(assertion),
 		}).
 		AddOne(ctx)
+	if err != nil {
+		return
+	}
 }
 
 func sanitizeLabel(value string) string {

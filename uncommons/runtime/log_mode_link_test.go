@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 	"github.com/stretchr/testify/assert"
 )
 

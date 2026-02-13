@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 )
 
 // testLogger is a test logger that captures log calls.

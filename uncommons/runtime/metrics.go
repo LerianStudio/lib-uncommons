@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/opentelemetry/metrics"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry/metrics"
 )
 
 const (
@@ -106,12 +106,15 @@ func (pm *PanicMetrics) RecordPanicRecovered(ctx context.Context, component, gor
 		return
 	}
 
-	counter.
+	err = counter.
 		WithLabels(map[string]string{
 			"component":      sanitizeLabel(component),
 			"goroutine_name": sanitizeLabel(goroutineName),
 		}).
 		AddOne(ctx)
+	if err != nil {
+		return
+	}
 }
 
 // recordPanicMetric is a package-level helper that records a panic metric if metrics are initialized.
