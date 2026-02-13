@@ -14,7 +14,9 @@ func ExampleWithTimeoutSafe() {
 	ctx := context.Background()
 
 	timeoutCtx, cancel, err := uncommons.WithTimeoutSafe(ctx, 100*time.Millisecond)
-	defer cancel()
+	if cancel != nil {
+		defer cancel()
+	}
 
 	_, hasDeadline := timeoutCtx.Deadline()
 

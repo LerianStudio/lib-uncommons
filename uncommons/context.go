@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry/metrics"
 	"github.com/google/uuid"
@@ -170,26 +170,36 @@ func resolveHeaderID(headerID string) string {
 	return uuid.New().String() // Generate unique correlation ID
 }
 
+var (
+	defaultFactoryOnce sync.Once
+	defaultFactory     *metrics.MetricsFactory
+)
+
+func getDefaultMetricsFactory() *metrics.MetricsFactory {
+	defaultFactoryOnce.Do(func() {
+		meter := otel.GetMeterProvider().Meter("uncommons.default")
+
+		f, err := metrics.NewMetricsFactory(meter, &log.NopLogger{})
+		if err != nil {
+			defaultFactory = metrics.NewNopFactory()
+			return
+		}
+
+		defaultFactory = f
+	})
+
+	return defaultFactory
+}
+
 // resolveMetricFactory ensures a valid metrics factory is always available following the fail-safe pattern.
-// Provides a default factory when none exists, maintaining consistency with logger and tracer resolution.
-// Never returns nil: if factory creation fails (only possible when MeterProvider returns nil),
-// it falls back to a no-op factory to prevent nil pointer dereferences downstream.
+// Provides a cached default factory when none exists, initialized once via sync.Once.
+// Never returns nil: if factory creation fails, it falls back to a no-op factory.
 func resolveMetricFactory(factory *metrics.MetricsFactory) *metrics.MetricsFactory {
 	if factory != nil {
 		return factory
 	}
 
-	meter := otel.GetMeterProvider().Meter("uncommons.default")
-
-	defaultFactory, err := metrics.NewMetricsFactory(meter, &log.NopLogger{})
-	if err != nil {
-		asserter := assert.New(context.Background(), nil, "uncommons", "resolveMetricFactory")
-		_ = asserter.Never(context.Background(), "failed to create default MetricsFactory: "+err.Error())
-
-		return metrics.NewNopFactory()
-	}
-
-	return defaultFactory
+	return getDefaultMetricsFactory()
 }
 
 // newDefaultTrackingComponents creates a complete set of default components.
