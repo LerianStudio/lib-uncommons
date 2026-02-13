@@ -302,7 +302,10 @@ func (mr *MockLoggerMockRecorder) Warnln(args ...any) *gomock.Call {
 func (m *MockLogger) WithDefaultMessageTemplate(message string) Logger {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "WithDefaultMessageTemplate", message)
-	ret0, _ := ret[0].(Logger)
+	ret0, ok := ret[0].(Logger)
+	if !ok || ret0 == nil {
+		return m
+	}
 	return ret0
 }
 
@@ -320,7 +323,10 @@ func (m *MockLogger) WithFields(fields ...any) Logger {
 		varargs = append(varargs, a)
 	}
 	ret := m.ctrl.Call(m, "WithFields", varargs...)
-	ret0, _ := ret[0].(Logger)
+	ret0, ok := ret[0].(Logger)
+	if !ok || ret0 == nil {
+		return m
+	}
 	return ret0
 }
 
