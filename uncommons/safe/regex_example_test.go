@@ -1,3 +1,5 @@
+//go:build unit
+
 package safe_test
 
 import (

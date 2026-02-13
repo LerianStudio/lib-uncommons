@@ -162,7 +162,7 @@ func TestParseAndVerifyTenantScopedID_NilVerifier(t *testing.T) {
 			ErrContextAccessDenied,
 		)
 		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrContextAccessDenied)
+		assert.ErrorIs(t, err, ErrVerifierNotConfigured)
 
 		return c.SendStatus(fiber.StatusOK)
 	})
@@ -601,7 +601,7 @@ func TestParseAndVerifyResourceScopedID_NilVerifier(t *testing.T) {
 			"exception",
 		)
 		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrExceptionAccessDenied)
+		assert.ErrorIs(t, err, ErrVerifierNotConfigured)
 
 		return c.SendStatus(fiber.StatusOK)
 	})
