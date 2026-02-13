@@ -324,6 +324,361 @@ func TestValidateToBalances(t *testing.T) {
 	}
 }
 
+func TestDetermineOperation(t *testing.T) {
+	tests := []struct {
+		name            string
+		isPending       bool
+		isFrom          bool
+		transactionType string
+		want            string
+	}{
+		{
+			name:            "pending from account",
+			isPending:       true,
+			isFrom:          true,
+			transactionType: constant.PENDING,
+			want:            constant.ONHOLD,
+		},
+		{
+			name:            "pending to account",
+			isPending:       true,
+			isFrom:          false,
+			transactionType: constant.PENDING,
+			want:            constant.CREDIT,
+		},
+		{
+			name:            "pending canceled from account",
+			isPending:       true,
+			isFrom:          true,
+			transactionType: constant.CANCELED,
+			want:            constant.RELEASE,
+		},
+		{
+			name:            "pending canceled to account",
+			isPending:       true,
+			isFrom:          false,
+			transactionType: constant.CANCELED,
+			want:            constant.DEBIT,
+		},
+		{
+			name:            "approved from account",
+			isPending:       true,
+			isFrom:          true,
+			transactionType: constant.APPROVED,
+			want:            constant.DEBIT,
+		},
+		{
+			name:            "approved to account",
+			isPending:       true,
+			isFrom:          false,
+			transactionType: constant.APPROVED,
+			want:            constant.CREDIT,
+		},
+		{
+			name:            "non-pending from account",
+			isPending:       false,
+			isFrom:          true,
+			transactionType: constant.CREATED,
+			want:            constant.DEBIT,
+		},
+		{
+			name:            "non-pending to account",
+			isPending:       false,
+			isFrom:          false,
+			transactionType: constant.CREATED,
+			want:            constant.CREDIT,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DetermineOperation(tt.isPending, tt.isFrom, tt.transactionType)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestValidateFromToOperation(t *testing.T) {
+	tests := []struct {
+		name        string
+		ft          FromTo
+		validate    Responses
+		balance     *Balance
+		expectError bool
+		wantCode    string
+		expected    Balance
+	}{
+		{
+			name: "valid from operation with alias key in request map",
+			ft: FromTo{
+				AccountAlias: "@account1",
+				BalanceKey:   "default",
+				IsFrom:       true,
+				Amount: &Amount{
+					Asset:           "USD",
+					Value:           decimal.NewFromInt(30),
+					Operation:       constant.DEBIT,
+					TransactionType: constant.CREATED,
+				},
+			},
+			validate: Responses{
+				From: map[string]Amount{
+					"@account1#default": {Value: decimal.NewFromInt(30), Operation: constant.DEBIT, TransactionType: constant.CREATED},
+				},
+			},
+			balance: &Balance{
+				ID:        "id",
+				Alias:     "@account1",
+				Key:       "default",
+				AssetCode: "USD",
+				Available: decimal.NewFromInt(100),
+				OnHold:    decimal.NewFromInt(0),
+				Version:   7,
+			},
+			expected: Balance{
+				ID:        "id",
+				Alias:     "@account1",
+				Available: decimal.NewFromInt(70),
+				OnHold:    decimal.NewFromInt(0),
+				Version:   8,
+			},
+		},
+		{
+			name: "missing amount mapping returns ineligible error",
+			ft: FromTo{
+				AccountAlias: "@account1",
+				BalanceKey:   "default",
+				IsFrom:       true,
+			},
+			validate: Responses{
+				From: map[string]Amount{},
+			},
+			balance: &Balance{
+				Alias:     "@account1",
+				Key:       "default",
+				AssetCode: "USD",
+				Available: decimal.NewFromInt(100),
+			},
+			expectError: true,
+			wantCode:    constant.ErrAccountIneligibility.Error(),
+		},
+		{
+			name: "valid from operation with balance id key in request map",
+			ft: FromTo{
+				AccountAlias: "@account1",
+				BalanceKey:   "default",
+				IsFrom:       true,
+				Amount: &Amount{
+					Asset:           "USD",
+					Value:           decimal.NewFromInt(20),
+					Operation:       constant.DEBIT,
+					TransactionType: constant.CREATED,
+				},
+			},
+			validate: Responses{
+				From: map[string]Amount{
+					"legacy-id": {Value: decimal.NewFromInt(20), Operation: constant.DEBIT, TransactionType: constant.CREATED},
+				},
+			},
+			balance: &Balance{
+				ID:        "legacy-id",
+				Alias:     "@account1",
+				Key:       "default",
+				AssetCode: "USD",
+				Available: decimal.NewFromInt(100),
+				OnHold:    decimal.NewFromInt(0),
+				Version:   12,
+			},
+			expected: Balance{
+				ID:        "legacy-id",
+				Alias:     "@account1",
+				Available: decimal.NewFromInt(80),
+				OnHold:    decimal.NewFromInt(0),
+				Version:   13,
+			},
+		},
+		{
+			name: "valid to operation with balance id key in request map",
+			ft: FromTo{
+				AccountAlias: "@account2",
+				BalanceKey:   "default",
+				IsFrom:       false,
+				Amount: &Amount{
+					Asset:           "USD",
+					Value:           decimal.NewFromInt(20),
+					Operation:       constant.CREDIT,
+					TransactionType: constant.CREATED,
+				},
+			},
+			validate: Responses{
+				To: map[string]Amount{
+					"destination-id": {Value: decimal.NewFromInt(20), Operation: constant.CREDIT, TransactionType: constant.CREATED},
+				},
+			},
+			balance: &Balance{
+				ID:        "destination-id",
+				Alias:     "@account2",
+				Key:       "default",
+				AssetCode: "USD",
+				Available: decimal.NewFromInt(50),
+				OnHold:    decimal.NewFromInt(0),
+				Version:   31,
+			},
+			expected: Balance{
+				ID:        "destination-id",
+				Alias:     "@account2",
+				Available: decimal.NewFromInt(70),
+				OnHold:    decimal.NewFromInt(0),
+				Version:   32,
+			},
+		},
+		{
+			name: "nil balance returns ineligible error",
+			ft: FromTo{
+				AccountAlias: "@account1",
+				BalanceKey:   "default",
+				IsFrom:       true,
+			},
+			validate: Responses{
+				From: map[string]Amount{"@account1#default": {Value: decimal.NewFromInt(10)}},
+			},
+			expectError: true,
+			wantCode:    constant.ErrAccountIneligibility.Error(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, got, err := ValidateFromToOperation(tt.ft, tt.validate, tt.balance)
+
+			if tt.expectError {
+				assert.Error(t, err)
+				if tt.wantCode != "" {
+					if response, ok := err.(uncommons.Response); ok {
+						assert.Equal(t, tt.wantCode, response.Code)
+					} else {
+						assert.Fail(t, "expected error to be uncommons.Response")
+					}
+				}
+				return
+			}
+
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expected.Available, got.Available)
+			assert.Equal(t, tt.expected.OnHold, got.OnHold)
+			assert.Equal(t, tt.expected.Version, got.Version)
+			assert.Equal(t, tt.expected.ID, got.ID)
+			assert.Equal(t, tt.expected.Alias, got.Alias)
+		})
+	}
+}
+
+func TestCalculateTotal_UsesAliasAndBalanceKey(t *testing.T) {
+	tFrom := make(chan decimal.Decimal, 1)
+	ftFrom := make(chan map[string]Amount, 1)
+	sdFrom := make(chan []string, 1)
+	orFrom := make(chan map[string]string, 1)
+
+	transaction := Transaction{
+		Send: Send{
+			Asset: "USD",
+			Value: decimal.NewFromInt(100),
+		},
+	}
+
+	fromTos := []FromTo{
+		{
+			AccountAlias: "@account1",
+			BalanceKey:   "checking",
+			Amount: &Amount{
+				Asset:           "USD",
+				Value:           decimal.NewFromInt(60),
+				Operation:       constant.DEBIT,
+				TransactionType: constant.CREATED,
+			},
+			IsFrom: true,
+		},
+		{
+			AccountAlias: "@account1",
+			BalanceKey:   "savings",
+			Amount: &Amount{
+				Asset:           "USD",
+				Value:           decimal.NewFromInt(40),
+				Operation:       constant.DEBIT,
+				TransactionType: constant.CREATED,
+			},
+			IsFrom: true,
+		},
+	}
+
+	go CalculateTotal(fromTos, transaction, constant.CREATED, tFrom, ftFrom, sdFrom, orFrom)
+
+	total := <-tFrom
+	entries := <-ftFrom
+	_ = <-sdFrom
+	_ = <-orFrom
+
+	assert.Equal(t, decimal.NewFromInt(100), total)
+	assert.Equal(t, 2, len(entries))
+	_, checking := entries["@account1#checking"]
+	_, savings := entries["@account1#savings"]
+	assert.True(t, checking)
+	assert.True(t, savings)
+}
+
+func TestCalculateTotal_MergesSameAliasAndBalanceKey(t *testing.T) {
+	tFrom := make(chan decimal.Decimal, 1)
+	ftFrom := make(chan map[string]Amount, 1)
+	sdFrom := make(chan []string, 1)
+	orFrom := make(chan map[string]string, 1)
+
+	transaction := Transaction{
+		Send: Send{
+			Asset: "USD",
+			Value: decimal.NewFromInt(100),
+		},
+	}
+
+	fromTos := []FromTo{
+		{
+			AccountAlias: "@account1",
+			BalanceKey:   "checking",
+			Amount: &Amount{
+				Asset:           "USD",
+				Value:           decimal.NewFromInt(35),
+				Operation:       constant.DEBIT,
+				TransactionType: constant.CREATED,
+			},
+			IsFrom: true,
+		},
+		{
+			AccountAlias: "@account1",
+			BalanceKey:   "checking",
+			Amount: &Amount{
+				Asset:           "USD",
+				Value:           decimal.NewFromInt(15),
+				Operation:       constant.DEBIT,
+				TransactionType: constant.CREATED,
+			},
+			IsFrom: true,
+		},
+	}
+
+	go CalculateTotal(fromTos, transaction, constant.CREATED, tFrom, ftFrom, sdFrom, orFrom)
+
+	total := <-tFrom
+	entries := <-ftFrom
+	_ = <-sdFrom
+	_ = <-orFrom
+
+	assert.Equal(t, decimal.NewFromInt(50), total)
+	assert.Equal(t, 1, len(entries))
+
+	amount, ok := entries["@account1#checking"]
+	assert.True(t, ok)
+	assert.Equal(t, decimal.NewFromInt(50), amount.Value)
+}
+
 func TestOperateBalances(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -332,6 +687,7 @@ func TestOperateBalances(t *testing.T) {
 		operation   string
 		expected    Balance
 		expectError bool
+		assertID    bool
 	}{
 		{
 			name: "debit operation",
@@ -347,8 +703,11 @@ func TestOperateBalances(t *testing.T) {
 			expected: Balance{
 				Available: decimal.NewFromInt(50), // 100 - 50 = 50
 				OnHold:    decimal.NewFromInt(10),
+				ID:        "id-1",
+				Alias:     "@acc",
 			},
 			expectError: false,
+			assertID:    true,
 		},
 		{
 			name: "credit operation",
@@ -364,8 +723,48 @@ func TestOperateBalances(t *testing.T) {
 			expected: Balance{
 				Available: decimal.NewFromInt(150), // 100 + 50 = 150
 				OnHold:    decimal.NewFromInt(10),
+				ID:        "id-2",
+				Alias:     "@acc",
 			},
 			expectError: false,
+			assertID:    true,
+		},
+		{
+			name: "on-hold operation",
+			amount: Amount{
+				Value:           decimal.NewFromInt(50),
+				Operation:       constant.ONHOLD,
+				TransactionType: constant.PENDING,
+			},
+			balance: Balance{
+				ID:        "id-3",
+				Available: decimal.NewFromInt(100),
+				OnHold:    decimal.NewFromInt(20),
+				Alias:     "@acc",
+			},
+			expected: Balance{
+				Available: decimal.NewFromInt(50),
+				OnHold:    decimal.NewFromInt(70),
+				ID:        "id-3",
+				Alias:     "@acc",
+			},
+			expectError: false,
+			assertID:    true,
+		},
+		{
+			name: "unsupported operation",
+			amount: Amount{
+				Value:           decimal.NewFromInt(50),
+				Operation:       "UNSUPPORTED",
+				TransactionType: constant.CREATED,
+			},
+			balance: Balance{
+				ID:        "id-4",
+				Available: decimal.NewFromInt(100),
+				OnHold:    decimal.NewFromInt(0),
+				Alias:     "@acc",
+			},
+			expectError: true,
 		},
 	}
 
@@ -379,6 +778,12 @@ func TestOperateBalances(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.expected.Available.String(), result.Available.String())
 				assert.Equal(t, tt.expected.OnHold.String(), result.OnHold.String())
+				assert.Equal(t, tt.balance.Version+1, result.Version)
+
+				if tt.assertID {
+					assert.Equal(t, tt.balance.ID, result.ID)
+					assert.Equal(t, tt.balance.Alias, result.Alias)
+				}
 			}
 		})
 	}
@@ -667,11 +1072,11 @@ func TestValidateSendSourceAndDistribute(t *testing.T) {
 			want: &Responses{
 				Asset: "USD",
 				From: map[string]Amount{
-					"@account1": {Value: decimal.NewFromInt(60)},
-					"@account2": {Value: decimal.NewFromInt(40)},
+					"@account1#default": {Value: decimal.NewFromInt(60)},
+					"@account2#default": {Value: decimal.NewFromInt(40)},
 				},
 				To: map[string]Amount{
-					"@account3": {Value: decimal.NewFromInt(100)},
+					"@account3#default": {Value: decimal.NewFromInt(100)},
 				},
 			},
 			expectError: false,
@@ -711,11 +1116,11 @@ func TestValidateSendSourceAndDistribute(t *testing.T) {
 			want: &Responses{
 				Asset: "USD",
 				From: map[string]Amount{
-					"@account1": {Value: decimal.NewFromInt(50)},
-					"@account2": {Value: decimal.NewFromInt(50)},
+					"@account1#default": {Value: decimal.NewFromInt(50)},
+					"@account2#default": {Value: decimal.NewFromInt(50)},
 				},
 				To: map[string]Amount{
-					"@account3": {Value: decimal.NewFromInt(100)},
+					"@account3#default": {Value: decimal.NewFromInt(100)},
 				},
 			},
 			expectError: false,
@@ -914,16 +1319,16 @@ func TestValidateTransactionWithPercentageAndRemaining(t *testing.T) {
 			assert.Equal(t, tt.transaction.Send.Asset, responses.Asset)
 
 			// Verify the source account is included in the response
-			fromKey := "@external/BRL"
+			fromKey := "@external/BRL#default"
 			_, exists := responses.From[fromKey]
 			assert.True(t, exists, "From account should exist: %s", fromKey)
 
 			// Verify the destination accounts are included in the response
-			toKey1 := "@mcgregor_0"
+			toKey1 := "@mcgregor_0#default"
 			_, exists = responses.To[toKey1]
 			assert.True(t, exists, "To account should exist: %s", toKey1)
 
-			toKey2 := "@mcgregor_1"
+			toKey2 := "@mcgregor_1#default"
 			_, exists = responses.To[toKey2]
 			assert.True(t, exists, "To account should exist: %s", toKey2)
 

@@ -2,6 +2,7 @@ package transaction
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -28,6 +29,14 @@ func ValidateBalancesRules(ctx context.Context, transaction Transaction, validat
 	}
 
 	for _, balance := range balances {
+		if balance == nil {
+			err := uncommons.ValidateBusinessError(constant.ErrAccountIneligibility, "ValidateBalancesRules")
+
+			opentelemetry.HandleSpanBusinessErrorEvent(&spanValidateBalances, "validations.validate_balances_rules", err)
+
+			return err
+		}
+
 		if err := validateFromBalances(balance, validate.From, validate.Asset, validate.Pending); err != nil {
 			opentelemetry.HandleSpanBusinessErrorEvent(&spanValidateBalances, "validations.validate_from_balances_", err)
 
@@ -49,6 +58,10 @@ func ValidateBalancesRules(ctx context.Context, transaction Transaction, validat
 }
 
 func validateFromBalances(balance *Balance, from map[string]Amount, asset string, pending bool) error {
+	if balance == nil {
+		return uncommons.ValidateBusinessError(constant.ErrAccountIneligibility, "validateFromAccounts")
+	}
+
 	for key := range from {
 		balanceAliasKey := AliasKey(balance.Alias, balance.Key)
 		if key == balance.ID || SplitAliasWithKey(key) == balanceAliasKey {
@@ -70,6 +83,10 @@ func validateFromBalances(balance *Balance, from map[string]Amount, asset string
 }
 
 func validateToBalances(balance *Balance, to map[string]Amount, asset string) error {
+	if balance == nil {
+		return uncommons.ValidateBusinessError(constant.ErrAccountIneligibility, "validateToAccounts")
+	}
+
 	balanceAliasKey := AliasKey(balance.Alias, balance.Key)
 	for key := range to {
 		if key == balance.ID || SplitAliasWithKey(key) == balanceAliasKey {
@@ -93,8 +110,22 @@ func validateToBalances(balance *Balance, to map[string]Amount, asset string) er
 // Deprecated: use ValidateFromToOperation method from Midaz pkg instead.
 // ValidateFromToOperation func that validate operate balance
 func ValidateFromToOperation(ft FromTo, validate Responses, balance *Balance) (Amount, Balance, error) {
+	if balance == nil {
+		return Amount{}, Balance{}, uncommons.ValidateBusinessError(constant.ErrAccountIneligibility, "ValidateFromToOperation", ft.AccountAlias)
+	}
+
+	side := validate.From
+	if !ft.IsFrom {
+		side = validate.To
+	}
+
+	amount, ok := operationAmountByKey(ft, side, balance.ID)
+	if !ok {
+		return Amount{}, Balance{}, uncommons.ValidateBusinessError(constant.ErrAccountIneligibility, "ValidateFromToOperation", ft.AccountAlias)
+	}
+
 	if ft.IsFrom {
-		ba, err := OperateBalances(validate.From[ft.AccountAlias], *balance)
+		ba, err := OperateBalances(amount, *balance)
 		if err != nil {
 			return Amount{}, Balance{}, err
 		}
@@ -103,15 +134,53 @@ func ValidateFromToOperation(ft FromTo, validate Responses, balance *Balance) (A
 			return Amount{}, Balance{}, uncommons.ValidateBusinessError(constant.ErrInsufficientFunds, "ValidateFromToOperation", balance.Alias)
 		}
 
-		return validate.From[ft.AccountAlias], ba, nil
+		return amount, ba, nil
 	} else {
-		ba, err := OperateBalances(validate.To[ft.AccountAlias], *balance)
+		ba, err := OperateBalances(amount, *balance)
 		if err != nil {
 			return Amount{}, Balance{}, err
 		}
 
-		return validate.To[ft.AccountAlias], ba, nil
+		return amount, ba, nil
 	}
+}
+
+func operationAmountByKey(ft FromTo, data map[string]Amount, candidateKeys ...string) (Amount, bool) {
+	if data == nil {
+		return Amount{}, false
+	}
+
+	aliasCandidates := []string{
+		ft.AccountAlias,
+		AliasKey(ft.AccountAlias, ft.BalanceKey),
+		AliasKey(ft.SplitAlias(), ft.BalanceKey),
+	}
+
+	if strings.TrimSpace(ft.BalanceKey) == "" {
+		aliasCandidates = append(aliasCandidates, ft.SplitAlias())
+	}
+
+	aliasCandidates = append(aliasCandidates, candidateKeys...)
+
+	seen := map[string]struct{}{}
+
+	for _, key := range aliasCandidates {
+		if key == "" {
+			continue
+		}
+
+		if _, exists := seen[key]; exists {
+			continue
+		}
+
+		seen[key] = struct{}{}
+
+		if amount, ok := data[key]; ok {
+			return amount, true
+		}
+	}
+
+	return Amount{}, false
 }
 
 // Deprecated: use AliasKey method from Midaz pkg instead.
@@ -149,6 +218,8 @@ func OperateBalances(amount Amount, balance Balance) (Balance, error) {
 		totalVersion int64
 	)
 
+	result := balance
+
 	total = balance.Available
 	totalOnHold = balance.OnHold
 
@@ -168,17 +239,16 @@ func OperateBalances(amount Amount, balance Balance) (Balance, error) {
 	case amount.Operation == constant.CREDIT && amount.TransactionType == constant.CREATED:
 		total = balance.Available.Add(amount.Value)
 	default:
-		// For unknown operations, return the original balance without changing the version.
-		return balance, nil
+		return Balance{}, fmt.Errorf("invalid operation or transaction type: operation=%s, transactionType=%s", amount.Operation, amount.TransactionType)
 	}
 
 	totalVersion = balance.Version + 1
 
-	return Balance{
-		Available: total,
-		OnHold:    totalOnHold,
-		Version:   totalVersion,
-	}, nil
+	result.Available = total
+	result.OnHold = totalOnHold
+	result.Version = totalVersion
+
+	return result, nil
 }
 
 // Deprecated: use DetermineOperation method from Midaz pkg instead.
@@ -194,6 +264,8 @@ func DetermineOperation(isPending bool, isFrom bool, transactionType string) str
 		}
 	case isPending && isFrom && transactionType == constant.CANCELED:
 		return constant.RELEASE
+	case isPending && !isFrom && transactionType == constant.CANCELED:
+		return constant.DEBIT
 	case isPending && transactionType == constant.APPROVED:
 		switch {
 		case isFrom:
@@ -230,9 +302,21 @@ func CalculateTotal(fromTos []FromTo, transaction Transaction, transactionType s
 	operationRoute := make(map[string]string)
 
 	for i := range fromTos {
-		operationRoute[fromTos[i].AccountAlias] = fromTos[i].Route
+		aliasKey := AliasKey(fromTos[i].SplitAlias(), fromTos[i].BalanceKey)
+		operationRoute[aliasKey] = fromTos[i].Route
 
 		operation := DetermineOperation(transaction.Pending, fromTos[i].IsFrom, transactionType)
+
+		addAmount := func(a Amount) {
+			existing, ok := fmto[aliasKey]
+			if !ok {
+				fmto[aliasKey] = a
+				return
+			}
+
+			existing.Value = existing.Value.Add(a.Value)
+			fmto[aliasKey] = existing
+		}
 
 		if fromTos[i].Share != nil && fromTos[i].Share.Percentage != 0 {
 			oneHundred := decimal.NewFromInt(100)
@@ -248,12 +332,12 @@ func CalculateTotal(fromTos []FromTo, transaction Transaction, transactionType s
 			secondPart := percentageOfPercentage.Div(oneHundred)
 			shareValue := transaction.Send.Value.Mul(firstPart).Mul(secondPart)
 
-			fmto[fromTos[i].AccountAlias] = Amount{
+			addAmount(Amount{
 				Asset:           transaction.Send.Asset,
 				Value:           shareValue,
 				Operation:       operation,
 				TransactionType: transactionType,
-			}
+			})
 
 			total = total.Add(shareValue)
 			remaining.Value = remaining.Value.Sub(shareValue)
@@ -267,7 +351,7 @@ func CalculateTotal(fromTos []FromTo, transaction Transaction, transactionType s
 				TransactionType: transactionType,
 			}
 
-			fmto[fromTos[i].AccountAlias] = amount
+			addAmount(amount)
 			total = total.Add(amount.Value)
 
 			remaining.Value = remaining.Value.Sub(amount.Value)
@@ -278,11 +362,11 @@ func CalculateTotal(fromTos []FromTo, transaction Transaction, transactionType s
 
 			remaining.Operation = operation
 
-			fmto[fromTos[i].AccountAlias] = remaining
+			addAmount(remaining)
 			fromTos[i].Amount = &remaining
 		}
 
-		scdt = append(scdt, AliasKey(fromTos[i].SplitAlias(), fromTos[i].BalanceKey))
+		scdt = append(scdt, aliasKey)
 	}
 
 	t <- total
@@ -362,16 +446,16 @@ func ValidateSendSourceAndDistribute(ctx context.Context, transaction Transactio
 	response.OperationRoutesTo = <-orTo
 	response.Aliases = AppendIfNotExist(response.Aliases, response.Destinations)
 
-	for i, source := range response.Sources {
-		if _, ok := response.To[ConcatAlias(i, source)]; ok {
+	for _, source := range response.Sources {
+		if _, ok := response.To[source]; ok {
 			logger.Errorf("ValidateSendSourceAndDistribute: Ambiguous transaction source and destination")
 
 			return nil, uncommons.ValidateBusinessError(constant.ErrTransactionAmbiguous, "ValidateSendSourceAndDistribute")
 		}
 	}
 
-	for i, destination := range response.Destinations {
-		if _, ok := response.From[ConcatAlias(i, destination)]; ok {
+	for _, destination := range response.Destinations {
+		if _, ok := response.From[destination]; ok {
 			logger.Errorf("ValidateSendSourceAndDistribute: Ambiguous transaction source and destination")
 
 			return nil, uncommons.ValidateBusinessError(constant.ErrTransactionAmbiguous, "ValidateSendSourceAndDistribute")
