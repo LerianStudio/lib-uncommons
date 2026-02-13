@@ -1,4 +1,3 @@
-// Package ratelimit provides rate limiting utilities including Redis-backed storage.
 package ratelimit
 
 import (
@@ -7,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/LerianStudio/lib-uncommons/uncommons/assert"
 	"github.com/redis/go-redis/v9"
 
 	libRedis "github.com/LerianStudio/lib-uncommons/uncommons/redis"
@@ -17,16 +17,28 @@ const (
 	scanBatchSize = 100
 )
 
+var ErrStorageUnavailable = errors.New("ratelimit redis storage is unavailable")
+
+func unavailableStorageError(operation string) error {
+	asserter := assert.New(context.Background(), nil, "http.ratelimit", operation)
+	_ = asserter.Never(context.Background(), "ratelimit redis storage is unavailable")
+
+	return ErrStorageUnavailable
+}
+
 // RedisStorage implements fiber.Storage interface using lib-uncommons Redis connection.
 // This enables distributed rate limiting across multiple application instances.
 type RedisStorage struct {
-	conn *libRedis.RedisConnection
+	conn *libRedis.Client
 }
 
 // NewRedisStorage creates a new Redis-backed storage for Fiber rate limiting.
 // Returns nil if the Redis connection is nil.
-func NewRedisStorage(conn *libRedis.RedisConnection) *RedisStorage {
+func NewRedisStorage(conn *libRedis.Client) *RedisStorage {
 	if conn == nil {
+		asserter := assert.New(context.Background(), nil, "http.ratelimit", "NewRedisStorage")
+		_ = asserter.Never(context.Background(), "redis connection is nil; ratelimit storage disabled")
+
 		return nil
 	}
 
@@ -37,7 +49,7 @@ func NewRedisStorage(conn *libRedis.RedisConnection) *RedisStorage {
 // Returns nil, nil when the key does not exist.
 func (storage *RedisStorage) Get(key string) ([]byte, error) {
 	if storage == nil || storage.conn == nil {
-		return nil, nil
+		return nil, unavailableStorageError("Get")
 	}
 
 	ctx := context.Background()
@@ -63,7 +75,7 @@ func (storage *RedisStorage) Get(key string) ([]byte, error) {
 // 0 expiration means no expiration. Empty key or value will be ignored.
 func (storage *RedisStorage) Set(key string, val []byte, exp time.Duration) error {
 	if storage == nil || storage.conn == nil {
-		return nil
+		return unavailableStorageError("Set")
 	}
 
 	if key == "" || len(val) == 0 {
@@ -88,7 +100,7 @@ func (storage *RedisStorage) Set(key string, val []byte, exp time.Duration) erro
 // Returns no error if the key does not exist.
 func (storage *RedisStorage) Delete(key string) error {
 	if storage == nil || storage.conn == nil {
-		return nil
+		return unavailableStorageError("Delete")
 	}
 
 	ctx := context.Background()
@@ -109,7 +121,7 @@ func (storage *RedisStorage) Delete(key string) error {
 // This uses SCAN to find and delete keys with the rate limit prefix.
 func (storage *RedisStorage) Reset() error {
 	if storage == nil || storage.conn == nil {
-		return nil
+		return unavailableStorageError("Reset")
 	}
 
 	ctx := context.Background()

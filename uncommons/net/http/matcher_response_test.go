@@ -1,68 +1,379 @@
 //go:build unit
 
-// Package http provides shared HTTP helpers.
 package http
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	libCommons "github.com/LerianStudio/lib-uncommons/uncommons"
 	"github.com/gofiber/fiber/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-var (
-	errTestDBConnectionFailed = errors.New("database connection failed")
-	errTestInternalError      = errors.New("some internal error")
-)
+// ---------------------------------------------------------------------------
+// ErrorResponse edge cases
+// ---------------------------------------------------------------------------
 
-func TestWithError(t *testing.T) {
+func TestErrorResponse_EmptyMessageReturnsEmpty(t *testing.T) {
+	t.Parallel()
+
+	errResp := ErrorResponse{
+		Code:    400,
+		Title:   "bad_request",
+		Message: "",
+	}
+
+	assert.Equal(t, "", errResp.Error())
+}
+
+func TestErrorResponse_JSONDeserializationFromString(t *testing.T) {
+	t.Parallel()
+
+	jsonData := `{"code":503,"title":"service_unavailable","message":"try again later"}`
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal([]byte(jsonData), &errResp))
+
+	assert.Equal(t, 503, errResp.Code)
+	assert.Equal(t, "service_unavailable", errResp.Title)
+	assert.Equal(t, "try again later", errResp.Message)
+}
+
+func TestErrorResponse_PartialJSONDeserializationOnlyCode(t *testing.T) {
+	t.Parallel()
+
+	// Only code field present
+	jsonData := `{"code":400}`
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal([]byte(jsonData), &errResp))
+
+	assert.Equal(t, 400, errResp.Code)
+	assert.Equal(t, "", errResp.Title)
+	assert.Equal(t, "", errResp.Message)
+}
+
+func TestErrorResponse_PartialJSONDeserializationOnlyMessage(t *testing.T) {
+	t.Parallel()
+
+	jsonData := `{"message":"something went wrong"}`
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal([]byte(jsonData), &errResp))
+
+	assert.Equal(t, 0, errResp.Code)
+	assert.Equal(t, "", errResp.Title)
+	assert.Equal(t, "something went wrong", errResp.Message)
+}
+
+func TestErrorResponse_JSONRoundTripWithSpecialChars(t *testing.T) {
+	t.Parallel()
+
+	original := ErrorResponse{
+		Code:    418,
+		Title:   "im_a_teapot",
+		Message: "I'm a teapot with \"quotes\" and <html>",
+	}
+
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+
+	var decoded ErrorResponse
+	require.NoError(t, json.Unmarshal(data, &decoded))
+
+	assert.Equal(t, original, decoded)
+}
+
+func TestErrorResponse_EmptyJSON(t *testing.T) {
+	t.Parallel()
+
+	jsonData := `{}`
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal([]byte(jsonData), &errResp))
+
+	assert.Equal(t, 0, errResp.Code)
+	assert.Equal(t, "", errResp.Title)
+	assert.Equal(t, "", errResp.Message)
+}
+
+// ---------------------------------------------------------------------------
+// RenderError code boundary tests
+// ---------------------------------------------------------------------------
+
+func TestRenderError_CodeBoundaryAt100(t *testing.T) {
+	t.Parallel()
+
+	app := fiber.New()
+	app.Get("/test", func(c *fiber.Ctx) error {
+		return RenderError(c, ErrorResponse{
+			Code:    100,
+			Title:   "continue",
+			Message: "boundary test at 100",
+		})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, 100, resp.StatusCode)
+}
+
+func TestRenderError_CodeBoundaryAt599(t *testing.T) {
+	t.Parallel()
+
+	app := fiber.New()
+	app.Get("/test", func(c *fiber.Ctx) error {
+		return RenderError(c, ErrorResponse{
+			Code:    599,
+			Title:   "custom_error",
+			Message: "boundary test at 599",
+		})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, 599, resp.StatusCode)
+}
+
+func TestRenderError_CodeAt99FallsBackTo500(t *testing.T) {
+	t.Parallel()
+
+	app := fiber.New()
+	app.Get("/test", func(c *fiber.Ctx) error {
+		return RenderError(c, ErrorResponse{
+			Code:    99,
+			Title:   "test_error",
+			Message: "code 99 should fall back",
+		})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, fiber.StatusInternalServerError, resp.StatusCode)
+}
+
+func TestRenderError_CodeAt600FallsBackTo500(t *testing.T) {
+	t.Parallel()
+
+	app := fiber.New()
+	app.Get("/test", func(c *fiber.Ctx) error {
+		return RenderError(c, ErrorResponse{
+			Code:    600,
+			Title:   "test_error",
+			Message: "code 600 should fall back",
+		})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, fiber.StatusInternalServerError, resp.StatusCode)
+}
+
+// ---------------------------------------------------------------------------
+// RenderError with both empty title and message
+// ---------------------------------------------------------------------------
+
+func TestRenderError_EmptyTitleAndMessageDefaultsBoth(t *testing.T) {
+	t.Parallel()
+
+	app := fiber.New()
+	app.Get("/test", func(c *fiber.Ctx) error {
+		return RenderError(c, ErrorResponse{
+			Code:    500,
+			Title:   "",
+			Message: "",
+		})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, fiber.StatusInternalServerError, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(body, &result))
+
+	// Both should be filled with defaults
+	assert.Equal(t, "request_failed", result["title"])
+	assert.Equal(t, "Internal Server Error", result["message"])
+}
+
+// ---------------------------------------------------------------------------
+// RenderError response structure validation
+// ---------------------------------------------------------------------------
+
+func TestRenderError_ResponseHasExactlyThreeFields(t *testing.T) {
+	t.Parallel()
+
+	app := fiber.New()
+	app.Get("/test", func(c *fiber.Ctx) error {
+		return RenderError(c, ErrorResponse{
+			Code:    409,
+			Title:   "conflict",
+			Message: "resource already exists",
+		})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(body, &result))
+
+	assert.Len(t, result, 3, "response should have exactly code, title, and message")
+	assert.Contains(t, result, "code")
+	assert.Contains(t, result, "title")
+	assert.Contains(t, result, "message")
+}
+
+// ---------------------------------------------------------------------------
+// RenderError across HTTP methods
+// ---------------------------------------------------------------------------
+
+func TestRenderError_WorksForAllHTTPMethods(t *testing.T) {
+	t.Parallel()
+
+	methods := []string{
+		http.MethodGet,
+		http.MethodPost,
+		http.MethodPut,
+		http.MethodPatch,
+		http.MethodDelete,
+	}
+
+	for _, method := range methods {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+
+			app := fiber.New()
+
+			handler := func(c *fiber.Ctx) error {
+				return RenderError(c, ErrorResponse{
+					Code:    400,
+					Title:   "bad_request",
+					Message: "test",
+				})
+			}
+
+			switch method {
+			case http.MethodGet:
+				app.Get("/test", handler)
+			case http.MethodPost:
+				app.Post("/test", handler)
+			case http.MethodPut:
+				app.Put("/test", handler)
+			case http.MethodPatch:
+				app.Patch("/test", handler)
+			case http.MethodDelete:
+				app.Delete("/test", handler)
+			}
+
+			req := httptest.NewRequest(method, "/test", nil)
+			resp, err := app.Test(req)
+			require.NoError(t, err)
+			defer func() { _ = resp.Body.Close() }()
+
+			assert.Equal(t, fiber.StatusBadRequest, resp.StatusCode)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RenderError with fiber.Error with default message
+// ---------------------------------------------------------------------------
+
+func TestRenderError_FiberErrorDefaultMessage(t *testing.T) {
+	t.Parallel()
+
+	// fiber.NewError with just a code uses the default HTTP status text
+	fiberErr := fiber.NewError(fiber.StatusGatewayTimeout)
+
+	app := fiber.New()
+	app.Get("/test", func(c *fiber.Ctx) error {
+		return RenderError(c, fiberErr)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, fiber.StatusGatewayTimeout, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(body, &result))
+	assert.Equal(t, "request_failed", result["title"])
+}
+
+// ---------------------------------------------------------------------------
+// RenderError content type
+// ---------------------------------------------------------------------------
+
+func TestRenderError_ReturnsJSON(t *testing.T) {
+	t.Parallel()
+
+	app := fiber.New()
+	app.Get("/test", func(c *fiber.Ctx) error {
+		return RenderError(c, ErrorResponse{
+			Code:    400,
+			Title:   "bad_request",
+			Message: "test",
+		})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	contentType := resp.Header.Get("Content-Type")
+	assert.Contains(t, contentType, "application/json")
+}
+
+// ---------------------------------------------------------------------------
+// RenderError with various 2xx/3xx codes (unusual but valid)
+// ---------------------------------------------------------------------------
+
+func TestRenderError_UnusualValidCodes(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		err          error
-		wantCode     int
-		wantContains string
+		name string
+		code int
 	}{
-		{
-			name: "libCommons.Response error uses its code",
-			err: libCommons.Response{
-				Code:    "400",
-				Title:   "Bad Request",
-				Message: "Invalid input data",
-			},
-			wantCode:     fiber.StatusBadRequest,
-			wantContains: "Invalid input data",
-		},
-		{
-			name: "libCommons.Response with 404 status",
-			err: libCommons.Response{
-				Code:    "404",
-				Title:   "Not Found",
-				Message: "Resource not found",
-			},
-			wantCode:     fiber.StatusNotFound,
-			wantContains: "Resource not found",
-		},
-		{
-			name:         "generic error returns 500 with sanitized message",
-			err:          errTestDBConnectionFailed,
-			wantCode:     fiber.StatusInternalServerError,
-			wantContains: "An internal error occurred",
-		},
-		{
-			name:         "other generic error returns 500 with sanitized message",
-			err:          errTestInternalError,
-			wantCode:     fiber.StatusInternalServerError,
-			wantContains: "An internal error occurred",
-		},
+		{"200 OK (unusual for error)", 200},
+		{"201 Created (unusual for error)", 201},
+		{"301 Moved Permanently", 301},
+		{"302 Found", 302},
 	}
 
 	for _, tt := range tests {
@@ -71,128 +382,20 @@ func TestWithError(t *testing.T) {
 
 			app := fiber.New()
 			app.Get("/test", func(c *fiber.Ctx) error {
-				return WithError(c, tt.err)
+				return RenderError(c, ErrorResponse{
+					Code:    tt.code,
+					Title:   "test",
+					Message: "unusual code",
+				})
 			})
 
 			req := httptest.NewRequest(http.MethodGet, "/test", nil)
 			resp, err := app.Test(req)
 			require.NoError(t, err)
+			defer func() { _ = resp.Body.Close() }()
 
-			defer func() {
-				_ = resp.Body.Close()
-			}()
-
-			assert.Equal(t, tt.wantCode, resp.StatusCode)
-
-			body, err := io.ReadAll(resp.Body)
-			require.NoError(t, err)
-			assert.Contains(t, string(body), tt.wantContains)
+			// Valid HTTP codes between 100-599 should be used as-is
+			assert.Equal(t, tt.code, resp.StatusCode)
 		})
 	}
-}
-
-func TestWithError_NilError(t *testing.T) {
-	t.Parallel()
-
-	app := fiber.New()
-
-	var handlerResult error
-
-	app.Get("/test", func(c *fiber.Ctx) error {
-		handlerResult = WithError(c, nil)
-		return handlerResult
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	resp, err := app.Test(req)
-	require.NoError(t, err)
-
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	assert.NoError(t, handlerResult)
-}
-
-func TestWithError_GenericErrorSanitizesMessage(t *testing.T) {
-	t.Parallel()
-
-	app := fiber.New()
-	app.Get("/test", func(c *fiber.Ctx) error {
-		return WithError(c, errors.New("validation timeout exceeded"))
-	})
-
-	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	resp, err := app.Test(req)
-	require.NoError(t, err)
-
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	assert.Equal(t, fiber.StatusInternalServerError, resp.StatusCode)
-
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-
-	var result map[string]any
-
-	err = json.Unmarshal(body, &result)
-	require.NoError(t, err)
-
-	assert.Equal(t, "request_failed", result["title"])
-	assert.Equal(t, "An internal error occurred", result["message"])
-}
-
-func TestWithError_ResponseFormat(t *testing.T) {
-	t.Parallel()
-
-	t.Run("response contains expected JSON structure", func(t *testing.T) {
-		t.Parallel()
-
-		app := fiber.New()
-		app.Get("/test", func(c *fiber.Ctx) error {
-			return WithError(c, libCommons.Response{
-				Code:    "422",
-				Title:   "Validation Error",
-				Message: "Field 'name' is required",
-			})
-		})
-
-		req := httptest.NewRequest(http.MethodGet, "/test", nil)
-		resp, err := app.Test(req)
-		require.NoError(t, err)
-
-		defer func() {
-			_ = resp.Body.Close()
-		}()
-
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-
-		var result map[string]any
-
-		err = json.Unmarshal(body, &result)
-		require.NoError(t, err)
-
-		assert.Equal(t, "422", result["code"])
-		assert.Equal(t, "Validation Error", result["title"])
-		assert.Equal(t, "Field 'name' is required", result["message"])
-	})
-}
-
-func TestErrorResponse_Structure(t *testing.T) {
-	t.Parallel()
-
-	errResp := ErrorResponse{
-		Code:    "400",
-		Title:   "bad_request",
-		Message: "invalid input",
-		Error:   "invalid input",
-	}
-
-	assert.Equal(t, "400", errResp.Code)
-	assert.Equal(t, "bad_request", errResp.Title)
-	assert.Equal(t, "invalid input", errResp.Message)
-	assert.Equal(t, "invalid input", errResp.Error)
 }

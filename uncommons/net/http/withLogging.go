@@ -136,7 +136,9 @@ type LogMiddlewareOption func(l *logMiddleware)
 // WithCustomLogger is a functional option for logMiddleware.
 func WithCustomLogger(logger log.Logger) LogMiddlewareOption {
 	return func(l *logMiddleware) {
-		l.Logger = logger
+		if logger != nil {
+			l.Logger = logger
+		}
 	}
 }
 
@@ -173,9 +175,9 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		headerID := c.Get(cn.HeaderID)
 
 		mid := buildOpts(opts...)
-		logger := mid.Logger.WithFields(
-			cn.HeaderID, info.TraceID,
-		).WithDefaultMessageTemplate(headerID + cn.LoggerDefaultSeparator)
+		logger := mid.Logger.
+			With(log.String(cn.HeaderID, info.TraceID)).
+			With(log.String("message_prefix", headerID+cn.LoggerDefaultSeparator))
 
 		ctx := uncommons.ContextWithLogger(c.UserContext(), logger)
 		c.SetUserContext(ctx)
@@ -191,7 +193,7 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 
 		info.FinishRequestInfo(&rw)
 
-		logger.Info(info.CLFString())
+		logger.Log(c.UserContext(), log.LevelInfo, info.CLFString())
 
 		return err
 	}
@@ -210,7 +212,10 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 			// Emit a debug log if overriding a different metadata id
 			if prev := getMetadataID(ctx); prev != "" && prev != rid {
 				mid := buildOpts(opts...)
-				mid.Logger.Debugf("Overriding correlation id from metadata (%s) with body request_id (%s)", prev, rid)
+				mid.Logger.Log(ctx, log.LevelDebug, "Overriding correlation id from metadata with body request_id",
+					log.String("metadata_id", prev),
+					log.String("body_request_id", rid),
+				)
 			}
 			// Override correlation id to match the body-provided, validated UUID request_id
 			ctx = uncommons.ContextWithHeaderID(ctx, rid)
@@ -225,8 +230,8 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 
 		mid := buildOpts(opts...)
 		logger := mid.Logger.
-			WithFields(cn.HeaderID, reqId).
-			WithDefaultMessageTemplate(reqId + cn.LoggerDefaultSeparator)
+			With(log.String(cn.HeaderID, reqId)).
+			With(log.String("message_prefix", reqId+cn.LoggerDefaultSeparator))
 
 		ctx = uncommons.ContextWithLogger(ctx, logger)
 
@@ -234,7 +239,15 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 		resp, err := handler(ctx, req)
 		duration := time.Since(start)
 
-		logger.Infof("gRPC method: %s, Duration: %s, Error: %v", info.FullMethod, duration, err)
+		fields := []log.Field{
+			log.String("method", info.FullMethod),
+			log.String("duration", duration.String()),
+		}
+		if err != nil {
+			fields = append(fields, log.Any("error", err))
+		}
+
+		logger.Log(ctx, log.LevelInfo, "gRPC request finished", fields...)
 
 		return resp, err
 	}

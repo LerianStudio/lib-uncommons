@@ -80,14 +80,18 @@ func TestParsePagination(t *testing.T) {
 			errContains: "invalid offset value",
 		},
 		{
-			name:        "limit zero returns error",
-			queryString: "limit=0",
-			expectedErr: ErrLimitMustBePositive,
+			name:           "limit zero uses default",
+			queryString:    "limit=0",
+			expectedLimit:  20,
+			expectedOffset: 0,
+			expectedErr:    nil,
 		},
 		{
-			name:        "negative limit returns error",
-			queryString: "limit=-5",
-			expectedErr: ErrLimitMustBePositive,
+			name:           "negative limit uses default",
+			queryString:    "limit=-5",
+			expectedLimit:  20,
+			expectedOffset: 0,
+			expectedErr:    nil,
 		},
 		{
 			name:        "negative offset returns error",
@@ -258,14 +262,16 @@ func TestParseOpaqueCursorPagination(t *testing.T) {
 			errContains: "invalid limit value",
 		},
 		{
-			name:        "limit zero returns error",
-			queryString: "limit=0",
-			errContains: "limit must be greater than zero",
+			name:           "limit zero uses default",
+			queryString:    "limit=0",
+			expectedLimit:  20,
+			expectedCursor: "",
 		},
 		{
-			name:        "negative limit returns error",
-			queryString: "limit=-5",
-			errContains: "limit must be greater than zero",
+			name:           "negative limit uses default",
+			queryString:    "limit=-5",
+			expectedLimit:  20,
+			expectedCursor: "",
 		},
 		{
 			name:           "opaque cursor is accepted without validation",
@@ -559,9 +565,9 @@ func TestParseTimestampCursorPagination(t *testing.T) {
 			errContains: "invalid limit value",
 		},
 		{
-			name:        "limit zero returns error",
-			queryString: "limit=0",
-			errContains: "limit must be greater than zero",
+			name:          "limit zero uses default",
+			queryString:   "limit=0",
+			expectedLimit: 20,
 		},
 		{
 			name:        "invalid cursor",
@@ -708,6 +714,11 @@ func TestDecodeSortCursor_Errors(t *testing.T) {
 			name:        "valid JSON but missing ID",
 			cursor:      base64.StdEncoding.EncodeToString([]byte(`{"sc":"created_at","sv":"2025-01-01","pn":true}`)),
 			errContains: "missing id",
+		},
+		{
+			name:        "invalid sort column",
+			cursor:      base64.StdEncoding.EncodeToString([]byte(`{"sc":"created_at;DROP TABLE users","sv":"2025-01-01","i":"abc","pn":true}`)),
+			errContains: "invalid sort column",
 		},
 	}
 

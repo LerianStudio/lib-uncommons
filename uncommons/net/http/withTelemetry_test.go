@@ -518,7 +518,7 @@ func TestExtractHTTPContext(t *testing.T) {
 	// Add test route
 	app.Get("/test", func(c *fiber.Ctx) error {
 		// Extract context
-		ctx := opentelemetry.ExtractHTTPContext(c)
+		ctx := opentelemetry.ExtractHTTPContext(c.UserContext(), c)
 
 		// Check if span info was extracted
 		spanCtx := trace.SpanContextFromContext(ctx)

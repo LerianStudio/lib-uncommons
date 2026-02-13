@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons"
 	constant "github.com/LerianStudio/lib-uncommons/uncommons/constants"
 
 	"github.com/gofiber/fiber/v2"
@@ -29,41 +28,49 @@ func FixedBasicAuthFunc(username, password string) BasicAuthFunc {
 
 // WithBasicAuth creates a basic authentication middleware.
 func WithBasicAuth(f BasicAuthFunc, realm string) fiber.Handler {
+	safeRealm := sanitizeBasicAuthRealm(realm)
+
 	return func(c *fiber.Ctx) error {
+		if f == nil {
+			return unauthorizedResponse(c, safeRealm)
+		}
+
 		auth := c.Get(constant.Authorization)
 		if auth == "" {
-			return unauthorizedResponse(c, realm)
+			return unauthorizedResponse(c, safeRealm)
 		}
 
 		parts := strings.SplitN(auth, " ", 2)
 		if len(parts) != 2 || parts[0] != constant.Basic {
-			return unauthorizedResponse(c, realm)
+			return unauthorizedResponse(c, safeRealm)
 		}
 
 		cred, err := base64.StdEncoding.DecodeString(parts[1])
 		if err != nil {
-			return unauthorizedResponse(c, realm)
+			return unauthorizedResponse(c, safeRealm)
 		}
 
 		pair := strings.SplitN(string(cred), ":", 2)
 		if len(pair) != 2 {
-			return unauthorizedResponse(c, realm)
+			return unauthorizedResponse(c, safeRealm)
 		}
 
 		if f(pair[0], pair[1]) {
 			return c.Next()
 		}
 
-		return unauthorizedResponse(c, realm)
+		return unauthorizedResponse(c, safeRealm)
 	}
+}
+
+func sanitizeBasicAuthRealm(realm string) string {
+	realm = strings.TrimSpace(realm)
+
+	return strings.NewReplacer("\r", "", "\n", "", "\"", "").Replace(realm)
 }
 
 func unauthorizedResponse(c *fiber.Ctx, realm string) error {
 	c.Set(constant.WWWAuthenticate, `Basic realm="`+realm+`"`)
 
-	return c.Status(http.StatusUnauthorized).JSON(uncommons.Response{
-		Code:    "401",
-		Title:   "Invalid Credentials",
-		Message: "The provided credentials are invalid. Please provide valid credentials and try again.",
-	})
+	return RespondError(c, http.StatusUnauthorized, "invalid_credentials", "The provided credentials are invalid. Please provide valid credentials and try again.")
 }

@@ -1,4 +1,3 @@
-// Package http provides shared HTTP helpers.
 package http
 
 import (
@@ -6,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +30,8 @@ var ErrOffsetMustBePositive = errors.New("offset must be non-negative")
 // ErrInvalidCursor is returned when the cursor cannot be decoded.
 var ErrInvalidCursor = errors.New("invalid cursor format")
 
+var sortColumnPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // ParsePagination parses limit/offset query params with defaults.
 func ParsePagination(fiberCtx *fiber.Ctx) (int, int, error) {
 	limit := DefaultLimit
@@ -53,8 +55,8 @@ func ParsePagination(fiberCtx *fiber.Ctx) (int, int, error) {
 		offset = parsed
 	}
 
-	if limit < 1 {
-		return 0, 0, ErrLimitMustBePositive
+	if limit <= 0 {
+		limit = DefaultLimit
 	}
 
 	if limit > MaxLimit {
@@ -83,8 +85,8 @@ func ParseOpaqueCursorPagination(fiberCtx *fiber.Ctx) (string, int, error) {
 		limit = parsed
 	}
 
-	if limit < 1 {
-		return "", 0, ErrLimitMustBePositive
+	if limit <= 0 {
+		limit = DefaultLimit
 	}
 
 	if limit > MaxLimit {
@@ -100,15 +102,11 @@ func ParseOpaqueCursorPagination(fiberCtx *fiber.Ctx) (string, int, error) {
 }
 
 // EncodeUUIDCursor encodes a UUID into a base64 cursor string.
-// NOTE: Named EncodeUUIDCursor to avoid collision with the existing
-// CreateCursor/DecodeCursor in cursor.go which use Cursor struct.
 func EncodeUUIDCursor(id uuid.UUID) string {
 	return base64.StdEncoding.EncodeToString([]byte(id.String()))
 }
 
 // DecodeUUIDCursor decodes a base64 cursor string into a UUID.
-// NOTE: Named DecodeUUIDCursor to avoid collision with the existing
-// DecodeCursor in cursor.go which returns a Cursor struct.
 func DecodeUUIDCursor(cursor string) (uuid.UUID, error) {
 	decoded, err := base64.StdEncoding.DecodeString(cursor)
 	if err != nil {
@@ -178,8 +176,8 @@ func ParseTimestampCursorPagination(fiberCtx *fiber.Ctx) (*TimestampCursor, int,
 		limit = parsed
 	}
 
-	if limit < 1 {
-		return nil, 0, ErrLimitMustBePositive
+	if limit <= 0 {
+		limit = DefaultLimit
 	}
 
 	if limit > MaxLimit {
@@ -240,6 +238,10 @@ func DecodeSortCursor(cursor string) (*SortCursor, error) {
 
 	if sc.ID == "" {
 		return nil, fmt.Errorf("%w: missing id", ErrInvalidCursor)
+	}
+
+	if sc.SortColumn == "" || !sortColumnPattern.MatchString(sc.SortColumn) {
+		return nil, fmt.Errorf("%w: invalid sort column", ErrInvalidCursor)
 	}
 
 	return &sc, nil

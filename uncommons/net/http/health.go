@@ -127,14 +127,3 @@ func HealthWithDependencies(dependencies ...DependencyCheck) fiber.Handler {
 		})
 	}
 }
-
-// HealthSimple is an alias for the existing Ping function for backward compatibility.
-// Use this when you don't need detailed dependency health checks.
-//
-// Returns:
-//   - HTTP 200 OK with "healthy" text response
-//
-// Example usage:
-//
-//	f.Get("/health", commonsHttp.HealthSimple)
-var HealthSimple = Ping
