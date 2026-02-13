@@ -47,7 +47,11 @@ var (
 //
 // Example:
 //
-//	tl := opentelemetry.InitializeTelemetry(cfg)
+//	tl, err := opentelemetry.NewTelemetry(cfg)
+//	if err != nil {
+//	    log.Fatalf("failed to init telemetry: %v", err)
+//	}
+//	tl.ApplyGlobals()
 //	runtime.InitPanicMetrics(tl.MetricsFactory)
 func InitPanicMetrics(factory *metrics.MetricsFactory) {
 	panicMetricsMu.Lock()
@@ -97,7 +101,12 @@ func (pm *PanicMetrics) RecordPanicRecovered(ctx context.Context, component, gor
 		return
 	}
 
-	pm.factory.Counter(panicRecoveredMetric).
+	counter, err := pm.factory.Counter(panicRecoveredMetric)
+	if err != nil {
+		return
+	}
+
+	counter.
 		WithLabels(map[string]string{
 			"component":      sanitizeLabel(component),
 			"goroutine_name": sanitizeLabel(goroutineName),

@@ -1,4 +1,4 @@
-// Package runtime provides panic recovery utilities for Matcher services with
+// Package runtime provides panic recovery utilities for services with
 // full observability integration.
 //
 // This package offers policy-based panic recovery primitives that integrate
@@ -59,7 +59,10 @@
 //
 // During application startup, initialize the observability integrations:
 //
-//	tl := opentelemetry.InitializeTelemetry(cfg)
+//	tl, err := opentelemetry.NewTelemetry(cfg)
+//	if err != nil {
+//	    return err
+//	}
 //	runtime.InitPanicMetrics(tl.MetricsFactory)
 //
 //	// Optional: Configure Sentry or other error reporter

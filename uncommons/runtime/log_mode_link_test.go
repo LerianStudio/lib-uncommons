@@ -1,7 +1,10 @@
+//go:build unit
+
 package runtime
 
 import (
 	"bytes"
+	"context"
 	slog "log"
 	"sync"
 	"testing"
@@ -29,17 +32,17 @@ func TestLogProductionModeResolverRegistration(t *testing.T) {
 	var buf bytes.Buffer
 	withRuntimeLoggerOutput(t, &buf)
 
-	logger := &log.GoLogger{Level: log.InfoLevel}
+	logger := &log.GoLogger{Level: log.LevelInfo}
 	initialMode := IsProductionMode()
 	t.Cleanup(func() { SetProductionMode(initialMode) })
 
 	SetProductionMode(false)
-	log.SafeErrorf(logger, "runtime integration", assert.AnError)
+	log.SafeError(logger, context.Background(), "runtime integration", assert.AnError, IsProductionMode())
 	assert.Contains(t, buf.String(), "general error")
 
 	buf.Reset()
 	SetProductionMode(true)
-	log.SafeErrorf(logger, "runtime integration", assert.AnError)
+	log.SafeError(logger, context.Background(), "runtime integration", assert.AnError, IsProductionMode())
 	assert.Contains(t, buf.String(), "error_type=*errors.errorString")
 	assert.NotContains(t, buf.String(), "general error")
 }

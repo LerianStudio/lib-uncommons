@@ -136,6 +136,7 @@ type panicError struct {
 	message string
 }
 
+// Error returns the panic error message.
 func (e *panicError) Error() string {
 	return e.message
 }
