@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
-	"github.com/LerianStudio/lib-uncommons/uncommons/runtime"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/runtime"
 	"github.com/sony/gobreaker"
 )
 
@@ -61,7 +61,7 @@ func (m *manager) GetOrCreate(serviceName string, config Config) (CircuitBreaker
 	m.breakers[serviceName] = breaker
 	m.configs[serviceName] = config
 
-	m.logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Created circuit breaker for service: %s", serviceName))
+	m.logger.Log(context.Background(), log.LevelInfo, "Created circuit breaker for service: "+serviceName)
 
 	return &circuitBreaker{breaker: breaker}, nil
 }
@@ -79,12 +79,12 @@ func (m *manager) Execute(serviceName string, fn func() (any, error)) (any, erro
 	result, err := breaker.Execute(fn)
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
-			m.logger.Log(context.Background(), log.LevelWarn, fmt.Sprintf("Circuit breaker [%s] is OPEN - request rejected immediately", serviceName))
+			m.logger.Log(context.Background(), log.LevelWarn, "Circuit breaker ["+serviceName+"] is OPEN - request rejected immediately")
 			return nil, fmt.Errorf("service %s is currently unavailable (circuit breaker open): %w", serviceName, err)
 		}
 
 		if err == gobreaker.ErrTooManyRequests {
-			m.logger.Log(context.Background(), log.LevelWarn, fmt.Sprintf("Circuit breaker [%s] is HALF-OPEN - too many test requests", serviceName))
+			m.logger.Log(context.Background(), log.LevelWarn, "Circuit breaker ["+serviceName+"] is HALF-OPEN - too many test requests")
 			return nil, fmt.Errorf("service %s is recovering (too many requests): %w", serviceName, err)
 		}
 	}
@@ -143,11 +143,11 @@ func (m *manager) Reset(serviceName string) {
 	defer m.mu.Unlock()
 
 	if _, exists := m.breakers[serviceName]; exists {
-		m.logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Resetting circuit breaker for service: %s", serviceName))
+		m.logger.Log(context.Background(), log.LevelInfo, "Resetting circuit breaker for service: "+serviceName)
 
 		config, configExists := m.configs[serviceName]
 		if !configExists {
-			m.logger.Log(context.Background(), log.LevelWarn, fmt.Sprintf("No stored config found for service %s, cannot recreate", serviceName))
+			m.logger.Log(context.Background(), log.LevelWarn, "No stored config found for service "+serviceName+", cannot recreate")
 			delete(m.breakers, serviceName)
 
 			return
@@ -158,7 +158,7 @@ func (m *manager) Reset(serviceName string) {
 		breaker := gobreaker.NewCircuitBreaker(settings)
 		m.breakers[serviceName] = breaker
 
-		m.logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Circuit breaker reset completed for service: %s", serviceName))
+		m.logger.Log(context.Background(), log.LevelInfo, "Circuit breaker reset completed for service: "+serviceName)
 	}
 }
 
@@ -180,16 +180,15 @@ func (m *manager) RegisterStateChangeListener(listener StateChangeListener) {
 // handleStateChange processes state changes and notifies listeners
 func (m *manager) handleStateChange(serviceName string, from gobreaker.State, to gobreaker.State) {
 	// Log state change
-	m.logger.Log(context.Background(), log.LevelWarn, fmt.Sprintf("Circuit Breaker [%s] state changed: %s -> %s",
-		serviceName, from.String(), to.String()))
+	m.logger.Log(context.Background(), log.LevelWarn, "Circuit Breaker ["+serviceName+"] state changed: "+from.String()+" -> "+to.String())
 
 	switch to {
 	case gobreaker.StateOpen:
-		m.logger.Log(context.Background(), log.LevelError, fmt.Sprintf("Circuit Breaker [%s] OPENED - service is unhealthy, requests will fast-fail", serviceName))
+		m.logger.Log(context.Background(), log.LevelError, "Circuit Breaker ["+serviceName+"] OPENED - service is unhealthy, requests will fast-fail")
 	case gobreaker.StateHalfOpen:
-		m.logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Circuit Breaker [%s] HALF-OPEN - testing service recovery", serviceName))
+		m.logger.Log(context.Background(), log.LevelInfo, "Circuit Breaker ["+serviceName+"] HALF-OPEN - testing service recovery")
 	case gobreaker.StateClosed:
-		m.logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Circuit Breaker [%s] CLOSED - service is healthy", serviceName))
+		m.logger.Log(context.Background(), log.LevelInfo, "Circuit Breaker ["+serviceName+"] CLOSED - service is healthy")
 	}
 
 	// Notify listeners
@@ -209,7 +208,7 @@ func (m *manager) handleStateChange(serviceName string, from gobreaker.State, to
 			context.Background(),
 			m.logger,
 			"circuitbreaker",
-			fmt.Sprintf("state_change_listener_%s", serviceName),
+			"state_change_listener_"+serviceName,
 			runtime.KeepRunning,
 			func(_ context.Context) {
 				listenerCopy.OnStateChange(serviceName, fromState, toState)

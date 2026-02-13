@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/server"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/server"
 )
 
 func ExampleServerManager_StartWithGracefulShutdownWithError_validation() {

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -95,16 +95,18 @@ func TestCircuitBreaker_GetCounts(t *testing.T) {
 
 	// Execute some requests
 	for i := 0; i < 5; i++ {
-		_, _ = manager.Execute("test-service", func() (any, error) {
+		_, err = manager.Execute("test-service", func() (any, error) {
 			return "success", nil
 		})
+		require.NoError(t, err)
 	}
 
 	// Trigger some failures
 	for i := 0; i < 3; i++ {
-		_, _ = manager.Execute("test-service", func() (any, error) {
+		_, err = manager.Execute("test-service", func() (any, error) {
 			return nil, errors.New("failure")
 		})
+		require.Error(t, err)
 	}
 
 	counts := manager.GetCounts("test-service")
@@ -132,9 +134,10 @@ func TestCircuitBreaker_Reset(t *testing.T) {
 
 	// Trigger failures to open circuit breaker
 	for i := 0; i < 5; i++ {
-		_, _ = manager.Execute("test-service", func() (any, error) {
+		_, err = manager.Execute("test-service", func() (any, error) {
 			return nil, errors.New("service error")
 		})
+		require.Error(t, err)
 	}
 
 	// Circuit breaker should be open
@@ -243,9 +246,10 @@ func TestCircuitBreaker_StateChangeListenerPanicRecovery(t *testing.T) {
 
 	// Trigger failures to open circuit breaker and trigger state change
 	for i := 0; i < 3; i++ {
-		_, _ = manager.Execute("test-service", func() (any, error) {
+		_, err = manager.Execute("test-service", func() (any, error) {
 			return nil, errors.New("service error")
 		})
+		require.Error(t, err)
 	}
 
 	// Wait for all listeners to be called (with timeout)
@@ -299,9 +303,10 @@ func TestCircuitBreaker_NilListenerRegistration(t *testing.T) {
 
 	// Trigger a state change to ensure system still works
 	for i := 0; i < 3; i++ {
-		_, _ = manager.Execute("test-service", func() (any, error) {
+		_, err = manager.Execute("test-service", func() (any, error) {
 			return nil, errors.New("service error")
 		})
+		require.Error(t, err)
 	}
 
 	// Should successfully transition to open state

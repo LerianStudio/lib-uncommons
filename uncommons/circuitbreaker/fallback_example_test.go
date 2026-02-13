@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/circuitbreaker"
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/circuitbreaker"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 )
 
 func ExampleManager_Execute_fallbackOnOpen() {

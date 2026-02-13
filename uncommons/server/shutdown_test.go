@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/server"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/server"
 	"github.com/gofiber/fiber/v2"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc"

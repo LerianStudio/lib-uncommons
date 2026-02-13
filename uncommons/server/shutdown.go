@@ -11,10 +11,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/license"
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
-	"github.com/LerianStudio/lib-uncommons/uncommons/opentelemetry"
-	"github.com/LerianStudio/lib-uncommons/uncommons/runtime"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/license"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/runtime"
 	"github.com/gofiber/fiber/v2"
 	"google.golang.org/grpc"
 )
@@ -41,11 +41,17 @@ type ServerManager struct {
 }
 
 // NewServerManager creates a new instance of ServerManager.
+// If logger is nil, a no-op logger is used to ensure nil-safe operation
+// throughout the server lifecycle.
 func NewServerManager(
 	licenseClient *license.ManagerShutdown,
 	telemetry *opentelemetry.Telemetry,
 	logger log.Logger,
 ) *ServerManager {
+	if logger == nil {
+		logger = log.NewNop()
+	}
+
 	return &ServerManager{
 		licenseClient:   licenseClient,
 		telemetry:       telemetry,
@@ -361,4 +367,3 @@ func (sm *ServerManager) executeShutdown() {
 		sm.logInfo("Graceful shutdown completed")
 	})
 }
-
