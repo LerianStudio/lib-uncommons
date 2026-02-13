@@ -29,6 +29,27 @@ func RenderError(ctx *fiber.Ctx, err error) error {
 		return nil
 	}
 
+	var presp *ErrorResponse
+	if errors.As(err, &presp) {
+		status := fiber.StatusInternalServerError
+
+		if presp.Code >= http.StatusContinue && presp.Code <= 599 {
+			status = presp.Code
+		}
+
+		title := presp.Title
+		if title == "" {
+			title = "request_failed"
+		}
+
+		message := presp.Message
+		if message == "" {
+			message = http.StatusText(status)
+		}
+
+		return RespondError(ctx, status, title, message)
+	}
+
 	var responseErr ErrorResponse
 	if errors.As(err, &responseErr) {
 		status := fiber.StatusInternalServerError

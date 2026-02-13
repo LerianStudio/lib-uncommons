@@ -100,7 +100,7 @@ func ParseAndVerifyTenantScopedID(
 	}
 
 	if err := verifier(ctx, tenantID, resourceID); err != nil {
-		return uuid.Nil, uuid.Nil, classifyOwnershipError(err)
+		return uuid.Nil, uuid.Nil, classifyOwnershipError(err, accessErr)
 	}
 
 	return resourceID, tenantID, nil
@@ -140,7 +140,7 @@ func ParseAndVerifyResourceScopedID(
 	}
 
 	if err := verifier(ctx, resourceID); err != nil {
-		return uuid.Nil, uuid.Nil, classifyResourceOwnershipError(verificationLabel, err)
+		return uuid.Nil, uuid.Nil, classifyResourceOwnershipError(verificationLabel, err, accessErr)
 	}
 
 	return resourceID, tenantID, nil
@@ -202,27 +202,40 @@ func getIDValue(fiberCtx *fiber.Ctx, idName string, location IDLocation) (string
 	}
 }
 
-func classifyOwnershipError(err error) error {
+func classifyOwnershipError(err, accessErr error) error {
 	switch {
 	case errors.Is(err, ErrContextNotFound):
 		return ErrContextNotFound
 	case errors.Is(err, ErrContextNotOwned):
+		if accessErr != nil {
+			return accessErr
+		}
+
 		return ErrContextNotOwned
 	case errors.Is(err, ErrContextNotActive):
 		return ErrContextNotActive
 	case errors.Is(err, ErrContextAccessDenied):
+		if accessErr != nil {
+			return accessErr
+		}
+
 		return ErrContextAccessDenied
 	default:
 		return fmt.Errorf("%w: %w", ErrContextLookupFailed, err)
 	}
 }
 
-func classifyResourceOwnershipError(label string, err error) error {
+func classifyResourceOwnershipError(label string, err, accessErr error) error {
 	switch {
 	case errors.Is(err, ErrExceptionNotFound),
-		errors.Is(err, ErrExceptionAccessDenied),
-		errors.Is(err, ErrDisputeNotFound),
+		errors.Is(err, ErrDisputeNotFound):
+		return err
+	case errors.Is(err, ErrExceptionAccessDenied),
 		errors.Is(err, ErrDisputeAccessDenied):
+		if accessErr != nil {
+			return accessErr
+		}
+
 		return err
 	default:
 		return fmt.Errorf("%s %w: %w", label, ErrLookupFailed, err)

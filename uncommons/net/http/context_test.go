@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
@@ -405,7 +406,7 @@ func TestParseAndVerifyTenantScopedID_VerifierReturnsContextNotOwned(t *testing.
 			ErrContextAccessDenied,
 		)
 		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrContextNotOwned)
+		assert.ErrorIs(t, err, ErrContextAccessDenied)
 
 		return c.SendStatus(fiber.StatusOK)
 	})
@@ -997,7 +998,7 @@ func TestClassifyOwnershipError_AllSentinels(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := classifyOwnershipError(tc.input)
+			err := classifyOwnershipError(tc.input, nil)
 			assert.ErrorIs(t, err, tc.expected)
 		})
 	}
@@ -1007,7 +1008,7 @@ func TestClassifyOwnershipError_UnknownErrorPreservesOriginal(t *testing.T) {
 	t.Parallel()
 
 	originalErr := errors.New("network timeout")
-	err := classifyOwnershipError(originalErr)
+	err := classifyOwnershipError(originalErr, nil)
 	assert.ErrorIs(t, err, ErrContextLookupFailed)
 	assert.Contains(t, err.Error(), "network timeout")
 }
@@ -1036,7 +1037,7 @@ func TestClassifyResourceOwnershipError_AllSentinels(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := classifyResourceOwnershipError(tc.label, tc.input)
+			err := classifyResourceOwnershipError(tc.label, tc.input, nil)
 			assert.ErrorIs(t, err, tc.expected)
 		})
 	}
@@ -1045,7 +1046,7 @@ func TestClassifyResourceOwnershipError_AllSentinels(t *testing.T) {
 func TestClassifyResourceOwnershipError_LabelInMessage(t *testing.T) {
 	t.Parallel()
 
-	err := classifyResourceOwnershipError("my_resource", errors.New("db failure"))
+	err := classifyResourceOwnershipError("my_resource", errors.New("db failure"), nil)
 	assert.ErrorIs(t, err, ErrLookupFailed)
 	assert.Contains(t, err.Error(), "my_resource")
 	assert.Contains(t, err.Error(), "db failure")
@@ -1258,7 +1259,7 @@ func TestParseAndVerifyTenantScopedID_UUIDWithUpperCase(t *testing.T) {
 	tenantID := uuid.New()
 	contextID := uuid.New()
 	// UUID strings are case-insensitive; pass an uppercase version.
-	upperContextID := fmt.Sprintf("%s", contextID.String())
+	upperContextID := strings.ToUpper(contextID.String())
 
 	runInFiber(t, "/contexts/:contextId", "/contexts/"+upperContextID, func(c *fiber.Ctx) error {
 		c.SetUserContext(context.WithValue(context.Background(), tenantKey{}, tenantID.String()))
