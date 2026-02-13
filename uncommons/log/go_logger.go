@@ -1,258 +1,149 @@
 package log
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
 )
 
-// logControlCharReplacer escapes control characters that can be used for log injection (CWE-117).
-// Newlines, carriage returns, and tabs in log messages can forge fake log entries,
-// mislead incident response, or inject false audit trail entries.
 var logControlCharReplacer = strings.NewReplacer(
 	"\n", `\n`,
 	"\r", `\r`,
 	"\t", `\t`,
+	"\x00", `\0`,
 )
 
-// sanitizeLogString escapes control characters in a single string value.
 func sanitizeLogString(s string) string {
 	return logControlCharReplacer.Replace(s)
 }
 
-// sanitizeLogArgs escapes control characters in all string-typed arguments.
-// Non-string arguments are passed through unchanged.
-func sanitizeLogArgs(args []any) []any {
-	sanitized := make([]any, len(args))
-	for i, arg := range args {
-		if s, ok := arg.(string); ok {
-			sanitized[i] = sanitizeLogString(s)
-		} else {
-			sanitized[i] = arg
-		}
-	}
-
-	return sanitized
-}
-
-// GoLogger is the Go built-in (log) implementation of Logger interface.
-//
-// All string arguments are sanitized to prevent log injection (CWE-117).
+// GoLogger is the stdlib logger implementation for Logger.
 type GoLogger struct {
-	fields                 []any
-	Level                  LogLevel
-	defaultMessageTemplate string
+	Level  Level
+	fields []Field
+	groups []string
 }
 
-// IsLevelEnabled checks if the given level is enabled.
-func (l *GoLogger) IsLevelEnabled(level LogLevel) bool {
+// Enabled reports whether the logger emits entries at the given level.
+func (l *GoLogger) Enabled(level Level) bool {
 	if l == nil {
+		log.Print("[warn] nil GoLogger receiver on Enabled")
 		return false
 	}
 
 	return l.Level >= level
 }
 
-// Info implements Info Logger interface function.
-func (l *GoLogger) Info(args ...any) {
-	if l.IsLevelEnabled(InfoLevel) {
-		log.Print(l.hydrateWithLevel(InfoLevel, args...))
+// Log writes a single log line if the level is enabled.
+func (l *GoLogger) Log(_ context.Context, level Level, msg string, fields ...Field) {
+	if !l.Enabled(level) {
+		return
 	}
+
+	line := l.hydrateLine(level, msg, fields...)
+	log.Print(line)
 }
 
-// Infof implements Infof Logger interface function.
-func (l *GoLogger) Infof(format string, args ...any) {
-	if l.IsLevelEnabled(InfoLevel) {
-		log.Print(l.hydrateWithLevel(InfoLevel, fmt.Sprintf(sanitizeLogString(format), args...)))
-	}
-}
-
-// Infoln implements Infoln Logger interface function.
-func (l *GoLogger) Infoln(args ...any) {
-	if l.IsLevelEnabled(InfoLevel) {
-		log.Println(l.hydrateLineWithLevel(InfoLevel, args...)...)
-	}
-}
-
-// Error implements Error Logger interface function.
-func (l *GoLogger) Error(args ...any) {
-	if l.IsLevelEnabled(ErrorLevel) {
-		log.Print(l.hydrateWithLevel(ErrorLevel, args...))
-	}
-}
-
-// Errorf implements Errorf Logger interface function.
-func (l *GoLogger) Errorf(format string, args ...any) {
-	if l.IsLevelEnabled(ErrorLevel) {
-		log.Print(l.hydrateWithLevel(ErrorLevel, fmt.Sprintf(sanitizeLogString(format), args...)))
-	}
-}
-
-// Errorln implements Errorln Logger interface function.
-func (l *GoLogger) Errorln(args ...any) {
-	if l.IsLevelEnabled(ErrorLevel) {
-		log.Println(l.hydrateLineWithLevel(ErrorLevel, args...)...)
-	}
-}
-
-// Warn implements Warn Logger interface function.
-func (l *GoLogger) Warn(args ...any) {
-	if l.IsLevelEnabled(WarnLevel) {
-		log.Print(l.hydrateWithLevel(WarnLevel, args...))
-	}
-}
-
-// Warnf implements Warnf Logger interface function.
-func (l *GoLogger) Warnf(format string, args ...any) {
-	if l.IsLevelEnabled(WarnLevel) {
-		log.Print(l.hydrateWithLevel(WarnLevel, fmt.Sprintf(sanitizeLogString(format), args...)))
-	}
-}
-
-// Warnln implements Warnln Logger interface function.
-func (l *GoLogger) Warnln(args ...any) {
-	if l.IsLevelEnabled(WarnLevel) {
-		log.Println(l.hydrateLineWithLevel(WarnLevel, args...)...)
-	}
-}
-
-// Debug implements Debug Logger interface function.
-func (l *GoLogger) Debug(args ...any) {
-	if l.IsLevelEnabled(DebugLevel) {
-		log.Print(l.hydrateWithLevel(DebugLevel, args...))
-	}
-}
-
-// Debugf implements Debugf Logger interface function.
-func (l *GoLogger) Debugf(format string, args ...any) {
-	if l.IsLevelEnabled(DebugLevel) {
-		log.Print(l.hydrateWithLevel(DebugLevel, fmt.Sprintf(sanitizeLogString(format), args...)))
-	}
-}
-
-// Debugln implements Debugln Logger interface function.
-func (l *GoLogger) Debugln(args ...any) {
-	if l.IsLevelEnabled(DebugLevel) {
-		log.Println(l.hydrateLineWithLevel(DebugLevel, args...)...)
-	}
-}
-
-// Fatal implements Fatal Logger interface function.
-func (l *GoLogger) Fatal(args ...any) {
-	if l.IsLevelEnabled(FatalLevel) {
-		log.Fatal(l.hydrateWithLevel(FatalLevel, args...))
-	}
-}
-
-// Fatalf implements Fatalf Logger interface function.
-func (l *GoLogger) Fatalf(format string, args ...any) {
-	if l.IsLevelEnabled(FatalLevel) {
-		log.Fatal(l.hydrateWithLevel(FatalLevel, fmt.Sprintf(sanitizeLogString(format), args...)))
-	}
-}
-
-// Fatalln implements Fatalln Logger interface function.
-func (l *GoLogger) Fatalln(args ...any) {
-	if l.IsLevelEnabled(FatalLevel) {
-		log.Fatalln(l.hydrateLineWithLevel(FatalLevel, args...)...)
-	}
-}
-
-// WithFields implements WithFields Logger interface function.
-//
 //nolint:ireturn
-func (l *GoLogger) WithFields(fields ...any) Logger {
+func (l *GoLogger) With(fields ...Field) Logger {
 	if l == nil {
-		return &GoLogger{}
+		log.Print("[warn] nil GoLogger receiver on With")
+		return &NopLogger{}
 	}
 
-	newFields := make([]any, 0, len(l.fields)+len(fields))
+	newFields := make([]Field, 0, len(l.fields)+len(fields))
 	newFields = append(newFields, l.fields...)
 	newFields = append(newFields, fields...)
 
-	return &GoLogger{
-		Level:                  l.Level,
-		fields:                 newFields,
-		defaultMessageTemplate: l.defaultMessageTemplate,
-	}
-}
-
-func (l *GoLogger) WithDefaultMessageTemplate(message string) Logger {
-	if l == nil {
-		return &GoLogger{}
-	}
+	newGroups := make([]string, 0, len(l.groups))
+	newGroups = append(newGroups, l.groups...)
 
 	return &GoLogger{
-		Level:                  l.Level,
-		fields:                 l.fields,
-		defaultMessageTemplate: message,
+		Level:  l.Level,
+		fields: newFields,
+		groups: newGroups,
 	}
 }
 
-func (l *GoLogger) hydrateWithLevel(level LogLevel, args ...any) string {
-	message := fmt.Sprint(sanitizeLogArgs(args)...)
-
+//nolint:ireturn
+func (l *GoLogger) WithGroup(name string) Logger {
 	if l == nil {
-		return message
+		log.Print("[warn] nil GoLogger receiver on WithGroup")
+		return &NopLogger{}
 	}
 
-	messageParts := make([]string, 0, 4)
-	messageParts = append(messageParts, fmt.Sprintf("[%s]", level.String()))
+	newGroups := make([]string, 0, len(l.groups)+1)
 
-	if l.defaultMessageTemplate != "" {
-		messageParts = append(messageParts, l.defaultMessageTemplate)
+	newGroups = append(newGroups, l.groups...)
+	if strings.TrimSpace(name) != "" {
+		newGroups = append(newGroups, sanitizeLogString(name))
 	}
 
-	if fields := l.hydrateFields(); fields != "" {
-		messageParts = append(messageParts, fields)
+	newFields := make([]Field, 0, len(l.fields))
+	newFields = append(newFields, l.fields...)
+
+	return &GoLogger{
+		Level:  l.Level,
+		fields: newFields,
+		groups: newGroups,
 	}
-
-	messageParts = append(messageParts, message)
-
-	return strings.Join(messageParts, " ")
 }
 
-func (l *GoLogger) hydrateLineWithLevel(level LogLevel, args ...any) []any {
-	safe := sanitizeLogArgs(args)
+// Sync flushes buffered logs. It is a no-op for the stdlib logger.
+func (l *GoLogger) Sync(_ context.Context) error { return nil }
 
-	if l == nil {
-		return append([]any{fmt.Sprintf("[%s]", level.String())}, safe...)
-	}
-
-	parts := make([]any, 0, 3+len(safe))
+func (l *GoLogger) hydrateLine(level Level, msg string, fields ...Field) string {
+	parts := make([]string, 0, 4)
 	parts = append(parts, fmt.Sprintf("[%s]", level.String()))
 
-	if l.defaultMessageTemplate != "" {
-		parts = append(parts, l.defaultMessageTemplate)
+	if l != nil && len(l.groups) > 0 {
+		parts = append(parts, fmt.Sprintf("[group=%s]", strings.Join(l.groups, ".")))
 	}
 
-	if fields := l.hydrateFields(); fields != "" {
-		parts = append(parts, fields)
+	allFields := make([]Field, 0, len(fields))
+	if l != nil {
+		allFields = append(allFields, l.fields...)
 	}
 
-	return append(parts, safe...)
+	allFields = append(allFields, fields...)
+
+	if rendered := renderFields(allFields); rendered != "" {
+		parts = append(parts, rendered)
+	}
+
+	parts = append(parts, sanitizeLogString(msg))
+
+	return strings.Join(parts, " ")
 }
 
-func (l *GoLogger) hydrateFields() string {
-	if len(l.fields) == 0 {
+func renderFields(fields []Field) string {
+	if len(fields) == 0 {
 		return ""
 	}
 
-	parts := make([]string, 0, (len(l.fields)+1)/2)
-
-	for i := 0; i < len(l.fields); i += 2 {
-		if i+1 >= len(l.fields) {
-			parts = append(parts, fmt.Sprint(l.fields[i]))
+	parts := make([]string, 0, len(fields))
+	for _, field := range fields {
+		key := sanitizeLogString(field.Key)
+		if key == "" {
 			continue
 		}
 
-		parts = append(parts, fmt.Sprintf("%v=%v", l.fields[i], l.fields[i+1]))
+		parts = append(parts, fmt.Sprintf("%s=%v", key, sanitizeFieldValue(field.Value)))
+	}
+
+	if len(parts) == 0 {
+		return ""
 	}
 
 	return fmt.Sprintf("[%s]", strings.Join(parts, ", "))
 }
 
-// Sync implements Sync Logger interface function.
-//
-//nolint:ireturn
-func (l *GoLogger) Sync() error { return nil }
+func sanitizeFieldValue(value any) any {
+	s, ok := value.(string)
+	if !ok {
+		return value
+	}
+
+	return sanitizeLogString(s)
+}

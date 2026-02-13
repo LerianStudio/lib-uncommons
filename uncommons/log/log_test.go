@@ -2,26 +2,22 @@ package log
 
 import (
 	"bytes"
-	"log"
+	"context"
+	stdlog "log"
 	"os"
-	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 )
 
 var stdLoggerOutputMu sync.Mutex
 
-// withTestLoggerOutput redirects the global log.Writer() to the given buffer for the
-// duration of the test. It serializes access via stdLoggerOutputMu to prevent concurrent
-// tests from stomping on each other's output.
-//
-// IMPORTANT: Tests that call this helper MUST NOT use t.Parallel(). The mutex is held for
-// the full test lifetime (released via t.Cleanup). Adding t.Parallel() would allow the
-// Unlock cleanup to race with other tests acquiring the lock, breaking the safety invariant.
 func withTestLoggerOutput(t *testing.T, output *bytes.Buffer) {
 	t.Helper()
 
@@ -30,845 +26,638 @@ func withTestLoggerOutput(t *testing.T, output *bytes.Buffer) {
 		stdLoggerOutputMu.Unlock()
 	})
 
-	originalOutput := log.Writer()
-	log.SetOutput(output)
-	t.Cleanup(func() { log.SetOutput(originalOutput) })
+	originalOutput := stdlog.Writer()
+	stdlog.SetOutput(output)
+	t.Cleanup(func() { stdlog.SetOutput(originalOutput) })
 }
 
 func TestParseLevel(t *testing.T) {
 	tests := []struct {
-		name        string
-		input       string
-		expected    LogLevel
-		expectError bool
+		in       string
+		expected Level
+		err      bool
 	}{
-		{
-			name:        "parse fatal level",
-			input:       "fatal",
-			expected:    FatalLevel,
-			expectError: false,
-		},
-		{
-			name:        "parse error level",
-			input:       "error",
-			expected:    ErrorLevel,
-			expectError: false,
-		},
-		{
-			name:        "parse warn level",
-			input:       "warn",
-			expected:    WarnLevel,
-			expectError: false,
-		},
-		{
-			name:        "parse warning level",
-			input:       "warning",
-			expected:    WarnLevel,
-			expectError: false,
-		},
-		{
-			name:        "parse info level",
-			input:       "info",
-			expected:    InfoLevel,
-			expectError: false,
-		},
-		{
-			name:        "parse debug level",
-			input:       "debug",
-			expected:    DebugLevel,
-			expectError: false,
-		},
-		{
-			name:        "parse uppercase level",
-			input:       "INFO",
-			expected:    InfoLevel,
-			expectError: false,
-		},
-		{
-			name:        "parse mixed case level",
-			input:       "WaRn",
-			expected:    WarnLevel,
-			expectError: false,
-		},
-		{
-			name:        "parse invalid level",
-			input:       "invalid",
-			expected:    LogLevel(0),
-			expectError: true,
-		},
-		{
-			name:        "parse empty string",
-			input:       "",
-			expected:    LogLevel(0),
-			expectError: true,
-		},
-		{
-			name:        "parse panic level",
-			input:       "panic",
-			expected:    PanicLevel,
-			expectError: false,
-		},
+		{in: "error", expected: LevelError},
+		{in: "warn", expected: LevelWarn},
+		{in: "warning", expected: LevelWarn},
+		{in: "info", expected: LevelInfo},
+		{in: "debug", expected: LevelDebug},
+		{in: "panic", err: true},
+		{in: "fatal", err: true},
+		{in: "INVALID", err: true},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			level, err := ParseLevel(tt.input)
+		level, err := ParseLevel(tt.in)
+		if tt.err {
+			assert.Error(t, err)
+			continue
+		}
 
-			if tt.expectError {
-				assert.EqualError(t, err, "not a valid LogLevel: \""+tt.input+"\"")
-			} else {
-				assert.NoError(t, err)
-				assert.Equal(t, tt.expected, level)
-			}
-		})
+		assert.NoError(t, err)
+		assert.Equal(t, tt.expected, level)
 	}
 }
 
-func TestGoLogger_IsLevelEnabled(t *testing.T) {
-	tests := []struct {
-		name        string
-		loggerLevel LogLevel
-		checkLevel  LogLevel
-		expected    bool
-	}{
-		{
-			name:        "debug logger - check debug",
-			loggerLevel: DebugLevel,
-			checkLevel:  DebugLevel,
-			expected:    true,
-		},
-		{
-			name:        "debug logger - check info",
-			loggerLevel: DebugLevel,
-			checkLevel:  InfoLevel,
-			expected:    true,
-		},
-		{
-			name:        "info logger - check debug",
-			loggerLevel: InfoLevel,
-			checkLevel:  DebugLevel,
-			expected:    false,
-		},
-		{
-			name:        "info logger - check info",
-			loggerLevel: InfoLevel,
-			checkLevel:  InfoLevel,
-			expected:    true,
-		},
-		{
-			name:        "error logger - check warn",
-			loggerLevel: ErrorLevel,
-			checkLevel:  WarnLevel,
-			expected:    false,
-		},
-		{
-			name:        "error logger - check error",
-			loggerLevel: ErrorLevel,
-			checkLevel:  ErrorLevel,
-			expected:    true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			logger := &GoLogger{Level: tt.loggerLevel}
-			result := logger.IsLevelEnabled(tt.checkLevel)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
+func TestGoLogger_Enabled(t *testing.T) {
+	logger := &GoLogger{Level: LevelInfo}
+	assert.True(t, logger.Enabled(LevelError))
+	assert.True(t, logger.Enabled(LevelInfo))
+	assert.False(t, logger.Enabled(LevelDebug))
 }
 
-func TestGoLogger_Info(t *testing.T) {
+func TestGoLogger_LogWithFieldsAndGroup(t *testing.T) {
 	var buf bytes.Buffer
 	withTestLoggerOutput(t, &buf)
 
-	tests := []struct {
-		name         string
-		loggerLevel  LogLevel
-		message      string
-		expectLogged bool
-	}{
-		{
-			name:         "info level - log info",
-			loggerLevel:  InfoLevel,
-			message:      "test info message",
-			expectLogged: true,
-		},
-		{
-			name:         "warn level - log info",
-			loggerLevel:  WarnLevel,
-			message:      "test info message",
-			expectLogged: false,
-		},
-		{
-			name:         "debug level - log info",
-			loggerLevel:  DebugLevel,
-			message:      "test info message",
-			expectLogged: true,
-		},
-	}
+	logger := (&GoLogger{Level: LevelDebug}).
+		WithGroup("http").
+		With(String("request_id", "r-1"))
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			buf.Reset()
-			logger := &GoLogger{Level: tt.loggerLevel}
+	logger.Log(context.Background(), LevelInfo, "request finished", Int("status", 200))
 
-			logger.Info(tt.message)
-
-			output := buf.String()
-			if tt.expectLogged {
-				assert.Contains(t, output, tt.message)
-			} else {
-				assert.Empty(t, output)
-			}
-		})
-	}
+	out := buf.String()
+	assert.Contains(t, out, "[info]")
+	assert.Contains(t, out, "group=http")
+	assert.Contains(t, out, "request_id=r-1")
+	assert.Contains(t, out, "status=200")
+	assert.Contains(t, out, "request finished")
 }
 
-func TestGoLogger_Infof(t *testing.T) {
-	var buf bytes.Buffer
-	withTestLoggerOutput(t, &buf)
+func TestGoLogger_WithIsImmutable(t *testing.T) {
+	base := &GoLogger{Level: LevelDebug}
+	withField := base.With(String("k", "v"))
 
-	logger := &GoLogger{Level: InfoLevel}
+	assert.NotEqual(t, base, withField)
+	assert.Empty(t, base.fields)
 
-	buf.Reset()
-	logger.Infof("test %s message %d", "formatted", 123)
-
-	output := buf.String()
-	assert.Contains(t, output, "test formatted message 123")
+	goLogger, ok := withField.(*GoLogger)
+	require.True(t, ok, "expected *GoLogger from With()")
+	assert.Len(t, goLogger.fields, 1)
 }
 
-func TestGoLogger_Infoln(t *testing.T) {
-	var buf bytes.Buffer
-	withTestLoggerOutput(t, &buf)
-
-	logger := &GoLogger{Level: InfoLevel}
-
-	buf.Reset()
-	logger.Infoln("test", "info", "line")
-
-	output := buf.String()
-	assert.Contains(t, output, "test info line")
+func TestNopLogger(t *testing.T) {
+	nop := NewNop()
+	assert.NotPanics(t, func() {
+		nop.Log(context.Background(), LevelInfo, "hello")
+		_ = nop.With(String("k", "v"))
+		_ = nop.WithGroup("x")
+		_ = nop.Sync(context.Background())
+	})
+	assert.False(t, nop.Enabled(LevelError))
 }
 
-func TestGoLogger_Error(t *testing.T) {
-	var buf bytes.Buffer
-	withTestLoggerOutput(t, &buf)
+func TestLevelLegacyNamesRejected(t *testing.T) {
+	_, panicErr := ParseLevel("panic")
+	_, fatalErr := ParseLevel("fatal")
+	assert.Error(t, panicErr)
+	assert.Error(t, fatalErr)
+}
 
-	tests := []struct {
-		name         string
-		loggerLevel  LogLevel
-		message      string
-		expectLogged bool
-	}{
-		{
-			name:         "error level - log error",
-			loggerLevel:  ErrorLevel,
-			message:      "test error message",
-			expectLogged: true,
-		},
-		{
-			name:         "fatal level - log error",
-			loggerLevel:  FatalLevel,
-			message:      "test error message",
-			expectLogged: false,
-		},
-		{
-			name:         "debug level - log error",
-			loggerLevel:  DebugLevel,
-			message:      "test error message",
-			expectLogged: true,
-		},
+func TestNoLegacyLevelSymbolsInAPI(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("unable to resolve test file path")
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			buf.Reset()
-			logger := &GoLogger{Level: tt.loggerLevel}
-
-			logger.Error(tt.message)
-
-			output := buf.String()
-			if tt.expectLogged {
-				assert.Contains(t, output, tt.message)
-			} else {
-				assert.Empty(t, output)
-			}
-		})
-	}
-}
-
-func TestGoLogger_Warn(t *testing.T) {
-	var buf bytes.Buffer
-	withTestLoggerOutput(t, &buf)
-
-	tests := []struct {
-		name         string
-		loggerLevel  LogLevel
-		message      string
-		expectLogged bool
-	}{
-		{
-			name:         "warn level - log warn",
-			loggerLevel:  WarnLevel,
-			message:      "test warn message",
-			expectLogged: true,
-		},
-		{
-			name:         "error level - log warn",
-			loggerLevel:  ErrorLevel,
-			message:      "test warn message",
-			expectLogged: false,
-		},
-		{
-			name:         "info level - log warn",
-			loggerLevel:  InfoLevel,
-			message:      "test warn message",
-			expectLogged: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			buf.Reset()
-			logger := &GoLogger{Level: tt.loggerLevel}
-
-			logger.Warn(tt.message)
-
-			output := buf.String()
-			if tt.expectLogged {
-				assert.Contains(t, output, tt.message)
-			} else {
-				assert.Empty(t, output)
-			}
-		})
-	}
-}
-
-func TestGoLogger_Debug(t *testing.T) {
-	var buf bytes.Buffer
-	withTestLoggerOutput(t, &buf)
-
-	tests := []struct {
-		name         string
-		loggerLevel  LogLevel
-		message      string
-		expectLogged bool
-	}{
-		{
-			name:         "debug level - log debug",
-			loggerLevel:  DebugLevel,
-			message:      "test debug message",
-			expectLogged: true,
-		},
-		{
-			name:         "info level - log debug",
-			loggerLevel:  InfoLevel,
-			message:      "test debug message",
-			expectLogged: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			buf.Reset()
-			logger := &GoLogger{Level: tt.loggerLevel}
-
-			logger.Debug(tt.message)
-
-			output := buf.String()
-			if tt.expectLogged {
-				assert.Contains(t, output, tt.message)
-			} else {
-				assert.Empty(t, output)
-			}
-		})
-	}
-}
-
-func TestGoLogger_WithFields(t *testing.T) {
-	var buf bytes.Buffer
-	withTestLoggerOutput(t, &buf)
-
-	logger := &GoLogger{Level: InfoLevel}
-
-	buf.Reset()
-	loggerWithFields := logger.WithFields("key1", "value1", "key2", 123)
-	loggerWithMoreFields := loggerWithFields.WithFields("key3", "value3")
-	loggerWithMoreFields.Info("test message")
-
-	output := buf.String()
-	assert.Contains(t, output, "[info]")
-	assert.Contains(t, output, "test message")
-	assert.Contains(t, output, "[key1=value1")
-	assert.Contains(t, output, "key2=123")
-	assert.Contains(t, output, "key3=value3")
-
-	assert.Equal(t, []any{"key1", "value1", "key2", 123}, loggerWithFields.(*GoLogger).fields)
-	assert.Equal(t, []any{"key1", "value1", "key2", 123, "key3", "value3"}, loggerWithMoreFields.(*GoLogger).fields)
-
-	// Verify original logger is not modified
-	buf.Reset()
-	logger.Info("original logger")
-	output = buf.String()
-	assert.Contains(t, output, "original logger")
-
-	// Verify WithFields returns a new logger instance
-	assert.NotEqual(t, logger, loggerWithFields)
-}
-
-func TestGoLogger_WithDefaultMessageTemplate(t *testing.T) {
-	var buf bytes.Buffer
-	withTestLoggerOutput(t, &buf)
-
-	logger := &GoLogger{Level: InfoLevel}
-
-	buf.Reset()
-	loggerWithTemplate := logger.WithDefaultMessageTemplate("Template: ")
-	loggerWithTemplate.Info("test message")
-
-	output := buf.String()
-	assert.Contains(t, output, "[info]")
-	assert.Contains(t, output, "Template:")
-	assert.Contains(t, output, "test message")
-
-	assert.Equal(t, "Template: ", loggerWithTemplate.(*GoLogger).defaultMessageTemplate)
-
-	// Verify original logger is not modified (immutability)
-	buf.Reset()
-	logger.Info("original message")
-	output = buf.String()
-	assert.Contains(t, output, "original message")
-	assert.NotContains(t, output, "Template:")
-}
-
-func TestGoLogger_Sync(t *testing.T) {
-	logger := &GoLogger{Level: InfoLevel}
-	err := logger.Sync()
+	dir := filepath.Dir(thisFile)
+	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	assert.NoError(t, err)
+	require.NotEmpty(t, files)
+
+	for _, file := range files {
+		// Skip test files
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+
+		content, err := os.ReadFile(file)
+		assert.NoError(t, err)
+
+		api := string(content)
+		assert.NotContains(t, api, "LevelPanic", "found LevelPanic in %s", file)
+		assert.NotContains(t, api, "LevelFatal", "found LevelFatal in %s", file)
+		assert.False(t, strings.Contains(api, "\"panic\""), "found \"panic\" string literal in %s", file)
+		assert.False(t, strings.Contains(api, "\"fatal\""), "found \"fatal\" string literal in %s", file)
+	}
 }
 
-func TestGoLogger_FormattedMethods(t *testing.T) {
+// ===========================================================================
+// CWE-117: Log Injection Prevention Tests
+//
+// CWE-117 (Improper Output Neutralization for Logs) attacks rely on injecting
+// newlines or control characters into log messages to forge log entries, corrupt
+// log parsing, or hide malicious activity. In a financial services platform,
+// log integrity is critical for audit trails and regulatory compliance.
+// ===========================================================================
+
+// TestCWE117_MessageNewlineInjection verifies that newline characters embedded
+// in log messages are escaped, preventing an attacker from forging additional
+// log entries. This is the canonical CWE-117 attack vector.
+func TestCWE117_MessageNewlineInjection(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "LF newline injection",
+			input: "legitimate message\n[info] forged log entry",
+		},
+		{
+			name:  "CR injection",
+			input: "legitimate message\r[info] forged log entry",
+		},
+		{
+			name:  "CRLF injection",
+			input: "legitimate message\r\n[info] forged log entry",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			withTestLoggerOutput(t, &buf)
+
+			logger := &GoLogger{Level: LevelDebug}
+			logger.Log(context.Background(), LevelInfo, tt.input)
+
+			out := buf.String()
+
+			// The output must be a single line (the stdlib logger adds one trailing newline).
+			// Count the actual newlines -- there should be exactly 1 (the trailing one from log.Print).
+			newlineCount := strings.Count(out, "\n")
+			assert.Equal(t, 1, newlineCount,
+				"CWE-117: log output must be a single line, got %d newlines in: %q", newlineCount, out)
+
+			// The forged entry should NOT appear as if it were a real log line
+			assert.NotContains(t, out, "\n[info] forged")
+		})
+	}
+}
+
+// TestCWE117_FieldValueInjection verifies that field values containing newlines
+// are sanitized. An attacker might inject malicious data via user-controlled
+// field values (e.g., request headers, user IDs).
+func TestCWE117_FieldValueInjection(t *testing.T) {
 	var buf bytes.Buffer
 	withTestLoggerOutput(t, &buf)
 
-	logger := &GoLogger{Level: DebugLevel}
+	logger := &GoLogger{Level: LevelDebug}
+	// Simulate a user-controlled value injected through a field
+	maliciousValue := "normal_user\n[error] ADMIN ACCESS GRANTED user=admin action=delete_all"
+	logger.Log(context.Background(), LevelInfo, "user login", String("user_id", maliciousValue))
 
-	// Test Errorf
-	buf.Reset()
-	logger.Errorf("error: %s %d", "test", 42)
-	assert.Contains(t, buf.String(), "error: test 42")
-
-	// Test Warnf
-	buf.Reset()
-	logger.Warnf("warning: %s %d", "test", 42)
-	assert.Contains(t, buf.String(), "warning: test 42")
-
-	// Test Debugf
-	buf.Reset()
-	logger.Debugf("debug: %s %d", "test", 42)
-	assert.Contains(t, buf.String(), "debug: test 42")
+	out := buf.String()
+	newlineCount := strings.Count(out, "\n")
+	assert.Equal(t, 1, newlineCount,
+		"CWE-117: field injection must not create extra log lines, got: %q", out)
 }
 
-func TestGoLogger_LineMethods(t *testing.T) {
+// TestCWE117_FieldKeyInjection verifies that field keys with injection
+// characters are sanitized.
+func TestCWE117_FieldKeyInjection(t *testing.T) {
 	var buf bytes.Buffer
 	withTestLoggerOutput(t, &buf)
 
-	logger := &GoLogger{Level: DebugLevel}
+	logger := &GoLogger{Level: LevelDebug}
+	// Malicious field key containing newline
+	logger.Log(context.Background(), LevelInfo, "event",
+		String("key\ninjected_key", "value"))
 
-	// Test Errorln
-	buf.Reset()
-	logger.Errorln("error", "line", "test")
-	assert.Contains(t, buf.String(), "error line test")
-
-	// Test Warnln
-	buf.Reset()
-	logger.Warnln("warn", "line", "test")
-	assert.Contains(t, buf.String(), "warn line test")
-
-	// Test Debugln
-	buf.Reset()
-	logger.Debugln("debug", "line", "test")
-	assert.Contains(t, buf.String(), "debug line test")
+	out := buf.String()
+	newlineCount := strings.Count(out, "\n")
+	assert.Equal(t, 1, newlineCount,
+		"CWE-117: field key injection must not create extra log lines")
 }
 
-func TestNoneLogger(t *testing.T) {
-	// NoneLogger should not panic and should return itself for chaining methods
-	logger := &NoneLogger{}
+// TestCWE117_GroupNameInjection verifies that group names with injection
+// characters are sanitized when creating logger hierarchies.
+func TestCWE117_GroupNameInjection(t *testing.T) {
+	var buf bytes.Buffer
+	withTestLoggerOutput(t, &buf)
 
-	t.Run("info methods do not panic", func(t *testing.T) {
+	logger := (&GoLogger{Level: LevelDebug}).
+		WithGroup("safe\n[error] forged entry")
+
+	logger.Log(context.Background(), LevelInfo, "test message")
+
+	out := buf.String()
+	newlineCount := strings.Count(out, "\n")
+	assert.Equal(t, 1, newlineCount,
+		"CWE-117: group name injection must not create extra log lines")
+}
+
+// TestCWE117_NullByteInjection verifies null bytes do not corrupt log output.
+// Null bytes can truncate strings in C-based log processors.
+func TestCWE117_NullByteInjection(t *testing.T) {
+	var buf bytes.Buffer
+	withTestLoggerOutput(t, &buf)
+
+	logger := &GoLogger{Level: LevelDebug}
+	logger.Log(context.Background(), LevelInfo, "before\x00after")
+
+	out := buf.String()
+	// The null byte should not appear literally in the output
+	assert.NotContains(t, out, "\x00",
+		"CWE-117: null bytes must not appear in log output")
+}
+
+// TestCWE117_ANSIEscapeSequences verifies that ANSI escape codes are handled.
+// Attackers can use ANSI escapes to hide log entries in terminal output or
+// manipulate log viewers that render ANSI colors.
+func TestCWE117_ANSIEscapeSequences(t *testing.T) {
+	var buf bytes.Buffer
+	withTestLoggerOutput(t, &buf)
+
+	logger := &GoLogger{Level: LevelDebug}
+	// \x1b[31m sets red text, \x1b[0m resets -- attacker could hide text
+	logger.Log(context.Background(), LevelInfo, "normal \x1b[31mRED ALERT\x1b[0m normal")
+
+	out := buf.String()
+	// At minimum, the output should be a single line
+	newlineCount := strings.Count(out, "\n")
+	assert.Equal(t, 1, newlineCount,
+		"ANSI escapes must not break single-line log output")
+	// Verify the message content is present (even if ANSI codes pass through,
+	// the important thing is no line splitting occurs)
+	assert.Contains(t, out, "normal")
+}
+
+// TestCWE117_TabInjection verifies tab characters are escaped.
+// Tab injection can misalign columnar log formats.
+func TestCWE117_TabInjection(t *testing.T) {
+	var buf bytes.Buffer
+	withTestLoggerOutput(t, &buf)
+
+	logger := &GoLogger{Level: LevelDebug}
+	logger.Log(context.Background(), LevelInfo, "field1\tfield2\tfield3")
+
+	out := buf.String()
+	// Tabs should be escaped to literal \t
+	assert.NotContains(t, out, "\t",
+		"tab characters should be escaped in log output")
+	assert.Contains(t, out, `\t`)
+}
+
+// TestCWE117_MultipleVectorsSimultaneously tests a message that combines
+// multiple injection techniques at once.
+func TestCWE117_MultipleVectorsSimultaneously(t *testing.T) {
+	var buf bytes.Buffer
+	withTestLoggerOutput(t, &buf)
+
+	logger := &GoLogger{Level: LevelDebug}
+	// Combine multiple attack vectors: newlines, tabs, CR, null bytes
+	attack := "msg\n[error] fake\r[warn] also fake\ttab\x00null"
+	logger.Log(context.Background(), LevelInfo, attack,
+		String("user\nfake_key", "val\nfake_val"))
+
+	out := buf.String()
+	newlineCount := strings.Count(out, "\n")
+	assert.Equal(t, 1, newlineCount,
+		"CWE-117: combined attack must not create multiple log lines")
+}
+
+// TestCWE117_VeryLongMessageDoesNotCrash ensures that extremely long messages
+// with embedded control characters are handled without panicking or truncating
+// in unexpected ways.
+func TestCWE117_VeryLongMessageDoesNotCrash(t *testing.T) {
+	var buf bytes.Buffer
+	withTestLoggerOutput(t, &buf)
+
+	logger := &GoLogger{Level: LevelDebug}
+
+	// 100KB message with injection attempts every 1000 chars
+	var sb strings.Builder
+	for i := 0; i < 100; i++ {
+		sb.WriteString(strings.Repeat("A", 1000))
+		sb.WriteString("\n[error] forged entry ")
+	}
+
+	longMsg := sb.String()
+
+	assert.NotPanics(t, func() {
+		logger.Log(context.Background(), LevelInfo, longMsg)
+	})
+
+	out := buf.String()
+	newlineCount := strings.Count(out, "\n")
+	assert.Equal(t, 1, newlineCount,
+		"CWE-117: very long message with injections must remain single-line")
+}
+
+// ===========================================================================
+// GoLogger Behavioral Tests
+// ===========================================================================
+
+// TestGoLogger_OutputFormat verifies the overall format of log output.
+func TestGoLogger_OutputFormat(t *testing.T) {
+	var buf bytes.Buffer
+	withTestLoggerOutput(t, &buf)
+
+	logger := &GoLogger{Level: LevelDebug}
+	logger.Log(context.Background(), LevelError, "something broke", String("code", "500"))
+
+	out := buf.String()
+	assert.Contains(t, out, "[error]")
+	assert.Contains(t, out, "code=500")
+	assert.Contains(t, out, "something broke")
+}
+
+// TestGoLogger_LevelFiltering verifies that messages below the configured
+// level are suppressed.
+func TestGoLogger_LevelFiltering(t *testing.T) {
+	tests := []struct {
+		name       string
+		loggerLvl  Level
+		msgLvl     Level
+		shouldEmit bool
+	}{
+		{"error logger emits error", LevelError, LevelError, true},
+		{"error logger suppresses warn", LevelError, LevelWarn, false},
+		{"error logger suppresses info", LevelError, LevelInfo, false},
+		{"error logger suppresses debug", LevelError, LevelDebug, false},
+		{"warn logger emits error", LevelWarn, LevelError, true},
+		{"warn logger emits warn", LevelWarn, LevelWarn, true},
+		{"warn logger suppresses info", LevelWarn, LevelInfo, false},
+		{"info logger emits info", LevelInfo, LevelInfo, true},
+		{"info logger emits error", LevelInfo, LevelError, true},
+		{"debug logger emits everything", LevelDebug, LevelDebug, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			withTestLoggerOutput(t, &buf)
+
+			logger := &GoLogger{Level: tt.loggerLvl}
+			logger.Log(context.Background(), tt.msgLvl, "test message")
+
+			if tt.shouldEmit {
+				assert.NotEmpty(t, buf.String(), "expected message to be emitted")
+			} else {
+				assert.Empty(t, buf.String(), "expected message to be suppressed")
+			}
+		})
+	}
+}
+
+// TestGoLogger_WithPreservesFields verifies that With() attaches fields
+// that appear in subsequent log output.
+func TestGoLogger_WithPreservesFields(t *testing.T) {
+	var buf bytes.Buffer
+	withTestLoggerOutput(t, &buf)
+
+	logger := (&GoLogger{Level: LevelDebug}).
+		With(String("service", "payments"), Int("version", 2))
+
+	logger.Log(context.Background(), LevelInfo, "started")
+
+	out := buf.String()
+	assert.Contains(t, out, "service=payments")
+	assert.Contains(t, out, "version=2")
+}
+
+// TestGoLogger_WithGroupNesting verifies nested group naming.
+func TestGoLogger_WithGroupNesting(t *testing.T) {
+	var buf bytes.Buffer
+	withTestLoggerOutput(t, &buf)
+
+	logger := (&GoLogger{Level: LevelDebug}).
+		WithGroup("http").
+		WithGroup("middleware")
+
+	logger.Log(context.Background(), LevelInfo, "applied")
+
+	out := buf.String()
+	assert.Contains(t, out, "group=http.middleware")
+}
+
+// TestGoLogger_WithGroupEmptyNameIgnored verifies that empty group names
+// are silently ignored.
+func TestGoLogger_WithGroupEmptyNameIgnored(t *testing.T) {
+	var buf bytes.Buffer
+	withTestLoggerOutput(t, &buf)
+
+	logger := (&GoLogger{Level: LevelDebug}).
+		WithGroup("").
+		WithGroup("   ")
+
+	logger.Log(context.Background(), LevelInfo, "test")
+
+	out := buf.String()
+	assert.NotContains(t, out, "group=")
+}
+
+// TestGoLogger_SyncReturnsNil verifies Sync is a no-op for stdlib logger.
+func TestGoLogger_SyncReturnsNil(t *testing.T) {
+	logger := &GoLogger{Level: LevelInfo}
+	assert.NoError(t, logger.Sync(context.Background()))
+}
+
+// TestGoLogger_NilReceiverSafety ensures nil GoLogger does not panic.
+func TestGoLogger_NilReceiverSafety(t *testing.T) {
+	var logger *GoLogger
+
+	assert.False(t, logger.Enabled(LevelError))
+
+	assert.NotPanics(t, func() {
+		child := logger.With(String("k", "v"))
+		require.NotNil(t, child)
+	})
+
+	assert.NotPanics(t, func() {
+		child := logger.WithGroup("grp")
+		require.NotNil(t, child)
+	})
+}
+
+// TestGoLogger_EmptyFieldKeySkipped verifies fields with empty keys are dropped.
+func TestGoLogger_EmptyFieldKeySkipped(t *testing.T) {
+	var buf bytes.Buffer
+	withTestLoggerOutput(t, &buf)
+
+	logger := &GoLogger{Level: LevelDebug}
+	logger.Log(context.Background(), LevelInfo, "msg", String("", "should_be_dropped"))
+
+	out := buf.String()
+	assert.NotContains(t, out, "should_be_dropped")
+}
+
+// TestGoLogger_BoolAndErrFields verifies Bool and Err field constructors.
+func TestGoLogger_BoolAndErrFields(t *testing.T) {
+	var buf bytes.Buffer
+	withTestLoggerOutput(t, &buf)
+
+	logger := &GoLogger{Level: LevelDebug}
+	logger.Log(context.Background(), LevelInfo, "event",
+		Bool("active", true),
+		Err(assert.AnError))
+
+	out := buf.String()
+	assert.Contains(t, out, "active=true")
+	assert.Contains(t, out, "error=")
+}
+
+// TestGoLogger_AnyFieldConstructor verifies the Any field constructor.
+func TestGoLogger_AnyFieldConstructor(t *testing.T) {
+	f := Any("data", map[string]int{"count": 42})
+	assert.Equal(t, "data", f.Key)
+	assert.NotNil(t, f.Value)
+}
+
+// ===========================================================================
+// NopLogger Comprehensive Tests
+// ===========================================================================
+
+// TestNopLogger_AllMethodsAreNoOps verifies every method on NopLogger
+// completes without panicking and returns sensible zero values.
+func TestNopLogger_AllMethodsAreNoOps(t *testing.T) {
+	nop := NewNop()
+
+	t.Run("Log does not panic at any level", func(t *testing.T) {
 		assert.NotPanics(t, func() {
-			logger.Info("test")
-			logger.Infof("test %s", "format")
-			logger.Infoln("test", "line")
+			for _, level := range []Level{LevelError, LevelWarn, LevelInfo, LevelDebug} {
+				nop.Log(context.Background(), level, "message",
+					String("k", "v"), Int("n", 1), Bool("b", true))
+			}
 		})
 	})
 
-	t.Run("error methods do not panic", func(t *testing.T) {
-		assert.NotPanics(t, func() {
-			logger.Error("test")
-			logger.Errorf("test %s", "format")
-			logger.Errorln("test", "line")
-		})
+	t.Run("With returns self", func(t *testing.T) {
+		child := nop.With(String("a", "b"), String("c", "d"))
+		// NopLogger.With returns itself
+		assert.Equal(t, nop, child)
 	})
 
-	t.Run("warn methods do not panic", func(t *testing.T) {
-		assert.NotPanics(t, func() {
-			logger.Warn("test")
-			logger.Warnf("test %s", "format")
-			logger.Warnln("test", "line")
-		})
+	t.Run("WithGroup returns self", func(t *testing.T) {
+		child := nop.WithGroup("any_group")
+		assert.Equal(t, nop, child)
 	})
 
-	t.Run("debug methods do not panic", func(t *testing.T) {
-		assert.NotPanics(t, func() {
-			logger.Debug("test")
-			logger.Debugf("test %s", "format")
-			logger.Debugln("test", "line")
-		})
-	})
-
-	t.Run("fatal methods do not panic", func(t *testing.T) {
-		assert.NotPanics(t, func() {
-			logger.Fatal("test")
-			logger.Fatalf("test %s", "format")
-			logger.Fatalln("test", "line")
-		})
-	})
-
-	t.Run("WithFields returns itself and is chainable", func(t *testing.T) {
-		result := logger.WithFields("key", "value")
-		assert.Same(t, logger, result)
-		assert.IsType(t, &NoneLogger{}, result)
-
-		// Chain further — still returns same instance.
-		chained := result.WithFields("key2", "value2")
-		assert.Same(t, logger, chained)
-	})
-
-	t.Run("WithDefaultMessageTemplate returns itself and is chainable", func(t *testing.T) {
-		result := logger.WithDefaultMessageTemplate("template")
-		assert.Same(t, logger, result)
-		assert.IsType(t, &NoneLogger{}, result)
+	t.Run("Enabled always false", func(t *testing.T) {
+		for _, level := range []Level{LevelError, LevelWarn, LevelInfo, LevelDebug} {
+			assert.False(t, nop.Enabled(level))
+		}
 	})
 
 	t.Run("Sync returns nil", func(t *testing.T) {
-		err := logger.Sync()
-		assert.NoError(t, err)
+		assert.NoError(t, nop.Sync(context.Background()))
 	})
 }
 
-func TestGoLogger_ComplexScenarios(t *testing.T) {
-	var buf bytes.Buffer
-	withTestLoggerOutput(t, &buf)
-
-	// Test chaining methods
-	logger := &GoLogger{Level: InfoLevel}
-
-	buf.Reset()
-	loggerWithFields := logger.WithFields("request_id", "123", "user_id", "456")
-	loggerWithTemplate := loggerWithFields.WithDefaultMessageTemplate("[request] ")
-	loggerWithTemplate.Info("API: request processed")
-
-	output := buf.String()
-	assert.Contains(t, output, "request_id")
-	assert.Contains(t, output, "123")
-	assert.Contains(t, output, "user_id")
-	assert.Contains(t, output, "456")
-	assert.Contains(t, output, "[request]")
-	assert.Contains(t, output, "API: request processed")
-
-	// Test multiple arguments
-	buf.Reset()
-	logger.Info("multiple", "arguments", 123, true, 45.67)
-	output = buf.String()
-	assert.Contains(t, output, "multiple")
-	assert.Contains(t, output, "arguments")
-	assert.Contains(t, output, "123")
-	assert.Contains(t, output, "true")
-	assert.Contains(t, output, "45.67")
+// TestNopLogger_InterfaceCompliance verifies NopLogger satisfies Logger.
+func TestNopLogger_InterfaceCompliance(t *testing.T) {
+	var _ Logger = NewNop()
+	var _ Logger = &NopLogger{}
 }
 
-func TestLogLevel_String(t *testing.T) {
-	// Test that log levels have proper string representations
+// ===========================================================================
+// MockLogger Verification Tests
+// ===========================================================================
+
+// TestMockLogger_RecordsCalls verifies the mock correctly records method
+// invocations for test assertions.
+func TestMockLogger_RecordsCalls(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mock := NewMockLogger(ctrl)
+
+	ctx := context.Background()
+
+	// Set up expectations
+	mock.EXPECT().Enabled(LevelInfo).Return(true)
+	mock.EXPECT().Log(ctx, LevelInfo, "hello", String("k", "v"))
+	mock.EXPECT().Sync(ctx).Return(nil)
+
+	// Exercise
+	assert.True(t, mock.Enabled(LevelInfo))
+	mock.Log(ctx, LevelInfo, "hello", String("k", "v"))
+	assert.NoError(t, mock.Sync(ctx))
+}
+
+// TestMockLogger_WithAndWithGroup verifies With/WithGroup on the mock.
+func TestMockLogger_WithAndWithGroup(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mock := NewMockLogger(ctrl)
+
+	childMock := NewMockLogger(ctrl)
+
+	mock.EXPECT().With(String("tenant", "t1")).Return(childMock)
+	mock.EXPECT().WithGroup("audit").Return(childMock)
+
+	child1 := mock.With(String("tenant", "t1"))
+	assert.Equal(t, childMock, child1)
+
+	child2 := mock.WithGroup("audit")
+	assert.Equal(t, childMock, child2)
+}
+
+// TestMockLogger_InterfaceCompliance verifies MockLogger satisfies Logger.
+func TestMockLogger_InterfaceCompliance(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	var _ Logger = NewMockLogger(ctrl)
+}
+
+// ===========================================================================
+// Level String Tests
+// ===========================================================================
+
+// TestLevel_String verifies all level string representations.
+func TestLevel_String(t *testing.T) {
 	tests := []struct {
-		level    LogLevel
+		level    Level
 		expected string
 	}{
-		{PanicLevel, "panic"},
-		{FatalLevel, "fatal"},
-		{ErrorLevel, "error"},
-		{WarnLevel, "warn"},
-		{InfoLevel, "info"},
-		{DebugLevel, "debug"},
+		{LevelError, "error"},
+		{LevelWarn, "warn"},
+		{LevelInfo, "info"},
+		{LevelDebug, "debug"},
+		{Level(255), "unknown"},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.expected, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.level.String())
-			parsed, err := ParseLevel(tt.expected)
-			assert.NoError(t, err)
-			assert.Equal(t, tt.level, parsed)
-		})
+		assert.Equal(t, tt.expected, tt.level.String())
 	}
-
-	assert.Equal(t, "unknown", LogLevel(127).String())
 }
 
-func TestGoLogger_Fatal_LevelDisabled(t *testing.T) {
-	// When FatalLevel is disabled (level set lower), Fatal should be a no-op.
-	// Level 0 = PanicLevel, which is less than FatalLevel (1), so Fatal is disabled.
-	logger := &GoLogger{Level: 0}
+// ===========================================================================
+// renderFields Tests
+// ===========================================================================
 
-	// Should NOT call log.Fatal (which would exit) — just a no-op
-	assert.NotPanics(t, func() {
-		logger.Fatal("this should not cause exit")
-	})
-	assert.NotPanics(t, func() {
-		logger.Fatalf("this should not cause exit: %s", "test")
-	})
-	assert.NotPanics(t, func() {
-		logger.Fatalln("this should not cause exit")
-	})
+// TestRenderFields_EmptyReturnsEmpty verifies that no fields produce empty output.
+func TestRenderFields_EmptyReturnsEmpty(t *testing.T) {
+	assert.Equal(t, "", renderFields(nil))
+	assert.Equal(t, "", renderFields([]Field{}))
 }
 
-func TestGoLogger_Fatal_CallsLogFatal(t *testing.T) {
-	// Test that Fatal actually calls log.Fatal (which exits) when level is enabled.
-	// Uses subprocess pattern since log.Fatal calls os.Exit(1).
-	if os.Getenv("TEST_FATAL_EXIT") == "1" {
-		logger := &GoLogger{Level: FatalLevel}
-		logger.Fatal("fatal test message")
-		return // should never reach here
-	}
-
-	cmd := exec.Command(os.Args[0], "-test.run=TestGoLogger_Fatal_CallsLogFatal")
-	cmd.Env = append(os.Environ(), "TEST_FATAL_EXIT=1")
-	err := cmd.Run()
-
-	// The process should have exited with code 1
-	var exitErr *exec.ExitError
-	require.ErrorAs(t, err, &exitErr)
-	assert.Equal(t, 1, exitErr.ExitCode(), "log.Fatal should cause exit code 1")
+// TestRenderFields_SingleField verifies single field rendering.
+func TestRenderFields_SingleField(t *testing.T) {
+	result := renderFields([]Field{String("key", "value")})
+	assert.Equal(t, "[key=value]", result)
 }
 
-func TestGoLogger_OutputIncludesLevelPrefix(t *testing.T) {
-	var buf bytes.Buffer
-	withTestLoggerOutput(t, &buf)
-
-	logger := &GoLogger{Level: DebugLevel}
-
-	buf.Reset()
-	logger.Info("info")
-	assert.Contains(t, buf.String(), "[info]")
-	assert.NotContains(t, buf.String(), "[error]")
-
-	buf.Reset()
-	logger.Warn("warn")
-	assert.Contains(t, buf.String(), "[warn]")
-
-	buf.Reset()
-	logger.Error("error")
-	assert.Contains(t, buf.String(), "[error]")
-
-	buf.Reset()
-	logger.Debug("debug")
-	assert.Contains(t, buf.String(), "[debug]")
+// TestRenderFields_MultipleFields verifies multiple field rendering.
+func TestRenderFields_MultipleFields(t *testing.T) {
+	result := renderFields([]Field{
+		String("a", "1"),
+		Int("b", 2),
+		Bool("c", true),
+	})
+	assert.Contains(t, result, "a=1")
+	assert.Contains(t, result, "b=2")
+	assert.Contains(t, result, "c=true")
 }
 
-func TestGoLogger_Fatalf_CallsLogFatalf(t *testing.T) {
-	if os.Getenv("TEST_FATALF_EXIT") == "1" {
-		logger := &GoLogger{Level: FatalLevel}
-		logger.Fatalf("fatal: %s", "formatted")
-		return
-	}
-
-	cmd := exec.Command(os.Args[0], "-test.run=TestGoLogger_Fatalf_CallsLogFatalf")
-	cmd.Env = append(os.Environ(), "TEST_FATALF_EXIT=1")
-	err := cmd.Run()
-
-	var exitErr *exec.ExitError
-	require.ErrorAs(t, err, &exitErr)
-	assert.Equal(t, 1, exitErr.ExitCode(), "log.Fatalf should cause exit code 1")
+// TestRenderFields_EmptyKeyFieldSkipped verifies empty-key fields are dropped.
+func TestRenderFields_EmptyKeyFieldSkipped(t *testing.T) {
+	result := renderFields([]Field{String("", "val")})
+	assert.Equal(t, "", result)
 }
 
-func TestGoLogger_Fatalln_CallsLogFatalln(t *testing.T) {
-	if os.Getenv("TEST_FATALLN_EXIT") == "1" {
-		logger := &GoLogger{Level: FatalLevel}
-		logger.Fatalln("fatal line")
-		return
-	}
-
-	cmd := exec.Command(os.Args[0], "-test.run=TestGoLogger_Fatalln_CallsLogFatalln")
-	cmd.Env = append(os.Environ(), "TEST_FATALLN_EXIT=1")
-	err := cmd.Run()
-
-	var exitErr *exec.ExitError
-	require.ErrorAs(t, err, &exitErr)
-	assert.Equal(t, 1, exitErr.ExitCode(), "log.Fatalln should cause exit code 1")
-}
-
-func TestGoLogger_NilReceiver(t *testing.T) {
-	var nilLogger *GoLogger
-
-	t.Run("IsLevelEnabled returns false on nil receiver", func(t *testing.T) {
-		assert.False(t, nilLogger.IsLevelEnabled(InfoLevel))
-		assert.False(t, nilLogger.IsLevelEnabled(DebugLevel))
+// TestRenderFields_SanitizesKeysAndValues verifies CWE-117 in field rendering.
+func TestRenderFields_SanitizesKeysAndValues(t *testing.T) {
+	result := renderFields([]Field{
+		String("key\ninjection", "value\ninjection"),
 	})
-
-	t.Run("log methods on nil receiver do not panic", func(t *testing.T) {
-		methods := []struct {
-			name string
-			call func()
-		}{
-			{name: "Info", call: func() { nilLogger.Info("test") }},
-			{name: "Infof", call: func() { nilLogger.Infof("test %s", "val") }},
-			{name: "Infoln", call: func() { nilLogger.Infoln("test") }},
-			{name: "Error", call: func() { nilLogger.Error("test") }},
-			{name: "Errorf", call: func() { nilLogger.Errorf("test %s", "val") }},
-			{name: "Errorln", call: func() { nilLogger.Errorln("test") }},
-			{name: "Warn", call: func() { nilLogger.Warn("test") }},
-			{name: "Warnf", call: func() { nilLogger.Warnf("test %s", "val") }},
-			{name: "Warnln", call: func() { nilLogger.Warnln("test") }},
-			{name: "Debug", call: func() { nilLogger.Debug("test") }},
-			{name: "Debugf", call: func() { nilLogger.Debugf("test %s", "val") }},
-			{name: "Debugln", call: func() { nilLogger.Debugln("test") }},
-			{name: "Fatal", call: func() { nilLogger.Fatal("test") }},
-			{name: "Fatalf", call: func() { nilLogger.Fatalf("test %s", "val") }},
-			{name: "Fatalln", call: func() { nilLogger.Fatalln("test") }},
-		}
-
-		for _, tt := range methods {
-			t.Run(tt.name, func(t *testing.T) {
-				assert.NotPanics(t, tt.call)
-			})
-		}
-	})
-
-	t.Run("WithFields on nil receiver returns usable zero-value logger", func(t *testing.T) {
-		result := nilLogger.WithFields("key", "value")
-		assert.NotNil(t, result)
-
-		goLogger, ok := result.(*GoLogger)
-		assert.True(t, ok)
-		assert.NotNil(t, goLogger)
-		// Zero-value GoLogger: Level=PanicLevel(0), no fields — all methods are no-ops.
-		assert.False(t, goLogger.IsLevelEnabled(InfoLevel))
-	})
-
-	t.Run("WithDefaultMessageTemplate on nil receiver returns usable zero-value logger", func(t *testing.T) {
-		result := nilLogger.WithDefaultMessageTemplate("template")
-		assert.NotNil(t, result)
-
-		goLogger, ok := result.(*GoLogger)
-		assert.True(t, ok)
-		assert.NotNil(t, goLogger)
-	})
-
-	t.Run("Sync on nil receiver returns nil", func(t *testing.T) {
-		assert.Nil(t, nilLogger.Sync())
-	})
-}
-
-func TestGoLogger_WithFields_OddArgCount(t *testing.T) {
-	var buf bytes.Buffer
-	withTestLoggerOutput(t, &buf)
-
-	logger := &GoLogger{Level: InfoLevel}
-
-	// Odd number of field args — the orphan key should appear without panicking.
-	buf.Reset()
-	loggerOrphan := logger.WithFields("orphan_key")
-	loggerOrphan.Info("test message")
-
-	output := buf.String()
-	assert.Contains(t, output, "orphan_key")
-	assert.Contains(t, output, "test message")
-
-	// Three args: first pair is key=value, third is orphan.
-	buf.Reset()
-	loggerMixed := logger.WithFields("key", "value", "orphan")
-	loggerMixed.Info("mixed")
-
-	output = buf.String()
-	assert.Contains(t, output, "key=value")
-	assert.Contains(t, output, "orphan")
-	assert.Contains(t, output, "mixed")
-}
-
-func TestGoLogger_EdgeCases(t *testing.T) {
-	var buf bytes.Buffer
-	withTestLoggerOutput(t, &buf)
-
-	logger := &GoLogger{Level: InfoLevel}
-
-	// Test with nil arguments
-	buf.Reset()
-	logger.Info(nil)
-	assert.Contains(t, buf.String(), "<nil>")
-
-	// Test with empty string
-	buf.Reset()
-	logger.Info("")
-	// Empty string still produces output with timestamp
-	assert.NotEmpty(t, buf.String())
-
-	// Test with special characters — CWE-117 sanitization escapes control chars.
-	buf.Reset()
-	logger.Info("special chars: \n\t\r")
-	output := buf.String()
-	assert.Contains(t, output, "special chars:")
-	// Control characters should be escaped, not present as literal bytes.
-	assert.Contains(t, output, `\n`)
-	assert.Contains(t, output, `\t`)
-	assert.Contains(t, output, `\r`)
-
-	// Test format with wrong number of arguments
-	buf.Reset()
-	logger.Infof("format %s", "only one arg")
-	output = buf.String()
-	assert.Contains(t, output, "format only one arg")
-}
-
-func TestGoLogger_CWE117_LogInjection(t *testing.T) {
-	var buf bytes.Buffer
-	withTestLoggerOutput(t, &buf)
-
-	logger := &GoLogger{Level: DebugLevel}
-
-	t.Run("Info escapes newlines in arguments", func(t *testing.T) {
-		buf.Reset()
-		logger.Info("normal line\ninjected log entry")
-		output := buf.String()
-		assert.Contains(t, output, `normal line\ninjected log entry`)
-		// Should NOT contain a literal newline within the message (only the trailing one from log.Print).
-		lines := strings.Split(strings.TrimSpace(output), "\n")
-		assert.Len(t, lines, 1, "log injection should not create multiple log lines")
-	})
-
-	t.Run("Infof escapes newlines in format string", func(t *testing.T) {
-		buf.Reset()
-		logger.Infof("user: %s\nfake-level: CRITICAL", "attacker")
-		output := buf.String()
-		assert.Contains(t, output, `\n`)
-		lines := strings.Split(strings.TrimSpace(output), "\n")
-		assert.Len(t, lines, 1)
-	})
-
-	t.Run("Infoln escapes control chars in arguments", func(t *testing.T) {
-		buf.Reset()
-		logger.Infoln("msg\rwith\tcontrol\nchars")
-		output := buf.String()
-		assert.Contains(t, output, `\r`)
-		assert.Contains(t, output, `\t`)
-		assert.Contains(t, output, `\n`)
-	})
-
-	t.Run("non-string arguments pass through unchanged", func(t *testing.T) {
-		buf.Reset()
-		logger.Info(42, true, 3.14)
-		output := buf.String()
-		assert.Contains(t, output, "42")
-		assert.Contains(t, output, "true")
-		assert.Contains(t, output, "3.14")
-	})
+	assert.NotContains(t, result, "\n")
+	assert.Contains(t, result, `\n`)
 }

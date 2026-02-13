@@ -1,101 +1,94 @@
 package log
 
 import (
+	"context"
 	"fmt"
 	"strings"
 )
 
-// Logger is the pkg interface for log implementation.
+// Logger is the package interface for v2 logging.
 //
 //go:generate mockgen --destination=log_mock.go --package=log . Logger
 type Logger interface {
-	Info(args ...any)
-	Infof(format string, args ...any)
-	Infoln(args ...any)
-
-	Error(args ...any)
-	Errorf(format string, args ...any)
-	Errorln(args ...any)
-
-	Warn(args ...any)
-	Warnf(format string, args ...any)
-	Warnln(args ...any)
-
-	Debug(args ...any)
-	Debugf(format string, args ...any)
-	Debugln(args ...any)
-
-	Fatal(args ...any)
-	Fatalf(format string, args ...any)
-	Fatalln(args ...any)
-
-	WithFields(fields ...any) Logger
-
-	WithDefaultMessageTemplate(message string) Logger
-
-	Sync() error
+	Log(ctx context.Context, level Level, msg string, fields ...Field)
+	With(fields ...Field) Logger
+	WithGroup(name string) Logger
+	Enabled(level Level) bool
+	Sync(ctx context.Context) error
 }
 
-// LogLevel represents the level of log system (fatal, error, warn, info and debug).
-type LogLevel int8
+// Level represents the severity of a log entry.
+type Level uint8
 
-// These are the different log levels. You can set the logging level to log.
+// These are the supported log levels.
 const (
-	// PanicLevel level, highest level of severity. Logs and then calls panic with the
-	// message passed to Debug, Info, ...
-	PanicLevel LogLevel = iota
-	// FatalLevel level. Logs and then calls `logger.Exit(1)`. It will exit even if the
-	// logging level is set to Panic.
-	FatalLevel
-	// ErrorLevel level. Logs. Used for errors that should definitely be noted.
-	// Commonly used for hooks to send errors to an error tracking service.
-	ErrorLevel
-	// WarnLevel level. Non-critical entries that deserve eyes.
-	WarnLevel
-	// InfoLevel level. General operational entries about what's going on inside the
-	// application.
-	InfoLevel
-	// DebugLevel level. Usually only enabled when debugging. Very verbose logging.
-	DebugLevel
+	LevelError Level = iota
+	LevelWarn
+	LevelInfo
+	LevelDebug
 )
 
-func (level LogLevel) String() string {
+// String returns the string representation of a log level.
+func (level Level) String() string {
 	switch level {
-	case PanicLevel:
-		return "panic"
-	case FatalLevel:
-		return "fatal"
-	case ErrorLevel:
-		return "error"
-	case WarnLevel:
-		return "warn"
-	case InfoLevel:
-		return "info"
-	case DebugLevel:
+	case LevelDebug:
 		return "debug"
+	case LevelInfo:
+		return "info"
+	case LevelWarn:
+		return "warn"
+	case LevelError:
+		return "error"
 	default:
 		return "unknown"
 	}
 }
 
-// ParseLevel takes a string level and returns a LogLevel constant.
-func ParseLevel(lvl string) (LogLevel, error) {
+// ParseLevel takes a string level and returns a Level constant.
+func ParseLevel(lvl string) (Level, error) {
 	switch strings.ToLower(lvl) {
-	case "panic":
-		return PanicLevel, nil
-	case "fatal":
-		return FatalLevel, nil
-	case "error":
-		return ErrorLevel, nil
-	case "warn", "warning":
-		return WarnLevel, nil
-	case "info":
-		return InfoLevel, nil
 	case "debug":
-		return DebugLevel, nil
+		return LevelDebug, nil
+	case "info":
+		return LevelInfo, nil
+	case "warn", "warning":
+		return LevelWarn, nil
+	case "error":
+		return LevelError, nil
 	}
 
-	var l LogLevel
+	var l Level
 
-	return l, fmt.Errorf("not a valid LogLevel: %q", lvl)
+	return l, fmt.Errorf("not a valid Level: %q", lvl)
+}
+
+// Field is a strongly-typed key/value attribute attached to a log event.
+type Field struct {
+	Key   string
+	Value any
+}
+
+// Any creates a field with an arbitrary value.
+func Any(key string, value any) Field {
+	return Field{Key: key, Value: value}
+}
+
+// String creates a string field.
+func String(key, value string) Field {
+	return Field{Key: key, Value: value}
+}
+
+// Int creates an integer field.
+func Int(key string, value int) Field {
+	return Field{Key: key, Value: value}
+}
+
+// Bool creates a boolean field.
+func Bool(key string, value bool) Field {
+	return Field{Key: key, Value: value}
+}
+
+// Err creates the conventional `error` field.
+func Err(err error) Field {
+	return Field{Key: "error", Value: err}
 }
