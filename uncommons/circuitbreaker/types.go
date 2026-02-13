@@ -70,6 +70,10 @@ func (c Config) Validate() error {
 		return fmt.Errorf("%w: FailureRatio must be between 0 and 1, got %f", ErrInvalidConfig, c.FailureRatio)
 	}
 
+	if c.MinRequests > 0 && c.FailureRatio <= 0 {
+		return fmt.Errorf("%w: FailureRatio must be > 0 when MinRequests > 0 (ratio-based trip is ineffective with FailureRatio=0)", ErrInvalidConfig)
+	}
+
 	return nil
 }
 

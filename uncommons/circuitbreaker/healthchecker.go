@@ -84,6 +84,7 @@ func (hc *healthChecker) Register(serviceName string, healthCheckFn HealthCheckF
 // Start begins the health check loop
 func (hc *healthChecker) Start() {
 	hc.mu.Lock()
+
 	if hc.started {
 		hc.mu.Unlock()
 		hc.logger.Log(context.Background(), log.LevelWarn, "Health checker already started, ignoring duplicate Start() call")

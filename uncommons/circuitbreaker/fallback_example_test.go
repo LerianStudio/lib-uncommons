@@ -23,8 +23,6 @@ func ExampleManager_Execute_fallbackOnOpen() {
 		Interval:            time.Minute,
 		Timeout:             time.Second,
 		ConsecutiveFailures: 1,
-		FailureRatio:        0.0,
-		MinRequests:         1,
 	})
 	if err != nil {
 		return
@@ -45,7 +43,11 @@ func ExampleManager_Execute_fallbackOnOpen() {
 
 	fmt.Println(firstErr != nil)
 	fmt.Println(mgr.GetState("core-ledger") == circuitbreaker.StateOpen)
-	fmt.Println(strings.Contains(secondErr.Error(), "currently unavailable"))
+	if secondErr != nil {
+		fmt.Println(strings.Contains(secondErr.Error(), "currently unavailable"))
+	} else {
+		fmt.Println(false)
+	}
 	fmt.Println(fallback)
 
 	// Output:
