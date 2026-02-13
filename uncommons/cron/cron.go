@@ -1,15 +1,12 @@
 package cron
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
 )
 
 // ErrInvalidExpression is returned when a cron expression cannot be parsed
@@ -106,9 +103,6 @@ func Parse(expr string) (Schedule, error) {
 // ErrNoMatch if no match is found within maxIterations.
 func (sched *schedule) Next(from time.Time) (time.Time, error) {
 	if sched == nil {
-		asserter := assert.New(context.Background(), nil, "cron", "Next")
-		_ = asserter.NoError(context.Background(), ErrNilSchedule, "cannot calculate next run from nil schedule")
-
 		return time.Time{}, ErrNilSchedule
 	}
 
