@@ -3,6 +3,7 @@ package circuitbreaker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"sync"
 	"time"
@@ -11,6 +12,8 @@ import (
 )
 
 var (
+	// ErrNilManager is returned when a nil manager is passed to NewHealthCheckerWithValidation.
+	ErrNilManager = errors.New("circuitbreaker: manager must not be nil")
 	// ErrInvalidHealthCheckInterval indicates that the health check interval must be positive
 	ErrInvalidHealthCheckInterval = errors.New("circuitbreaker: health check interval must be positive")
 	// ErrInvalidHealthCheckTimeout indicates that the health check timeout must be positive
@@ -28,6 +31,8 @@ type healthChecker struct {
 	immediateCheck chan string // Channel to trigger immediate health check for a service
 	wg             sync.WaitGroup
 	mu             sync.RWMutex
+	stopOnce       sync.Once
+	started        bool
 }
 
 // NewHealthCheckerWithValidation creates a new health checker with validation.
@@ -35,6 +40,14 @@ type healthChecker struct {
 // interval: how often to run health checks
 // checkTimeout: timeout for each individual health check operation
 func NewHealthCheckerWithValidation(manager Manager, interval, checkTimeout time.Duration, logger log.Logger) (HealthChecker, error) {
+	if manager == nil {
+		return nil, ErrNilManager
+	}
+
+	if logger == nil {
+		return nil, ErrNilLogger
+	}
+
 	if interval <= 0 {
 		return nil, ErrInvalidHealthCheckInterval
 	}
@@ -54,42 +67,45 @@ func NewHealthCheckerWithValidation(manager Manager, interval, checkTimeout time
 	}, nil
 }
 
-// Deprecated: Use NewHealthCheckerWithValidation instead for proper error handling.
-// NewHealthChecker creates a new health checker.
-// interval: how often to run health checks
-// checkTimeout: timeout for each individual health check operation
-func NewHealthChecker(manager Manager, interval, checkTimeout time.Duration, logger log.Logger) HealthChecker {
-	hc, err := NewHealthCheckerWithValidation(manager, interval, checkTimeout, logger)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	return hc
-}
-
 // Register adds a service to health check
 func (hc *healthChecker) Register(serviceName string, healthCheckFn HealthCheckFunc) {
+	if healthCheckFn == nil {
+		hc.logger.Log(context.Background(), log.LevelWarn, fmt.Sprintf("Attempted to register nil health check function for service: %s", serviceName))
+		return
+	}
+
 	hc.mu.Lock()
 	defer hc.mu.Unlock()
 
 	hc.services[serviceName] = healthCheckFn
-	hc.logger.Infof("Registered health check for service: %s", serviceName)
+	hc.logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Registered health check for service: %s", serviceName))
 }
 
 // Start begins the health check loop
 func (hc *healthChecker) Start() {
+	hc.mu.Lock()
+	if hc.started {
+		hc.mu.Unlock()
+		hc.logger.Log(context.Background(), log.LevelWarn, "Health checker already started, ignoring duplicate Start() call")
+		return
+	}
+	hc.started = true
+	hc.mu.Unlock()
+
 	hc.wg.Add(1)
 
 	go hc.healthCheckLoop()
 
-	hc.logger.Infof("Health checker started - checking services every %v", hc.interval)
+	hc.logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Health checker started - checking services every %v", hc.interval))
 }
 
 // Stop gracefully stops the health checker
 func (hc *healthChecker) Stop() {
-	close(hc.stopChan)
+	hc.stopOnce.Do(func() {
+		close(hc.stopChan)
+	})
 	hc.wg.Wait()
-	hc.logger.Info("Health checker stopped")
+	hc.logger.Log(context.Background(), log.LevelInfo, "Health checker stopped")
 }
 
 func (hc *healthChecker) healthCheckLoop() {
@@ -106,7 +122,7 @@ func (hc *healthChecker) healthCheckLoop() {
 			hc.performHealthChecks()
 		case serviceName := <-hc.immediateCheck:
 			// Immediate health check for a specific service
-			hc.logger.Debugf("Triggering immediate health check for service: %s", serviceName)
+			hc.logger.Log(context.Background(), log.LevelDebug, fmt.Sprintf("Triggering immediate health check for service: %s", serviceName))
 			hc.checkServiceHealth(serviceName)
 		case <-hc.stopChan:
 			return
@@ -122,7 +138,7 @@ func (hc *healthChecker) performHealthChecks() {
 
 	hc.mu.RUnlock()
 
-	hc.logger.Debug("Performing health checks on registered services...")
+	hc.logger.Log(context.Background(), log.LevelDebug, "Performing health checks on registered services...")
 
 	unhealthyCount := 0
 	recoveredCount := 0
@@ -135,7 +151,7 @@ func (hc *healthChecker) performHealthChecks() {
 
 		unhealthyCount++
 
-		hc.logger.Infof("Attempting to heal service: %s (circuit breaker is open)", serviceName)
+		hc.logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Attempting to heal service: %s (circuit breaker is open)", serviceName))
 
 		ctx, cancel := context.WithTimeout(context.Background(), hc.checkTimeout)
 		err := healthCheckFn(ctx)
@@ -143,19 +159,19 @@ func (hc *healthChecker) performHealthChecks() {
 		cancel()
 
 		if err == nil {
-			hc.logger.Infof("Service %s recovered - resetting circuit breaker", serviceName)
+			hc.logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Service %s recovered - resetting circuit breaker", serviceName))
 			hc.manager.Reset(serviceName)
 
 			recoveredCount++
 		} else {
-			hc.logger.Warnf("Service %s still unhealthy: %v - will retry in %v", serviceName, err, hc.interval)
+			hc.logger.Log(context.Background(), log.LevelWarn, fmt.Sprintf("Service %s still unhealthy: %v - will retry in %v", serviceName, err, hc.interval))
 		}
 	}
 
 	if unhealthyCount > 0 {
-		hc.logger.Infof("Health check complete: %d services needed healing, %d recovered", unhealthyCount, recoveredCount)
+		hc.logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Health check complete: %d services needed healing, %d recovered", unhealthyCount, recoveredCount))
 	} else {
-		hc.logger.Debug("All services healthy")
+		hc.logger.Log(context.Background(), log.LevelDebug, "All services healthy")
 	}
 }
 
@@ -177,18 +193,18 @@ func (hc *healthChecker) GetHealthStatus() map[string]string {
 // OnStateChange implements StateChangeListener interface
 // This is called when a circuit breaker changes state
 func (hc *healthChecker) OnStateChange(serviceName string, from State, to State) {
-	hc.logger.Debugf("Health checker notified of state change for %s: %s -> %s", serviceName, from, to)
+	hc.logger.Log(context.Background(), log.LevelDebug, fmt.Sprintf("Health checker notified of state change for %s: %s -> %s", serviceName, from, to))
 
 	// If circuit just opened, trigger immediate health check
 	if to == StateOpen {
-		hc.logger.Infof("Circuit breaker opened for %s - scheduling immediate health check", serviceName)
+		hc.logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Circuit breaker opened for %s - scheduling immediate health check", serviceName))
 
 		// Non-blocking send to avoid deadlock
 		select {
 		case hc.immediateCheck <- serviceName:
-			hc.logger.Debugf("Immediate health check scheduled for %s", serviceName)
+			hc.logger.Log(context.Background(), log.LevelDebug, fmt.Sprintf("Immediate health check scheduled for %s", serviceName))
 		default:
-			hc.logger.Warnf("Immediate health check channel full for %s, will check on next interval", serviceName)
+			hc.logger.Log(context.Background(), log.LevelWarn, fmt.Sprintf("Immediate health check channel full for %s, will check on next interval", serviceName))
 		}
 	}
 }
@@ -200,17 +216,17 @@ func (hc *healthChecker) checkServiceHealth(serviceName string) {
 	hc.mu.RUnlock()
 
 	if !exists {
-		hc.logger.Warnf("No health check function registered for service: %s", serviceName)
+		hc.logger.Log(context.Background(), log.LevelWarn, fmt.Sprintf("No health check function registered for service: %s", serviceName))
 		return
 	}
 
 	// Skip if circuit breaker is already healthy
 	if hc.manager.IsHealthy(serviceName) {
-		hc.logger.Debugf("Service %s is already healthy, skipping check", serviceName)
+		hc.logger.Log(context.Background(), log.LevelDebug, fmt.Sprintf("Service %s is already healthy, skipping check", serviceName))
 		return
 	}
 
-	hc.logger.Infof("Attempting to heal service: %s (circuit breaker is open)", serviceName)
+	hc.logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Attempting to heal service: %s (circuit breaker is open)", serviceName))
 
 	ctx, cancel := context.WithTimeout(context.Background(), hc.checkTimeout)
 	err := healthCheckFn(ctx)
@@ -218,9 +234,9 @@ func (hc *healthChecker) checkServiceHealth(serviceName string) {
 	cancel()
 
 	if err == nil {
-		hc.logger.Infof("Service %s recovered - resetting circuit breaker", serviceName)
+		hc.logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Service %s recovered - resetting circuit breaker", serviceName))
 		hc.manager.Reset(serviceName)
 	} else {
-		hc.logger.Warnf("Service %s still unhealthy: %v - will retry in %v", serviceName, err, hc.interval)
+		hc.logger.Log(context.Background(), log.LevelWarn, fmt.Sprintf("Service %s still unhealthy: %v - will retry in %v", serviceName, err, hc.interval))
 	}
 }

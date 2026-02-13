@@ -7,14 +7,17 @@ import (
 
 	"github.com/LerianStudio/lib-uncommons/uncommons/log"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCircuitBreaker_InitialState(t *testing.T) {
-	logger := &log.NoneLogger{}
-	manager := NewManager(logger)
+	logger := &log.NopLogger{}
+	manager, err := NewManager(logger)
+	require.NoError(t, err)
 
 	config := DefaultConfig()
-	manager.GetOrCreate("test-service", config)
+	_, err = manager.GetOrCreate("test-service", config)
+	assert.NoError(t, err)
 
 	// Circuit breaker should start in closed state
 	assert.Equal(t, StateClosed, manager.GetState("test-service"))
@@ -22,8 +25,9 @@ func TestCircuitBreaker_InitialState(t *testing.T) {
 }
 
 func TestCircuitBreaker_OpenState(t *testing.T) {
-	logger := &log.NoneLogger{}
-	manager := NewManager(logger)
+	logger := &log.NopLogger{}
+	manager, err := NewManager(logger)
+	require.NoError(t, err)
 
 	config := Config{
 		MaxRequests:         1,
@@ -34,7 +38,8 @@ func TestCircuitBreaker_OpenState(t *testing.T) {
 		MinRequests:         2,
 	}
 
-	manager.GetOrCreate("test-service", config)
+	_, err = manager.GetOrCreate("test-service", config)
+	assert.NoError(t, err)
 
 	// Trigger failures to open circuit breaker
 	for i := 0; i < 5; i++ {
@@ -50,7 +55,7 @@ func TestCircuitBreaker_OpenState(t *testing.T) {
 
 	// Requests should fast-fail
 	start := time.Now()
-	_, err := manager.Execute("test-service", func() (any, error) {
+	_, err = manager.Execute("test-service", func() (any, error) {
 		time.Sleep(5 * time.Second) // This should not execute
 		return nil, nil
 	})
@@ -62,11 +67,13 @@ func TestCircuitBreaker_OpenState(t *testing.T) {
 }
 
 func TestCircuitBreaker_SuccessfulExecution(t *testing.T) {
-	logger := &log.NoneLogger{}
-	manager := NewManager(logger)
+	logger := &log.NopLogger{}
+	manager, err := NewManager(logger)
+	require.NoError(t, err)
 
 	config := DefaultConfig()
-	manager.GetOrCreate("test-service", config)
+	_, err = manager.GetOrCreate("test-service", config)
+	assert.NoError(t, err)
 
 	result, err := manager.Execute("test-service", func() (any, error) {
 		return "success", nil
@@ -78,11 +85,13 @@ func TestCircuitBreaker_SuccessfulExecution(t *testing.T) {
 }
 
 func TestCircuitBreaker_GetCounts(t *testing.T) {
-	logger := &log.NoneLogger{}
-	manager := NewManager(logger)
+	logger := &log.NopLogger{}
+	manager, err := NewManager(logger)
+	require.NoError(t, err)
 
 	config := DefaultConfig()
-	manager.GetOrCreate("test-service", config)
+	_, err = manager.GetOrCreate("test-service", config)
+	assert.NoError(t, err)
 
 	// Execute some requests
 	for i := 0; i < 5; i++ {
@@ -105,8 +114,9 @@ func TestCircuitBreaker_GetCounts(t *testing.T) {
 }
 
 func TestCircuitBreaker_Reset(t *testing.T) {
-	logger := &log.NoneLogger{}
-	manager := NewManager(logger)
+	logger := &log.NopLogger{}
+	manager, err := NewManager(logger)
+	require.NoError(t, err)
 
 	config := Config{
 		MaxRequests:         1,
@@ -117,7 +127,8 @@ func TestCircuitBreaker_Reset(t *testing.T) {
 		MinRequests:         2,
 	}
 
-	manager.GetOrCreate("test-service", config)
+	_, err = manager.GetOrCreate("test-service", config)
+	assert.NoError(t, err)
 
 	// Trigger failures to open circuit breaker
 	for i := 0; i < 5; i++ {
@@ -145,14 +156,15 @@ func TestCircuitBreaker_Reset(t *testing.T) {
 }
 
 func TestCircuitBreaker_UnknownService(t *testing.T) {
-	logger := &log.NoneLogger{}
-	manager := NewManager(logger)
+	logger := &log.NopLogger{}
+	manager, err := NewManager(logger)
+	require.NoError(t, err)
 
 	// Query non-existent service
 	assert.Equal(t, StateUnknown, manager.GetState("non-existent"))
 
 	// Execute on non-existent service should fail
-	_, err := manager.Execute("non-existent", func() (any, error) {
+	_, err = manager.Execute("non-existent", func() (any, error) {
 		return "success", nil
 	})
 
@@ -181,8 +193,9 @@ func TestCircuitBreaker_ConfigPresets(t *testing.T) {
 }
 
 func TestCircuitBreaker_StateChangeListenerPanicRecovery(t *testing.T) {
-	logger := &log.NoneLogger{}
-	manager := NewManager(logger)
+	logger := &log.NopLogger{}
+	manager, err := NewManager(logger)
+	require.NoError(t, err)
 
 	config := Config{
 		MaxRequests:         1,
@@ -225,7 +238,8 @@ func TestCircuitBreaker_StateChangeListenerPanicRecovery(t *testing.T) {
 	manager.RegisterStateChangeListener(secondNormalListener)
 
 	// Create circuit breaker
-	manager.GetOrCreate("test-service", config)
+	_, err = manager.GetOrCreate("test-service", config)
+	assert.NoError(t, err)
 
 	// Trigger failures to open circuit breaker and trigger state change
 	for i := 0; i < 3; i++ {
@@ -264,8 +278,9 @@ func TestCircuitBreaker_StateChangeListenerPanicRecovery(t *testing.T) {
 }
 
 func TestCircuitBreaker_NilListenerRegistration(t *testing.T) {
-	logger := &log.NoneLogger{}
-	manager := NewManager(logger)
+	logger := &log.NopLogger{}
+	manager, err := NewManager(logger)
+	require.NoError(t, err)
 
 	// Attempt to register nil listener
 	manager.RegisterStateChangeListener(nil)
@@ -279,7 +294,8 @@ func TestCircuitBreaker_NilListenerRegistration(t *testing.T) {
 		FailureRatio:        0.5,
 		MinRequests:         2,
 	}
-	manager.GetOrCreate("test-service", config)
+	_, err = manager.GetOrCreate("test-service", config)
+	assert.NoError(t, err)
 
 	// Trigger a state change to ensure system still works
 	for i := 0; i < 3; i++ {
