@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/assert"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
 )
 
 var (

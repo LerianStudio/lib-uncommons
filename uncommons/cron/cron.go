@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/assert"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
 )
 
 // ErrInvalidExpression is returned when a cron expression cannot be parsed

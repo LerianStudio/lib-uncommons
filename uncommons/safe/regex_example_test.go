@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/safe"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/safe"
 )
 
 func ExampleCompile_errorHandling() {

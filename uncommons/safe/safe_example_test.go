@@ -3,7 +3,7 @@ package safe_test
 import (
 	"fmt"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/safe"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/safe"
 	"github.com/shopspring/decimal"
 )
 

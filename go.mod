@@ -1,4 +1,4 @@
-module github.com/LerianStudio/lib-uncommons
+module github.com/LerianStudio/lib-uncommons/v2
 
 go 1.25.7
 

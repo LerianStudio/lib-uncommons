@@ -12,7 +12,7 @@ import (
 	"errors"
 	"io"
 
-	libLog "github.com/LerianStudio/lib-uncommons/uncommons/log"
+	libLog "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 )
 
 // Crypto groups hashing and symmetric encryption helpers.

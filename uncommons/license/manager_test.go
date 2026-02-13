@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/license"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/license"
 	"github.com/stretchr/testify/assert"
 )
 

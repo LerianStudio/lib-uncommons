@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/assert"
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 

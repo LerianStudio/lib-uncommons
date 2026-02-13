@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"sync"
 
-	libLog "github.com/LerianStudio/lib-uncommons/uncommons/log"
-	"github.com/LerianStudio/lib-uncommons/uncommons/runtime"
+	libLog "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/runtime"
 )
 
 // ErrPanicRecovered is returned when a goroutine in the group panics.

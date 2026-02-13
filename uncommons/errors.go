@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	constant "github.com/LerianStudio/lib-uncommons/uncommons/constants"
+	constant "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 )
 
 // Response represents a business error with code, title, and message.

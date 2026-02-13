@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	constant "github.com/LerianStudio/lib-uncommons/uncommons/constants"
+	constant "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/stretchr/testify/assert"
 )
 
