@@ -208,7 +208,7 @@ func TestConsistencyBetweenSliceAndMap(t *testing.T) {
 
 func TestDefaultFieldsAreExpected(t *testing.T) {
 	// Test that we have the expected number of fields (this helps catch accidental additions/removals)
-	expectedCount := 23
+	expectedCount := 59
 	actualCount := len(DefaultSensitiveFields())
 	assert.Equal(t, expectedCount, actualCount,
 		"Expected %d default sensitive fields, but found %d. If this is intentional, update the test.",
@@ -219,5 +219,107 @@ func TestNoEmptyFields(t *testing.T) {
 	// Ensure no empty strings in the default fields
 	for i, field := range DefaultSensitiveFields() {
 		assert.NotEmpty(t, field, "Field at index %d should not be empty", i)
+	}
+}
+
+func TestDefaultSensitiveFields_ReturnsClone(t *testing.T) {
+	original := DefaultSensitiveFields()
+	original[0] = "MUTATED"
+
+	// The mutation should not affect subsequent calls
+	fresh := DefaultSensitiveFields()
+	assert.NotEqual(t, "MUTATED", fresh[0], "DefaultSensitiveFields must return a clone")
+}
+
+func TestIsSensitiveField_FinancialFields(t *testing.T) {
+	financialFields := []struct {
+		name     string
+		expected bool
+	}{
+		{"card_number", true},
+		{"cardnumber", true},
+		{"cvv", true},
+		{"cvc", true},
+		{"ssn", true},
+		{"social_security", true},
+		{"pin", true},
+		{"otp", true},
+		{"account_number", true},
+		{"accountnumber", true},
+		{"routing_number", true},
+		{"routingnumber", true},
+		{"iban", true},
+		{"swift", true},
+		{"swift_code", true},
+		{"bic", true},
+		{"pan", true},
+		{"expiry", true},
+		{"expiry_date", true},
+		{"expiration_date", true},
+		{"card_expiry", true},
+		{"date_of_birth", true},
+		{"dob", true},
+		{"tax_id", true},
+		{"taxid", true},
+		{"tin", true},
+		{"national_id", true},
+		{"sort_code", true},
+		{"bsb", true},
+		{"security_answer", true},
+		{"security_question", true},
+		{"mother_maiden_name", true},
+		{"mfa_code", true},
+		{"totp", true},
+		{"biometric", true},
+		{"fingerprint", true},
+		// False positives for short tokens
+		{"spinning", false},
+		{"opinion", false},
+		{"pineapple", false},
+		{"cotton", false},
+		{"panther", false},
+	}
+
+	for _, tt := range financialFields {
+		t.Run(tt.name, func(t *testing.T) {
+			result := IsSensitiveField(tt.name)
+			assert.Equal(t, tt.expected, result,
+				"IsSensitiveField(%q) = %v, want %v", tt.name, result, tt.expected)
+		})
+	}
+}
+
+func TestShortSensitiveTokens_ExactMatch(t *testing.T) {
+	// These short tokens should match exactly but not as substrings
+	tests := []struct {
+		field    string
+		expected bool
+	}{
+		{"pin", true},
+		{"otp", true},
+		{"cvv", true},
+		{"cvc", true},
+		{"ssn", true},
+		{"pan", true},
+		{"bic", true},
+		{"bsb", true},
+		{"dob", true},
+		{"tin", true},
+		// CamelCase variants
+		{"userPin", true},
+		{"otpCode", true},
+		{"userSsn", true},
+		// Should NOT match as substrings in larger words
+		{"spinning", false},
+		{"option", false},
+		{"panther", false},
+		{"basic", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.field, func(t *testing.T) {
+			assert.Equal(t, tt.expected, IsSensitiveField(tt.field),
+				"IsSensitiveField(%q)", tt.field)
+		})
 	}
 }
