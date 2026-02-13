@@ -204,42 +204,16 @@ func (rc *RabbitMQConnection) EnsureChannelContext(ctx context.Context) error {
 	}
 
 	ch, err := channelFactory(ctx, conn)
+	if err == nil && ch == nil {
+		err = errors.New("channel factory returned nil channel")
+	}
+
 	if err != nil {
-		if newConnection {
-			rc.closeConnectionWith(conn, connCloser)
-		}
-
-		rc.mu.Lock()
-		if newConnection && rc.Connection == existingConn {
-			rc.Connection = nil
-		}
-
-		rc.Channel = nil
-		rc.Connected = false
-		rc.mu.Unlock()
+		rc.handleChannelFailure(conn, existingConn, newConnection, connCloser)
 
 		logger.Errorf("can't open channel on rabbitmq: %v", err)
 
 		return err
-	}
-
-	if ch == nil {
-		if newConnection {
-			rc.closeConnectionWith(conn, connCloser)
-		}
-
-		rc.mu.Lock()
-		if newConnection && rc.Connection == existingConn {
-			rc.Connection = nil
-		}
-
-		rc.Channel = nil
-		rc.Connected = false
-		rc.mu.Unlock()
-
-		logger.Error("can't open channel on rabbitmq")
-
-		return errors.New("can't open channel on rabbitmq")
 	}
 
 	rc.mu.Lock()
@@ -521,6 +495,23 @@ func (rc *RabbitMQConnection) closeConnectionWith(connection *amqp.Connection, c
 	if err := closer(connection); err != nil {
 		rc.logger().Warnf("failed to close rabbitmq connection during cleanup: %v", err)
 	}
+}
+
+// handleChannelFailure cleans up after a failed channel creation in EnsureChannelContext.
+// It conditionally closes the connection and resets the channel/connected state.
+func (rc *RabbitMQConnection) handleChannelFailure(conn, existingConn *amqp.Connection, newConnection bool, connCloser func(*amqp.Connection) error) {
+	if newConnection {
+		rc.closeConnectionWith(conn, connCloser)
+	}
+
+	rc.mu.Lock()
+	if newConnection && rc.Connection == existingConn {
+		rc.Connection = nil
+	}
+
+	rc.Channel = nil
+	rc.Connected = false
+	rc.mu.Unlock()
 }
 
 // Close closes the rabbitmq channel and connection.
