@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	logpkg "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -336,4 +338,209 @@ func TestZapAnyFieldHelper(t *testing.T) {
 	ctx := entries[0].ContextMap()
 	assert.NotNil(t, ctx["slice"])
 	assert.NotNil(t, ctx["map"])
+}
+
+// ===========================================================================
+// log.Logger interface coverage
+// ===========================================================================
+
+func TestLogAllLevels(t *testing.T) {
+	t.Parallel()
+
+	logger, observed := newObservedLogger(zapcore.DebugLevel)
+
+	logger.Log(context.Background(), logpkg.LevelDebug, "debug via Log")
+	logger.Log(context.Background(), logpkg.LevelInfo, "info via Log")
+	logger.Log(context.Background(), logpkg.LevelWarn, "warn via Log")
+	logger.Log(context.Background(), logpkg.LevelError, "error via Log")
+
+	entries := observed.All()
+	require.Len(t, entries, 4)
+
+	assert.Equal(t, zapcore.DebugLevel, entries[0].Level)
+	assert.Equal(t, zapcore.InfoLevel, entries[1].Level)
+	assert.Equal(t, zapcore.WarnLevel, entries[2].Level)
+	assert.Equal(t, zapcore.ErrorLevel, entries[3].Level)
+}
+
+func TestLogDefaultLevel(t *testing.T) {
+	t.Parallel()
+
+	logger, observed := newObservedLogger(zapcore.DebugLevel)
+
+	// Use an undefined level value to hit the default case
+	logger.Log(context.Background(), logpkg.Level(99), "default level")
+
+	entries := observed.All()
+	require.Len(t, entries, 1)
+	assert.Equal(t, zapcore.InfoLevel, entries[0].Level, "unknown level should default to Info")
+}
+
+func TestLogWithNilContext(t *testing.T) {
+	t.Parallel()
+
+	logger, observed := newObservedLogger(zapcore.DebugLevel)
+
+	assert.NotPanics(t, func() {
+		//nolint:staticcheck // intentionally passing nil context
+		logger.Log(nil, logpkg.LevelInfo, "nil ctx message")
+	})
+
+	entries := observed.All()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "nil ctx message", entries[0].Message)
+	// No trace_id/span_id should be present
+	_, hasTrace := entries[0].ContextMap()["trace_id"]
+	assert.False(t, hasTrace)
+}
+
+func TestLogWithOTelSpanInjectsTraceFields(t *testing.T) {
+	t.Parallel()
+
+	logger, observed := newObservedLogger(zapcore.DebugLevel)
+
+	// Create a span context with valid trace ID and span ID
+	traceID, _ := trace.TraceIDFromHex("0af7651916cd43dd8448eb211c80319c")
+	spanID, _ := trace.SpanIDFromHex("b7ad6b7169203331")
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+	})
+	ctx := trace.ContextWithSpanContext(context.Background(), sc)
+
+	logger.Log(ctx, logpkg.LevelInfo, "traced message", logpkg.String("key", "val"))
+
+	entries := observed.All()
+	require.Len(t, entries, 1)
+
+	cm := entries[0].ContextMap()
+	assert.Equal(t, traceID.String(), cm["trace_id"])
+	assert.Equal(t, spanID.String(), cm["span_id"])
+	assert.Equal(t, "val", cm["key"])
+}
+
+func TestLogWithInvalidSpanDoesNotInjectTraceFields(t *testing.T) {
+	t.Parallel()
+
+	logger, observed := newObservedLogger(zapcore.DebugLevel)
+
+	// Background context has no active span — SpanContext is invalid
+	logger.Log(context.Background(), logpkg.LevelInfo, "no span")
+
+	entries := observed.All()
+	require.Len(t, entries, 1)
+
+	_, hasTrace := entries[0].ContextMap()["trace_id"]
+	assert.False(t, hasTrace)
+}
+
+func TestWithReturnsChildLogger(t *testing.T) {
+	t.Parallel()
+
+	logger, observed := newObservedLogger(zapcore.DebugLevel)
+
+	child := logger.With(logpkg.String("component", "auth"))
+	child.Log(context.Background(), logpkg.LevelInfo, "child msg")
+
+	// Parent should not have the field
+	logger.Log(context.Background(), logpkg.LevelInfo, "parent msg")
+
+	entries := observed.All()
+	require.Len(t, entries, 2)
+
+	assert.Equal(t, "auth", entries[0].ContextMap()["component"])
+	_, parentHas := entries[1].ContextMap()["component"]
+	assert.False(t, parentHas)
+}
+
+func TestWithGroupNamespacesFields(t *testing.T) {
+	t.Parallel()
+
+	logger, observed := newObservedLogger(zapcore.DebugLevel)
+
+	grouped := logger.WithGroup("http")
+	grouped.Log(context.Background(), logpkg.LevelInfo, "grouped msg", logpkg.String("method", "GET"))
+
+	entries := observed.All()
+	require.Len(t, entries, 1)
+	// Namespace creates a nested field group
+	assert.Equal(t, "grouped msg", entries[0].Message)
+}
+
+func TestEnabledReportsCorrectly(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		coreLevel zapcore.Level
+		checkLvl  logpkg.Level
+		expected  bool
+	}{
+		{"debug enabled at debug", zapcore.DebugLevel, logpkg.LevelDebug, true},
+		{"info enabled at debug", zapcore.DebugLevel, logpkg.LevelInfo, true},
+		{"warn enabled at debug", zapcore.DebugLevel, logpkg.LevelWarn, true},
+		{"error enabled at debug", zapcore.DebugLevel, logpkg.LevelError, true},
+		{"debug disabled at info", zapcore.InfoLevel, logpkg.LevelDebug, false},
+		{"info enabled at info", zapcore.InfoLevel, logpkg.LevelInfo, true},
+		{"debug disabled at error", zapcore.ErrorLevel, logpkg.LevelDebug, false},
+		{"info disabled at error", zapcore.ErrorLevel, logpkg.LevelInfo, false},
+		{"warn disabled at error", zapcore.ErrorLevel, logpkg.LevelWarn, false},
+		{"error enabled at error", zapcore.ErrorLevel, logpkg.LevelError, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			logger, _ := newObservedLogger(tt.coreLevel)
+			assert.Equal(t, tt.expected, logger.Enabled(tt.checkLvl))
+		})
+	}
+}
+
+func TestSyncWithCancelledContext(t *testing.T) {
+	t.Parallel()
+
+	logger, _ := newObservedLogger(zapcore.DebugLevel)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	err := logger.Sync(ctx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestLevelReturnsAtomicLevel(t *testing.T) {
+	t.Parallel()
+
+	al := zap.NewAtomicLevelAt(zapcore.WarnLevel)
+	logger := &Logger{
+		logger:      zap.NewNop(),
+		atomicLevel: al,
+	}
+
+	assert.Equal(t, zapcore.WarnLevel, logger.Level().Level())
+}
+
+func TestLogLevelToZapConversions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input    logpkg.Level
+		expected zapcore.Level
+	}{
+		{logpkg.LevelDebug, zapcore.DebugLevel},
+		{logpkg.LevelInfo, zapcore.InfoLevel},
+		{logpkg.LevelWarn, zapcore.WarnLevel},
+		{logpkg.LevelError, zapcore.ErrorLevel},
+		{logpkg.Level(42), zapcore.InfoLevel}, // default
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input.String(), func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, logLevelToZap(tt.input))
+		})
+	}
 }
