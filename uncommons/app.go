@@ -1,14 +1,25 @@
 package uncommons
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 
+	"github.com/LerianStudio/lib-uncommons/uncommons/assert"
 	"github.com/LerianStudio/lib-uncommons/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/uncommons/runtime"
 )
 
 // ErrLoggerNil is returned when the Logger is nil and cannot proceed.
 var ErrLoggerNil = errors.New("logger is nil")
+
+var (
+	ErrNilLauncher = errors.New("launcher is nil")
+	ErrEmptyApp    = errors.New("app name is empty")
+	ErrNilApp      = errors.New("app is nil")
+)
 
 // App represents an application that will run as a deployable component.
 // It's an entrypoint at main.go.
@@ -32,7 +43,9 @@ func WithLogger(logger log.Logger) LauncherOption {
 // RunApp start all process registered before to the launcher.
 func RunApp(name string, app App) LauncherOption {
 	return func(l *Launcher) {
-		l.Add(name, app)
+		if err := l.Add(name, app); err != nil && l != nil && l.Logger != nil {
+			l.Logger.Log(context.Background(), log.LevelError, fmt.Sprintf("Launcher add app error: %v", err))
+		}
 	}
 }
 
@@ -45,9 +58,39 @@ type Launcher struct {
 }
 
 // Add runs an application in a goroutine.
-func (l *Launcher) Add(appName string, a App) *Launcher {
+func (l *Launcher) Add(appName string, a App) error {
+	if l == nil {
+		asserter := assert.New(context.Background(), nil, "launcher", "Add")
+		_ = asserter.Never(context.Background(), "launcher receiver is nil")
+
+		return ErrNilLauncher
+	}
+
+	if l.apps == nil {
+		l.apps = make(map[string]App)
+	}
+
+	if l.wg == nil {
+		l.wg = new(sync.WaitGroup)
+	}
+
+	if strings.TrimSpace(appName) == "" {
+		asserter := assert.New(context.Background(), l.Logger, "launcher", "Add")
+		_ = asserter.Never(context.Background(), "app name must not be empty")
+
+		return ErrEmptyApp
+	}
+
+	if a == nil {
+		asserter := assert.New(context.Background(), l.Logger, "launcher", "Add")
+		_ = asserter.Never(context.Background(), "app must not be nil", "app_name", appName)
+
+		return ErrNilApp
+	}
+
 	l.apps[appName] = a
-	return l
+
+	return nil
 }
 
 // Run every application registered before with Run method.
@@ -56,7 +99,7 @@ func (l *Launcher) Add(appName string, a App) *Launcher {
 func (l *Launcher) Run() {
 	if err := l.RunWithError(); err != nil {
 		if l.Logger != nil {
-			l.Logger.Errorf("Launcher error: %v", err)
+			l.Logger.Log(context.Background(), log.LevelError, fmt.Sprintf("Launcher error: %v", err))
 		}
 	}
 }
@@ -71,27 +114,37 @@ func (l *Launcher) RunWithError() error {
 	count := len(l.apps)
 	l.wg.Add(count)
 
-	l.Logger.Infof("Starting %d app(s)\n", count)
+	l.Logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Starting %d app(s)", count))
 
 	for name, app := range l.apps {
-		go func(name string, app App) {
-			defer l.wg.Done()
+		nameCopy := name
+		appCopy := app
 
-			l.Logger.Info("--")
-			l.Logger.Infof("Launcher: App \u001b[33m(%s)\u001b[0m starting\n", name)
+		runtime.SafeGoWithContextAndComponent(
+			context.Background(),
+			l.Logger,
+			"launcher",
+			"run_app_"+nameCopy,
+			runtime.KeepRunning,
+			func(_ context.Context) {
+				defer l.wg.Done()
 
-			if err := app.Run(l); err != nil {
-				l.Logger.Infof("Launcher: App (%s) error:", name)
-				l.Logger.Infof("\u001b[31m%s\u001b[0m", err)
-			}
+				l.Logger.Log(context.Background(), log.LevelInfo, "--")
+				l.Logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Launcher: App (%s) starting", nameCopy))
 
-			l.Logger.Infof("Launcher: App (%s) finished\n", name)
-		}(name, app)
+				if err := appCopy.Run(l); err != nil {
+					l.Logger.Log(context.Background(), log.LevelError, fmt.Sprintf("Launcher: App (%s) error:", nameCopy))
+					l.Logger.Log(context.Background(), log.LevelError, fmt.Sprintf("%s", err))
+				}
+
+				l.Logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Launcher: App (%s) finished", nameCopy))
+			},
+		)
 	}
 
 	l.wg.Wait()
 
-	l.Logger.Info("Launcher: Terminated")
+	l.Logger.Log(context.Background(), log.LevelInfo, "Launcher: Terminated")
 
 	return nil
 }

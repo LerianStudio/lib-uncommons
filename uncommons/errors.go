@@ -16,6 +16,7 @@ type Response struct {
 	Err        error  `json:"err,omitempty"`
 }
 
+// Error returns the business-facing message and satisfies the error interface.
 func (e Response) Error() string {
 	return e.Message
 }
@@ -70,9 +71,17 @@ func ValidateBusinessError(err error, entityType string, args ...any) error {
 	}
 	if mappedError, found := errorMap[err]; found {
 		response, ok := mappedError.(Response)
-		if ok && len(args) > 0 {
-			response.Message = fmt.Sprintf("%s (%s)", response.Message, strings.Trim(fmt.Sprint(args...), "[]"))
-			return response
+		if !ok {
+			return mappedError
+		}
+
+		if len(args) > 0 {
+			parts := make([]string, len(args))
+			for i, arg := range args {
+				parts[i] = fmt.Sprint(arg)
+			}
+
+			response.Message = fmt.Sprintf("%s (%s)", response.Message, strings.Join(parts, ", "))
 		}
 
 		return response

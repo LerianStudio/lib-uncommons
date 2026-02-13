@@ -181,29 +181,3 @@ func TestSetConfigFromEnvVars_MissingEnvVars(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Empty(t, config.Field, "missing env var should result in zero value")
 }
-
-func TestEnsureConfigFromEnvVars_Success(t *testing.T) {
-	type Config struct {
-		Field string `env:"TEST_ENSURE_FIELD"`
-	}
-
-	t.Setenv("TEST_ENSURE_FIELD", "value")
-
-	config := &Config{}
-	result := EnsureConfigFromEnvVars(config)
-
-	assert.NotNil(t, result)
-	assert.Equal(t, "value", config.Field)
-}
-
-func TestEnsureConfigFromEnvVars_PanicOnNonPointer(t *testing.T) {
-	type Config struct {
-		Field string `env:"TEST_FIELD"`
-	}
-
-	config := Config{}
-
-	assert.Panics(t, func() {
-		EnsureConfigFromEnvVars(config)
-	}, "EnsureConfigFromEnvVars should panic on non-pointer")
-}

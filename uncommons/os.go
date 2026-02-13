@@ -131,12 +131,3 @@ func SetConfigFromEnvVars(s any) error {
 	return nil
 }
 
-// Deprecated: Use SetConfigFromEnvVars instead for proper error handling.
-// EnsureConfigFromEnvVars panics on error. Prefer SetConfigFromEnvVars for graceful error handling.
-func EnsureConfigFromEnvVars(s any) any {
-	if err := SetConfigFromEnvVars(s); err != nil {
-		panic(err)
-	}
-
-	return s
-}

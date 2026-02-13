@@ -134,6 +134,7 @@ func RegexIgnoreAccents(regex string) string {
 	}
 
 	var b strings.Builder
+	b.Grow(len(regex) * 2) // Pre-allocate: accent expansions can be up to ~7 chars per rune
 
 	for _, ch := range regex {
 		c := string(ch)
