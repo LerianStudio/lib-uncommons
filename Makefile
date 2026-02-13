@@ -172,19 +172,19 @@ test:
 	@set -e; mkdir -p $(TEST_REPORTS_DIR); \
 	if [ -n "$(GOTESTSUM)" ]; then \
 	  echo "Running tests with gotestsum"; \
-	  gotestsum --format testname -- -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) ./... || { \
+	  gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) ./... || { \
 	    if [ "$(RETRY_ON_FAIL)" = "1" ]; then \
 	      echo "Retrying tests once..."; \
-	      gotestsum --format testname -- -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) ./...; \
+	      gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) ./...; \
 	    else \
 	      exit 1; \
 	    fi; \
 	  }; \
 	else \
-	  go test -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) ./... || { \
+	  go test -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) ./... || { \
 	    if [ "$(RETRY_ON_FAIL)" = "1" ]; then \
 	      echo "Retrying tests once..."; \
-	      go test -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) ./...; \
+	      go test -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) ./...; \
 	    else \
 	      exit 1; \
 	    fi; \
@@ -208,19 +208,19 @@ test-unit:
 	else \
 	  if [ -n "$(GOTESTSUM)" ]; then \
 	    echo "Running unit tests with gotestsum"; \
-	    gotestsum --format testname -- -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) $$pkgs || { \
+	    gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) $$pkgs || { \
 	      if [ "$(RETRY_ON_FAIL)" = "1" ]; then \
 	        echo "Retrying unit tests once..."; \
-	        gotestsum --format testname -- -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) $$pkgs; \
+	        gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) $$pkgs; \
 	      else \
 	        exit 1; \
 	      fi; \
 	    }; \
 	  else \
-	    go test -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) $$pkgs || { \
+	    go test -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) $$pkgs || { \
 	      if [ "$(RETRY_ON_FAIL)" = "1" ]; then \
 	        echo "Retrying unit tests once..."; \
-	        go test -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) $$pkgs; \
+	        go test -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) $$pkgs; \
 	      else \
 	        exit 1; \
 	      fi; \
@@ -325,19 +325,19 @@ coverage-unit:
 	  echo "Packages: $$pkgs"; \
 	  if [ -n "$(GOTESTSUM)" ]; then \
 	    echo "Running unit tests with gotestsum (coverage enabled)"; \
-	    gotestsum --format testname -- -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) -covermode=atomic -coverprofile=$(TEST_REPORTS_DIR)/unit_coverage.out $$pkgs || { \
+	    gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) -covermode=atomic -coverprofile=$(TEST_REPORTS_DIR)/unit_coverage.out $$pkgs || { \
 	      if [ "$(RETRY_ON_FAIL)" = "1" ]; then \
 	        echo "Retrying unit tests once..."; \
-	        gotestsum --format testname -- -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) -covermode=atomic -coverprofile=$(TEST_REPORTS_DIR)/unit_coverage.out $$pkgs; \
+	        gotestsum --format testname -- -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) -covermode=atomic -coverprofile=$(TEST_REPORTS_DIR)/unit_coverage.out $$pkgs; \
 	      else \
 	        exit 1; \
 	      fi; \
 	    }; \
 	  else \
-	    go test -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) -covermode=atomic -coverprofile=$(TEST_REPORTS_DIR)/unit_coverage.out $$pkgs || { \
+	    go test -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) -covermode=atomic -coverprofile=$(TEST_REPORTS_DIR)/unit_coverage.out $$pkgs || { \
 	      if [ "$(RETRY_ON_FAIL)" = "1" ]; then \
 	        echo "Retrying unit tests once..."; \
-	        go test -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) -covermode=atomic -coverprofile=$(TEST_REPORTS_DIR)/unit_coverage.out $$pkgs; \
+	        go test -tags=unit -v $(LOW_RES_RACE_FLAG) -count=1 $(GO_TEST_LDFLAGS) -covermode=atomic -coverprofile=$(TEST_REPORTS_DIR)/unit_coverage.out $$pkgs; \
 	      else \
 	        exit 1; \
 	      fi; \
