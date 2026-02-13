@@ -485,6 +485,312 @@ func TestClient_ReconnectSuccess_SwapsClient(t *testing.T) {
 	assert.True(t, connected)
 }
 
+func TestValidateTopology_Sentinel(t *testing.T) {
+	tests := []struct {
+		name    string
+		topo    Topology
+		errText string
+	}{
+		{
+			name: "sentinel valid",
+			topo: Topology{Sentinel: &SentinelTopology{
+				Addresses:  []string{"127.0.0.1:26379"},
+				MasterName: "mymaster",
+			}},
+		},
+		{
+			name: "sentinel missing addresses",
+			topo: Topology{Sentinel: &SentinelTopology{
+				MasterName: "mymaster",
+			}},
+			errText: "sentinel addresses are required",
+		},
+		{
+			name: "sentinel missing master name",
+			topo: Topology{Sentinel: &SentinelTopology{
+				Addresses: []string{"127.0.0.1:26379"},
+			}},
+			errText: "sentinel master name is required",
+		},
+		{
+			name: "sentinel empty address in list",
+			topo: Topology{Sentinel: &SentinelTopology{
+				Addresses:  []string{"127.0.0.1:26379", "  "},
+				MasterName: "mymaster",
+			}},
+			errText: "sentinel addresses cannot be empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateTopology(tt.topo)
+			if tt.errText == "" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errText)
+			}
+		})
+	}
+}
+
+func TestValidateTopology_Cluster(t *testing.T) {
+	tests := []struct {
+		name    string
+		topo    Topology
+		errText string
+	}{
+		{
+			name: "cluster valid",
+			topo: Topology{Cluster: &ClusterTopology{
+				Addresses: []string{"127.0.0.1:7000", "127.0.0.1:7001"},
+			}},
+		},
+		{
+			name: "cluster missing addresses",
+			topo: Topology{Cluster: &ClusterTopology{}},
+			errText: "cluster addresses are required",
+		},
+		{
+			name: "cluster empty address in list",
+			topo: Topology{Cluster: &ClusterTopology{
+				Addresses: []string{"127.0.0.1:7000", "   "},
+			}},
+			errText: "cluster addresses cannot be empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateTopology(tt.topo)
+			if tt.errText == "" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errText)
+			}
+		})
+	}
+}
+
+func TestValidateTopology_StandaloneEmptyAddress(t *testing.T) {
+	err := validateTopology(Topology{Standalone: &StandaloneTopology{Address: "   "}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "standalone address is required")
+}
+
+func TestValidateConfig_DualAuth(t *testing.T) {
+	validCert := base64.StdEncoding.EncodeToString(generateTestCertificatePEM(t))
+	_, err := normalizeConfig(Config{
+		Topology: Topology{Standalone: &StandaloneTopology{Address: "127.0.0.1:6379"}},
+		TLS:      &TLSConfig{CACertBase64: validCert},
+		Auth: Auth{
+			StaticPassword: &StaticPasswordAuth{Password: "pass"},
+			GCPIAM: &GCPIAMAuth{
+				CredentialsBase64: "abc",
+				ServiceAccount:    "svc@project.iam.gserviceaccount.com",
+			},
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "only one auth strategy")
+}
+
+func TestNormalizeLoggerDefault_NilLogger(t *testing.T) {
+	cfg := Config{}
+	normalizeLoggerDefault(&cfg)
+	require.NotNil(t, cfg.Logger)
+}
+
+func TestBuildUniversalOptionsLocked_Topologies(t *testing.T) {
+	mr := miniredis.RunT(t)
+
+	t.Run("sentinel topology", func(t *testing.T) {
+		cfg, err := normalizeConfig(Config{
+			Topology: Topology{Sentinel: &SentinelTopology{
+				Addresses:  []string{mr.Addr()},
+				MasterName: "mymaster",
+			}},
+		})
+		require.NoError(t, err)
+
+		c := &Client{cfg: cfg, logger: cfg.Logger}
+		opts, err := c.buildUniversalOptionsLocked()
+		require.NoError(t, err)
+		assert.Equal(t, []string{mr.Addr()}, opts.Addrs)
+		assert.Equal(t, "mymaster", opts.MasterName)
+	})
+
+	t.Run("cluster topology", func(t *testing.T) {
+		cfg, err := normalizeConfig(Config{
+			Topology: Topology{Cluster: &ClusterTopology{
+				Addresses: []string{mr.Addr(), "127.0.0.1:7001"},
+			}},
+		})
+		require.NoError(t, err)
+
+		c := &Client{cfg: cfg, logger: cfg.Logger}
+		opts, err := c.buildUniversalOptionsLocked()
+		require.NoError(t, err)
+		assert.Equal(t, []string{mr.Addr(), "127.0.0.1:7001"}, opts.Addrs)
+	})
+
+	t.Run("static password auth", func(t *testing.T) {
+		cfg, err := normalizeConfig(Config{
+			Topology: Topology{Standalone: &StandaloneTopology{Address: mr.Addr()}},
+			Auth:     Auth{StaticPassword: &StaticPasswordAuth{Password: "secret"}},
+		})
+		require.NoError(t, err)
+
+		c := &Client{cfg: cfg, logger: cfg.Logger}
+		opts, err := c.buildUniversalOptionsLocked()
+		require.NoError(t, err)
+		assert.Equal(t, "secret", opts.Password)
+	})
+
+	t.Run("gcp iam auth sets username and token", func(t *testing.T) {
+		validCert := base64.StdEncoding.EncodeToString(generateTestCertificatePEM(t))
+		cfg, err := normalizeConfig(Config{
+			Topology: Topology{Standalone: &StandaloneTopology{Address: mr.Addr()}},
+			TLS:      &TLSConfig{CACertBase64: validCert},
+			Auth: Auth{GCPIAM: &GCPIAMAuth{
+				CredentialsBase64: base64.StdEncoding.EncodeToString([]byte("{}")),
+				ServiceAccount:    "svc@project.iam.gserviceaccount.com",
+			}},
+		})
+		require.NoError(t, err)
+
+		c := &Client{cfg: cfg, logger: cfg.Logger, token: "test-token"}
+		opts, err := c.buildUniversalOptionsLocked()
+		require.NoError(t, err)
+		assert.Equal(t, "default", opts.Username)
+		assert.Equal(t, "test-token", opts.Password)
+		assert.NotNil(t, opts.TLSConfig)
+	})
+}
+
+func TestClient_GetClient_ReconnectsWhenNil(t *testing.T) {
+	mr := miniredis.RunT(t)
+
+	client, err := New(context.Background(), newStandaloneConfig(mr.Addr()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+
+	// Simulate a nil internal client to exercise the reconnect-on-demand path.
+	client.mu.Lock()
+	old := client.client
+	client.client = nil
+	client.mu.Unlock()
+
+	// Close the old client manually.
+	_ = old.Close()
+
+	// GetClient should reconnect.
+	rdb, err := client.GetClient(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, rdb)
+
+	require.NoError(t, rdb.Set(context.Background(), "reconnect:key", "ok", 0).Err())
+}
+
+func TestClient_RetrieveToken_NilClient(t *testing.T) {
+	var c *Client
+	_, err := c.retrieveToken(context.Background())
+	assert.ErrorIs(t, err, ErrNilClient)
+}
+
+func TestClient_RetrieveToken_NoGCPIAM(t *testing.T) {
+	c := &Client{
+		cfg:    Config{},
+		logger: &log.NopLogger{},
+	}
+	_, err := c.retrieveToken(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "GCP IAM auth is not configured")
+}
+
+func TestClient_RefreshTokenLoop_NilClient(t *testing.T) {
+	var c *Client
+	// Should return immediately without panic.
+	c.refreshTokenLoop(context.Background())
+}
+
+func TestNormalizeConnectionOptionsDefaults(t *testing.T) {
+	opts := ConnectionOptions{}
+	normalizeConnectionOptionsDefaults(&opts)
+	assert.Equal(t, 10, opts.PoolSize)
+	assert.Equal(t, 3*time.Second, opts.ReadTimeout)
+	assert.Equal(t, 3*time.Second, opts.WriteTimeout)
+	assert.Equal(t, 5*time.Second, opts.DialTimeout)
+	assert.Equal(t, 2*time.Second, opts.PoolTimeout)
+	assert.Equal(t, 3, opts.MaxRetries)
+	assert.Equal(t, 8*time.Millisecond, opts.MinRetryBackoff)
+	assert.Equal(t, 1*time.Second, opts.MaxRetryBackoff)
+}
+
+func TestNormalizeConnectionOptionsDefaults_PreservesExisting(t *testing.T) {
+	opts := ConnectionOptions{
+		PoolSize:        20,
+		ReadTimeout:     10 * time.Second,
+		WriteTimeout:    10 * time.Second,
+		DialTimeout:     10 * time.Second,
+		PoolTimeout:     10 * time.Second,
+		MaxRetries:      5,
+		MinRetryBackoff: 100 * time.Millisecond,
+		MaxRetryBackoff: 5 * time.Second,
+	}
+	normalizeConnectionOptionsDefaults(&opts)
+	assert.Equal(t, 20, opts.PoolSize)
+	assert.Equal(t, 10*time.Second, opts.ReadTimeout)
+	assert.Equal(t, 5, opts.MaxRetries)
+}
+
+func TestNormalizeTLSDefaults(t *testing.T) {
+	t.Run("nil config", func(t *testing.T) {
+		normalizeTLSDefaults(nil) // should not panic
+	})
+
+	t.Run("sets default min version", func(t *testing.T) {
+		cfg := &TLSConfig{}
+		normalizeTLSDefaults(cfg)
+		assert.Equal(t, uint16(tls.VersionTLS12), cfg.MinVersion)
+	})
+
+	t.Run("preserves existing min version", func(t *testing.T) {
+		cfg := &TLSConfig{MinVersion: tls.VersionTLS13}
+		normalizeTLSDefaults(cfg)
+		assert.Equal(t, uint16(tls.VersionTLS13), cfg.MinVersion)
+	})
+}
+
+func TestNormalizeGCPIAMDefaults(t *testing.T) {
+	t.Run("nil auth", func(t *testing.T) {
+		normalizeGCPIAMDefaults(nil) // should not panic
+	})
+
+	t.Run("sets defaults", func(t *testing.T) {
+		auth := &GCPIAMAuth{}
+		normalizeGCPIAMDefaults(auth)
+		assert.Equal(t, defaultTokenLifetime, auth.TokenLifetime)
+		assert.Equal(t, defaultRefreshEvery, auth.RefreshEvery)
+		assert.Equal(t, defaultRefreshCheckInterval, auth.RefreshCheckInterval)
+		assert.Equal(t, defaultRefreshOperationTimeout, auth.RefreshOperationTimeout)
+	})
+
+	t.Run("preserves existing", func(t *testing.T) {
+		auth := &GCPIAMAuth{
+			TokenLifetime:           2 * time.Hour,
+			RefreshEvery:            30 * time.Minute,
+			RefreshCheckInterval:    5 * time.Second,
+			RefreshOperationTimeout: 10 * time.Second,
+		}
+		normalizeGCPIAMDefaults(auth)
+		assert.Equal(t, 2*time.Hour, auth.TokenLifetime)
+		assert.Equal(t, 30*time.Minute, auth.RefreshEvery)
+	})
+}
+
 func generateTestCertificatePEM(t *testing.T) []byte {
 	t.Helper()
 
