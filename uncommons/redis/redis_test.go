@@ -2,564 +2,505 @@ package redis
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/pem"
 	"errors"
-	"sync"
+	"math/big"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/LerianStudio/lib-uncommons/uncommons/log"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestRedisConnection_Connect(t *testing.T) {
-	// Start a mini Redis server for testing
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("Failed to start miniredis: %v", err)
+func newStandaloneConfig(addr string) Config {
+	return Config{
+		Topology: Topology{
+			Standalone: &StandaloneTopology{Address: addr},
+		},
+		Logger: &log.NopLogger{},
 	}
-	defer mr.Close()
+}
 
-	// Create logger
-	logger := &log.GoLogger{Level: log.InfoLevel}
+func TestClient_NewAndGetClient(t *testing.T) {
+	mr := miniredis.RunT(t)
+
+	client, err := New(context.Background(), newStandaloneConfig(mr.Addr()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+
+	redisClient, err := client.GetClient(context.Background())
+	require.NoError(t, err)
+
+	require.NoError(t, redisClient.Set(context.Background(), "test:key", "value", 0).Err())
+	value, err := redisClient.Get(context.Background(), "test:key").Result()
+	require.NoError(t, err)
+	assert.Equal(t, "value", value)
+	connected, err := client.IsConnected()
+	require.NoError(t, err)
+	assert.True(t, connected)
+}
+
+func TestClient_New_InvalidConfig(t *testing.T) {
+	validCert := base64.StdEncoding.EncodeToString(generateTestCertificatePEM(t))
 
 	tests := []struct {
-		name        string
-		redisConn   *RedisConnection
-		expectError bool
-		skip        bool
-		skipReason  string
+		name    string
+		cfg     Config
+		errText string
 	}{
 		{
-			name: "successful connection - standalone mode",
-			redisConn: &RedisConnection{
-				Mode:    ModeStandalone,
-				Address: []string{mr.Addr()},
-				Logger:  logger,
-			},
-			expectError: false,
+			name:    "missing topology",
+			cfg:     Config{Logger: &log.NopLogger{}},
+			errText: "exactly one topology",
 		},
 		{
-			name: "successful connection - sentinel mode",
-			redisConn: &RedisConnection{
-				Mode:       ModeSentinel,
-				Address:    []string{mr.Addr()},
-				MasterName: "mymaster",
-				Logger:     logger,
+			name: "multiple topologies",
+			cfg: Config{
+				Topology: Topology{
+					Standalone: &StandaloneTopology{Address: "127.0.0.1:6379"},
+					Cluster:    &ClusterTopology{Addresses: []string{"127.0.0.1:6379"}},
+				},
+				Logger: &log.NopLogger{},
 			},
-			skip:       true,
-			skipReason: "miniredis doesn't support sentinel commands",
+			errText: "exactly one topology",
 		},
 		{
-			name: "successful connection - cluster mode",
-			redisConn: &RedisConnection{
-				Mode:    ModeCluster,
-				Address: []string{mr.Addr()},
-				Logger:  logger,
+			name: "gcp iam requires tls",
+			cfg: Config{
+				Topology: Topology{Standalone: &StandaloneTopology{Address: "127.0.0.1:6379"}},
+				Auth: Auth{
+					GCPIAM: &GCPIAMAuth{
+						CredentialsBase64: "abc",
+						ServiceAccount:    "svc@project.iam.gserviceaccount.com",
+					},
+				},
+				Logger: &log.NopLogger{},
 			},
-			expectError: false,
+			errText: "TLS must be configured",
 		},
 		{
-			name: "failed connection - wrong addresses",
-			redisConn: &RedisConnection{
-				Mode:    ModeStandalone,
-				Address: []string{"wrong_address:6379"},
-				Logger:  logger,
+			name: "gcp iam requires service account",
+			cfg: Config{
+				Topology: Topology{Standalone: &StandaloneTopology{Address: "127.0.0.1:6379"}},
+				TLS:      &TLSConfig{CACertBase64: validCert},
+				Auth: Auth{
+					GCPIAM: &GCPIAMAuth{CredentialsBase64: "abc"},
+				},
+				Logger: &log.NopLogger{},
 			},
-			expectError: true,
+			errText: "service account is required",
 		},
 		{
-			name: "failed connection - wrong sentinel addresses",
-			redisConn: &RedisConnection{
-				Mode:       ModeSentinel,
-				Address:    []string{"wrong_address:6379"},
-				MasterName: "mymaster",
-				Logger:     logger,
+			name: "gcp iam service account cannot contain slash",
+			cfg: Config{
+				Topology: Topology{Standalone: &StandaloneTopology{Address: "127.0.0.1:6379"}},
+				TLS:      &TLSConfig{CACertBase64: validCert},
+				Auth: Auth{
+					GCPIAM: &GCPIAMAuth{
+						CredentialsBase64: "abc",
+						ServiceAccount:    "projects/-/serviceAccounts/svc@project.iam.gserviceaccount.com",
+					},
+				},
+				Logger: &log.NopLogger{},
 			},
-			expectError: true,
+			errText: "cannot contain '/'",
 		},
 		{
-			name: "failed connection - wrong cluster addresses",
-			redisConn: &RedisConnection{
-				Mode:    ModeCluster,
-				Address: []string{"wrong_address:6379"},
-				Logger:  logger,
+			name: "gcp iam credentials required",
+			cfg: Config{
+				Topology: Topology{Standalone: &StandaloneTopology{Address: "127.0.0.1:6379"}},
+				TLS:      &TLSConfig{CACertBase64: validCert},
+				Auth: Auth{
+					GCPIAM: &GCPIAMAuth{ServiceAccount: "svc@project.iam.gserviceaccount.com"},
+				},
+				Logger: &log.NopLogger{},
 			},
-			expectError: true,
+			errText: "credentials are required",
+		},
+		{
+			name: "tls requires ca cert",
+			cfg: Config{
+				Topology: Topology{Standalone: &StandaloneTopology{Address: "127.0.0.1:6379"}},
+				TLS:      &TLSConfig{},
+				Logger:   &log.NopLogger{},
+			},
+			errText: "TLS CA cert is required",
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.skip {
-				t.Skip(tt.skipReason)
-			}
-
-			ctx := context.Background()
-			err := tt.redisConn.Connect(ctx)
-
-			if tt.expectError {
-				assert.Error(t, err)
-				assert.False(t, tt.redisConn.Connected)
-				assert.Nil(t, tt.redisConn.Client)
-			} else {
-				assert.NoError(t, err)
-				assert.True(t, tt.redisConn.Connected)
-				assert.NotNil(t, tt.redisConn.Client)
-			}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, err := New(context.Background(), test.cfg)
+			require.Error(t, err)
+			assert.Nil(t, client)
+			assert.ErrorIs(t, err, ErrInvalidConfig)
+			assert.Contains(t, err.Error(), test.errText)
 		})
 	}
 }
 
-func TestRedisConnection_GetClient(t *testing.T) {
-	// Start a mini Redis server for testing
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("Failed to start miniredis: %v", err)
-	}
-	defer mr.Close()
+func TestBuildTLSConfig(t *testing.T) {
+	_, err := buildTLSConfig(TLSConfig{CACertBase64: "not-base64"})
+	assert.Error(t, err)
 
-	// Create logger
-	logger := &log.GoLogger{Level: log.InfoLevel}
+	_, err = buildTLSConfig(TLSConfig{CACertBase64: base64.StdEncoding.EncodeToString([]byte("not-a-pem"))})
+	assert.Error(t, err)
 
-	t.Run("get client - first time initialization", func(t *testing.T) {
-		ctx := context.Background()
-		redisConn := &RedisConnection{
-			Mode:    ModeStandalone,
-			Address: []string{mr.Addr()},
-			Logger:  logger,
-		}
-
-		client, err := redisConn.GetClient(ctx)
-		assert.NoError(t, err)
-		assert.NotNil(t, client)
-		assert.True(t, redisConn.Connected)
+	cfg, err := buildTLSConfig(TLSConfig{
+		CACertBase64: base64.StdEncoding.EncodeToString(generateTestCertificatePEM(t)),
+		MinVersion:   tls.VersionTLS12,
 	})
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, uint16(tls.VersionTLS12), cfg.MinVersion)
+}
 
-	t.Run("get client - already initialized", func(t *testing.T) {
-		ctx := context.Background()
-		redisConn := &RedisConnection{
-			Mode:    ModeStandalone,
-			Address: []string{mr.Addr()},
-			Logger:  logger,
-		}
+func TestClient_NilReceiverGuards(t *testing.T) {
+	var client *Client
 
-		// First call to initialize
-		_, err := redisConn.GetClient(ctx)
-		assert.NoError(t, err)
+	err := client.Connect(context.Background())
+	assert.ErrorIs(t, err, ErrNilClient)
 
-		// Second call to get existing client
-		client, err := redisConn.GetClient(ctx)
-		assert.NoError(t, err)
-		assert.NotNil(t, client)
-		assert.True(t, redisConn.Connected)
+	rdb, err := client.GetClient(context.Background())
+	assert.ErrorIs(t, err, ErrNilClient)
+	assert.Nil(t, rdb)
+
+	err = client.Close()
+	assert.ErrorIs(t, err, ErrNilClient)
+
+	connected, err := client.IsConnected()
+	assert.ErrorIs(t, err, ErrNilClient)
+	assert.False(t, connected)
+	assert.ErrorIs(t, client.LastRefreshError(), ErrNilClient)
+}
+
+func TestClient_StatusLifecycle(t *testing.T) {
+	mr := miniredis.RunT(t)
+
+	client, err := New(context.Background(), newStandaloneConfig(mr.Addr()))
+	require.NoError(t, err)
+
+	status, err := client.Status()
+	require.NoError(t, err)
+	assert.True(t, status.Connected)
+	assert.Nil(t, status.LastRefreshError)
+
+	require.NoError(t, client.Close())
+	connected, err := client.IsConnected()
+	require.NoError(t, err)
+	assert.False(t, connected)
+}
+
+func TestClient_RefreshLoop_DoesNotDuplicateGoroutines(t *testing.T) {
+	validCert := base64.StdEncoding.EncodeToString(generateTestCertificatePEM(t))
+	normalized, err := normalizeConfig(Config{
+		Topology: Topology{Standalone: &StandaloneTopology{Address: "127.0.0.1:6379"}},
+		TLS:      &TLSConfig{CACertBase64: validCert},
+		Auth: Auth{GCPIAM: &GCPIAMAuth{
+			CredentialsBase64:       base64.StdEncoding.EncodeToString([]byte("{}")),
+			ServiceAccount:          "svc@project.iam.gserviceaccount.com",
+			RefreshEvery:            time.Millisecond,
+			RefreshCheckInterval:    time.Millisecond,
+			RefreshOperationTimeout: time.Second,
+		}},
+		Logger: &log.NopLogger{},
 	})
+	require.NoError(t, err)
 
-	t.Run("get client - connection fails", func(t *testing.T) {
-		ctx := context.Background()
-		redisConn := &RedisConnection{
-			Mode:    ModeStandalone,
-			Address: []string{"wrong_address:6379"},
-			Logger:  logger,
-		}
+	var calls int32
+	client := &Client{
+		cfg:    normalized,
+		logger: normalized.Logger,
+		tokenRetriever: func(ctx context.Context) (string, error) {
+			atomic.AddInt32(&calls, 1)
+			<-ctx.Done()
 
-		client, err := redisConn.GetClient(ctx)
-		assert.Error(t, err)
-		assert.Nil(t, client)
-		assert.False(t, redisConn.Connected)
-	})
-
-	// Test different connection modes
-	testModes := []struct {
-		name       string
-		redisConn  *RedisConnection
-		skip       bool
-		skipReason string
-	}{
-		{
-			name: "sentinel mode",
-			redisConn: &RedisConnection{
-				Mode:       ModeSentinel,
-				Address:    []string{mr.Addr()},
-				MasterName: "mymaster",
-				Logger:     logger,
-			},
-			skip:       true,
-			skipReason: "miniredis doesn't support sentinel commands",
+			return "", ctx.Err()
 		},
-		{
-			name: "cluster mode",
-			redisConn: &RedisConnection{
-				Mode:    ModeCluster,
-				Address: []string{mr.Addr()},
-				Logger:  logger,
-			},
-		},
+		reconnectFn: func(context.Context) error { return nil },
 	}
 
-	for _, mode := range testModes {
-		t.Run("get client - "+mode.name, func(t *testing.T) {
-			if mode.skip {
-				t.Skip(mode.skipReason)
+	client.mu.Lock()
+	client.lastRefresh = time.Now().Add(-time.Hour)
+	client.startRefreshLoopLocked()
+	client.startRefreshLoopLocked()
+	client.mu.Unlock()
+
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt32(&calls) >= 1
+	}, 200*time.Millisecond, 10*time.Millisecond)
+
+	require.NoError(t, client.Close())
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls))
+}
+
+func TestClient_RefreshStatusErrorAndRecovery(t *testing.T) {
+	validCert := base64.StdEncoding.EncodeToString(generateTestCertificatePEM(t))
+	normalized, err := normalizeConfig(Config{
+		Topology: Topology{Standalone: &StandaloneTopology{Address: "127.0.0.1:6379"}},
+		TLS:      &TLSConfig{CACertBase64: validCert},
+		Auth: Auth{GCPIAM: &GCPIAMAuth{
+			CredentialsBase64:       base64.StdEncoding.EncodeToString([]byte("{}")),
+			ServiceAccount:          "svc@project.iam.gserviceaccount.com",
+			RefreshEvery:            time.Millisecond,
+			RefreshCheckInterval:    time.Millisecond,
+			RefreshOperationTimeout: time.Second,
+		}},
+		Logger: &log.NopLogger{},
+	})
+	require.NoError(t, err)
+
+	firstErr := errors.New("token refresh failed")
+	var shouldFail atomic.Bool
+	shouldFail.Store(true)
+
+	client := &Client{
+		cfg:    normalized,
+		logger: normalized.Logger,
+		tokenRetriever: func(context.Context) (string, error) {
+			if shouldFail.Load() {
+				return "", firstErr
 			}
 
-			ctx := context.Background()
-			client, err := mode.redisConn.GetClient(ctx)
-			assert.NoError(t, err)
-			assert.NotNil(t, client)
-			assert.True(t, mode.redisConn.Connected)
-		})
-	}
-}
-
-func TestRedisIntegration(t *testing.T) {
-	// Skip this test when running in CI environment
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	// Start a mini Redis server for testing
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("Failed to start miniredis: %v", err)
-	}
-	defer mr.Close()
-
-	// Create logger
-	logger := &log.GoLogger{Level: log.InfoLevel}
-
-	// Create Redis connection
-	redisConn := &RedisConnection{
-		Mode:    ModeStandalone,
-		Address: []string{mr.Addr()},
-		Logger:  logger,
-	}
-
-	ctx := context.Background()
-
-	// Connect to Redis
-	err = redisConn.Connect(ctx)
-	assert.NoError(t, err)
-
-	// Get client
-	client, err := redisConn.GetClient(ctx)
-	assert.NoError(t, err)
-
-	// Test setting and getting a value
-	key := "test_key"
-	value := "test_value"
-
-	err = client.Set(ctx, key, value, 0).Err()
-	assert.NoError(t, err)
-
-	result, err := client.Get(ctx, key).Result()
-	assert.NoError(t, err)
-	assert.Equal(t, value, result)
-}
-
-func TestTTLFunctionality(t *testing.T) {
-	// Start a mini Redis server for testing
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("Failed to start miniredis: %v", err)
-	}
-	defer mr.Close()
-
-	// Create logger
-	logger := &log.GoLogger{Level: log.InfoLevel}
-
-	// Create Redis connection
-	redisConn := &RedisConnection{
-		Mode:    ModeStandalone,
-		Address: []string{mr.Addr()},
-		Logger:  logger,
-	}
-
-	ctx := context.Background()
-
-	// Connect to Redis
-	err = redisConn.Connect(ctx)
-	assert.NoError(t, err)
-
-	// Get client
-	client, err := redisConn.GetClient(ctx)
-	assert.NoError(t, err)
-
-	// Test setting a value with TTL
-	key := "ttl_key"
-	value := "ttl_value"
-
-	// Use the default TTL constant
-	err = client.Set(ctx, key, value, time.Duration(TTL)*time.Second).Err()
-	assert.NoError(t, err)
-
-	// Check TTL is set
-	ttl, err := client.TTL(ctx, key).Result()
-	assert.NoError(t, err)
-	assert.True(t, ttl > 0, "TTL should be greater than 0")
-
-	// Verify the value is still accessible
-	result, err := client.Get(ctx, key).Result()
-	assert.NoError(t, err)
-	assert.Equal(t, value, result)
-
-	// Fast-forward time in miniredis to simulate expiration
-	mr.FastForward(time.Duration(TTL+1) * time.Second)
-
-	// Verify the key has expired
-	exists, err := client.Exists(ctx, key).Result()
-	assert.NoError(t, err)
-	assert.Equal(t, int64(0), exists, "Key should have expired")
-}
-
-func TestModesIntegration(t *testing.T) {
-	// Skip this test when running in CI environment
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	// Start a mini Redis server for testing
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("Failed to start miniredis: %v", err)
-	}
-	defer mr.Close()
-
-	// Create logger
-	logger := &log.GoLogger{Level: log.InfoLevel}
-
-	// Test all connection modes
-	modes := []struct {
-		name       string
-		redisConn  *RedisConnection
-		skip       bool
-		skipReason string
-	}{
-		{
-			name: "standalone mode",
-			redisConn: &RedisConnection{
-				Mode:    ModeStandalone,
-				Address: []string{mr.Addr()},
-				Logger:  logger,
-			},
+			return "token", nil
 		},
-		{
-			name: "sentinel mode",
-			redisConn: &RedisConnection{
-				Mode:       ModeSentinel,
-				Address:    []string{mr.Addr()},
-				MasterName: "mymaster",
-				Logger:     logger,
-			},
-			skip:       true,
-			skipReason: "miniredis doesn't support sentinel commands",
+		reconnectFn: func(context.Context) error { return nil },
+	}
+
+	client.mu.Lock()
+	client.lastRefresh = time.Now().Add(-time.Hour)
+	client.startRefreshLoopLocked()
+	client.mu.Unlock()
+
+	require.Eventually(t, func() bool {
+		return errors.Is(client.LastRefreshError(), firstErr)
+	}, 500*time.Millisecond, 10*time.Millisecond)
+
+	shouldFail.Store(false)
+
+	require.Eventually(t, func() bool {
+		return client.LastRefreshError() == nil
+	}, 500*time.Millisecond, 10*time.Millisecond)
+
+	require.NoError(t, client.Close())
+}
+
+func TestClient_Connect_ReconnectClosesPreviousClient(t *testing.T) {
+	mr := miniredis.RunT(t)
+
+	client, err := New(context.Background(), newStandaloneConfig(mr.Addr()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+
+	firstClient, err := client.GetClient(context.Background())
+	require.NoError(t, err)
+
+	require.NoError(t, client.Connect(context.Background()))
+
+	secondClient, err := client.GetClient(context.Background())
+	require.NoError(t, err)
+	assert.NotSame(t, firstClient, secondClient)
+
+	_, err = firstClient.Ping(context.Background()).Result()
+	assert.Error(t, err)
+}
+
+func TestClient_ReconnectFailure_PreservesOldClient(t *testing.T) {
+	mr := miniredis.RunT(t)
+	addr := mr.Addr() // capture address before closing
+
+	// Connect a working standalone client (no IAM -- we test reconnect directly).
+	client, err := New(context.Background(), newStandaloneConfig(addr))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+
+	// Verify initial connectivity.
+	rdb, err := client.GetClient(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, rdb.Set(context.Background(), "preserve:key", "before", 0).Err())
+
+	// Shut down miniredis so the new client Ping fails during reconnect.
+	mr.Close()
+
+	// Simulate a reconnect failure.
+	client.mu.Lock()
+	err = client.reconnectLocked(context.Background())
+	client.mu.Unlock()
+
+	// reconnectLocked must return an error (Ping against closed server fails).
+	require.Error(t, err, "reconnectLocked should fail when new client cannot Ping")
+
+	// The old client must still be set and marked connected.
+	connected, err := client.IsConnected()
+	require.NoError(t, err)
+	assert.True(t, connected, "client must remain connected after failed reconnect")
+
+	// Restart miniredis on the same address so the OLD preserved client can work again.
+	mr2 := miniredis.NewMiniRedis()
+	require.NoError(t, mr2.StartAddr(addr))
+	t.Cleanup(mr2.Close)
+
+	// The preserved old client must still be usable.
+	rdb2, err := client.GetClient(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, rdb2.Set(context.Background(), "preserve:key", "still-works", 0).Err())
+
+	val, err := rdb2.Get(context.Background(), "preserve:key").Result()
+	require.NoError(t, err)
+	assert.Equal(t, "still-works", val)
+}
+
+func TestClient_ReconnectFailure_IAMRefreshLoopPreservesClient(t *testing.T) {
+	validCert := base64.StdEncoding.EncodeToString(generateTestCertificatePEM(t))
+	normalized, err := normalizeConfig(Config{
+		Topology: Topology{Standalone: &StandaloneTopology{Address: "127.0.0.1:6379"}},
+		TLS:      &TLSConfig{CACertBase64: validCert},
+		Auth: Auth{GCPIAM: &GCPIAMAuth{
+			CredentialsBase64:       base64.StdEncoding.EncodeToString([]byte("{}")),
+			ServiceAccount:          "svc@project.iam.gserviceaccount.com",
+			RefreshEvery:            time.Millisecond,
+			RefreshCheckInterval:    time.Millisecond,
+			RefreshOperationTimeout: time.Second,
+		}},
+		Logger: &log.NopLogger{},
+	})
+	require.NoError(t, err)
+
+	reconnectErr := errors.New("simulated reconnect failure")
+	var reconnectShouldFail atomic.Bool
+	reconnectShouldFail.Store(true)
+
+	var reconnectCalls atomic.Int32
+	var tokenAtReconnect atomic.Value
+
+	client := &Client{
+		cfg:       normalized,
+		logger:    normalized.Logger,
+		connected: true,
+		token:     "original-working-token",
+		tokenRetriever: func(context.Context) (string, error) {
+			return "new-refreshed-token", nil
 		},
-		{
-			name: "cluster mode",
-			redisConn: &RedisConnection{
-				Mode:    ModeCluster,
-				Address: []string{mr.Addr()},
-				Logger:  logger,
-			},
+		reconnectFn: func(ctx context.Context) error {
+			reconnectCalls.Add(1)
+
+			// Capture the token at the time of reconnect attempt for verification.
+			tokenAtReconnect.Store("called")
+
+			if reconnectShouldFail.Load() {
+				return reconnectErr
+			}
+
+			return nil
 		},
 	}
 
-	ctx := context.Background()
+	client.mu.Lock()
+	client.lastRefresh = time.Now().Add(-time.Hour)
+	client.startRefreshLoopLocked()
+	client.mu.Unlock()
 
-	for _, mode := range modes {
-		t.Run(mode.name, func(t *testing.T) {
-			if mode.skip {
-				t.Skip(mode.skipReason)
-			}
+	// Wait for at least one failed reconnect attempt.
+	require.Eventually(t, func() bool {
+		return reconnectCalls.Load() >= 1
+	}, 500*time.Millisecond, 5*time.Millisecond)
 
-			// Connect to Redis
-			err := mode.redisConn.Connect(ctx)
-			assert.NoError(t, err)
+	// Verify: the refresh error is recorded.
+	require.Eventually(t, func() bool {
+		return client.LastRefreshError() != nil
+	}, 500*time.Millisecond, 5*time.Millisecond)
+	assert.ErrorIs(t, client.LastRefreshError(), reconnectErr)
 
-			// Get client
-			client, err := mode.redisConn.GetClient(ctx)
-			assert.NoError(t, err)
+	// Verify: the token is rolled back to the original after failed reconnect.
+	client.mu.RLock()
+	currentToken := client.token
+	client.mu.RUnlock()
+	assert.Equal(t, "original-working-token", currentToken,
+		"token must be rolled back to original after failed reconnect")
 
-			// Test basic operations
-			key := "test_key_" + string(mode.redisConn.Mode)
-			value := "test_value_" + string(mode.redisConn.Mode)
+	// Now allow reconnect to succeed.
+	reconnectShouldFail.Store(false)
 
-			// Test with TTL
-			err = client.Set(ctx, key, value, time.Duration(TTL)*time.Second).Err()
-			assert.NoError(t, err)
+	// Wait for recovery.
+	require.Eventually(t, func() bool {
+		return client.LastRefreshError() == nil
+	}, 500*time.Millisecond, 5*time.Millisecond)
 
-			result, err := client.Get(ctx, key).Result()
-			assert.NoError(t, err)
-			assert.Equal(t, value, result)
+	// After successful reconnect, the new token should be in place.
+	client.mu.RLock()
+	recoveredToken := client.token
+	client.mu.RUnlock()
+	assert.Equal(t, "new-refreshed-token", recoveredToken,
+		"token must be updated after successful reconnect")
 
-			// Test Close method
-			if mode.redisConn != nil {
-				err = mode.redisConn.Close()
-				assert.NoError(t, err)
-			}
-		})
-	}
+	require.NoError(t, client.Close())
 }
 
-func TestRedisWithTLSConfig(t *testing.T) {
-	// This test is more of a unit test to ensure TLS configuration is properly set up
-	// Actual TLS connections can't be tested with miniredis
+func TestClient_ReconnectSuccess_SwapsClient(t *testing.T) {
+	mr := miniredis.RunT(t)
 
-	// Create logger
-	logger := &log.GoLogger{Level: log.InfoLevel}
+	client, err := New(context.Background(), newStandaloneConfig(mr.Addr()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
 
-	// Create Redis connection with TLS
-	redisConn := &RedisConnection{
-		Mode:    ModeStandalone,
-		Address: []string{"localhost:6379"},
-		UseTLS:  true,
-		Logger:  logger,
-	}
+	// Grab reference to the original underlying client.
+	rdb1, err := client.GetClient(context.Background())
+	require.NoError(t, err)
 
-	// Verify that TLS would be used in all modes
-	modes := []struct {
-		name string
-		mode Mode
-	}{
-		{"standalone", ModeStandalone},
-		{"sentinel", ModeSentinel},
-		{"cluster", ModeCluster},
-	}
+	// Successful reconnect should swap the client.
+	client.mu.Lock()
+	err = client.reconnectLocked(context.Background())
+	client.mu.Unlock()
+	require.NoError(t, err)
 
-	for _, modeTest := range modes {
-		t.Run("tls_config_"+modeTest.name, func(t *testing.T) {
-			redisConn.Mode = modeTest.mode
+	rdb2, err := client.GetClient(context.Background())
+	require.NoError(t, err)
 
-			// We don't actually connect, just verify the TLS config would be used
-			assert.True(t, redisConn.UseTLS)
-		})
-	}
+	// The client reference must have changed.
+	assert.NotSame(t, rdb1, rdb2, "successful reconnect must swap to new client")
+
+	// Old client must be closed.
+	_, err = rdb1.Ping(context.Background()).Result()
+	assert.Error(t, err, "old client must be closed after successful reconnect")
+
+	// New client must work.
+	require.NoError(t, rdb2.Set(context.Background(), "swap:key", "works", 0).Err())
+	val, err := rdb2.Get(context.Background(), "swap:key").Result()
+	require.NoError(t, err)
+	assert.Equal(t, "works", val)
+
+	connected, err := client.IsConnected()
+	require.NoError(t, err)
+	assert.True(t, connected)
 }
 
-func TestRedisConnection_ConcurrentAccess(t *testing.T) {
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("Failed to start miniredis: %v", err)
+func generateTestCertificatePEM(t *testing.T) []byte {
+	t.Helper()
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "redis-test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
 	}
-	defer mr.Close()
 
-	logger := &log.GoLogger{Level: log.InfoLevel}
+	derBytes, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &privateKey.PublicKey, privateKey)
+	require.NoError(t, err)
 
-	t.Run("concurrent GetClient calls return same instance", func(t *testing.T) {
-		rc := &RedisConnection{
-			Mode:    ModeStandalone,
-			Address: []string{mr.Addr()},
-			Logger:  logger,
-		}
-
-		const goroutines = 100
-		var wg sync.WaitGroup
-		wg.Add(goroutines)
-
-		errs := make(chan error, goroutines)
-		clients := make(chan interface{}, goroutines)
-
-		for i := 0; i < goroutines; i++ {
-			go func() {
-				defer wg.Done()
-				client, err := rc.GetClient(context.Background())
-				if err != nil {
-					errs <- err
-					return
-				}
-				if client == nil {
-					errs <- errors.New("client is nil")
-					return
-				}
-				clients <- client
-			}()
-		}
-
-		wg.Wait()
-		close(errs)
-		close(clients)
-
-		for err := range errs {
-			t.Errorf("concurrent GetClient error: %v", err)
-		}
-
-		assert.True(t, rc.Connected)
-		assert.NotNil(t, rc.Client)
-
-		var firstClient interface{}
-		for client := range clients {
-			if firstClient == nil {
-				firstClient = client
-			} else {
-				assert.Same(t, firstClient, client, "all goroutines should get same client instance")
-			}
-		}
-	})
-
-	t.Run("concurrent Connect calls", func(t *testing.T) {
-		rc := &RedisConnection{
-			Mode:    ModeStandalone,
-			Address: []string{mr.Addr()},
-			Logger:  logger,
-		}
-
-		const goroutines = 100
-		var wg sync.WaitGroup
-		wg.Add(goroutines)
-
-		errs := make(chan error, goroutines)
-
-		for i := 0; i < goroutines; i++ {
-			go func() {
-				defer wg.Done()
-				if err := rc.Connect(context.Background()); err != nil {
-					errs <- err
-				}
-			}()
-		}
-
-		wg.Wait()
-		close(errs)
-
-		for err := range errs {
-			t.Errorf("concurrent Connect error: %v", err)
-		}
-
-		assert.True(t, rc.Connected)
-		assert.NotNil(t, rc.Client)
-	})
-
-	t.Run("concurrent GetClient with connection failure", func(t *testing.T) {
-		rc := &RedisConnection{
-			Mode:        ModeStandalone,
-			Address:     []string{"127.0.0.1:1"},
-			Logger:      logger,
-			DialTimeout: 100 * time.Millisecond,
-		}
-
-		const goroutines = 10
-		var wg sync.WaitGroup
-		wg.Add(goroutines)
-
-		var errCount int
-		var mu sync.Mutex
-
-		for i := 0; i < goroutines; i++ {
-			go func() {
-				defer wg.Done()
-				_, err := rc.GetClient(context.Background())
-				if err != nil {
-					mu.Lock()
-					errCount++
-					mu.Unlock()
-				}
-			}()
-		}
-
-		wg.Wait()
-
-		assert.Equal(t, goroutines, errCount, "all goroutines should receive an error")
-		assert.False(t, rc.Connected)
-		assert.Nil(t, rc.Client)
-	})
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
 }

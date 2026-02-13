@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	libCommons "github.com/LerianStudio/lib-uncommons/uncommons"
+	"github.com/LerianStudio/lib-uncommons/uncommons/log"
 	"github.com/LerianStudio/lib-uncommons/uncommons/opentelemetry"
 	"github.com/go-redsync/redsync/v4"
 	"github.com/go-redsync/redsync/v4/redis/goredis/v9"
@@ -28,12 +30,12 @@ import (
 //
 // Example usage:
 //
-//	lock, err := redis.NewDistributedLock(redisConnection)
+//	lock, err := redis.NewDistributedLock(redisClient)
 //	if err != nil {
 //	    return err
 //	}
 //
-//	err = lock.WithLock(ctx, "lock:user:123", func() error {
+//	err = lock.WithLock(ctx, "lock:user:123", func(ctx context.Context) error {
 //	    // Critical section - only one instance will execute this at a time
 //	    return updateUser(123)
 //	})
@@ -96,11 +98,15 @@ func RateLimiterLockOptions() LockOptions {
 //
 // Example:
 //
-//	lock, err := redis.NewDistributedLock(redisConnection)
+//	lock, err := redis.NewDistributedLock(redisClient)
 //	if err != nil {
 //	    return fmt.Errorf("failed to initialize lock: %w", err)
 //	}
-func NewDistributedLock(conn *RedisConnection) (*DistributedLock, error) {
+func NewDistributedLock(conn *Client) (*DistributedLock, error) {
+	if conn == nil {
+		return nil, errors.New("redis client is nil")
+	}
+
 	ctx := context.Background()
 
 	client, err := conn.GetClient(ctx)
@@ -129,10 +135,14 @@ func NewDistributedLock(conn *RedisConnection) (*DistributedLock, error) {
 //
 // Example:
 //
-//	err := lock.WithLock(ctx, "lock:user:password:123", func() error {
+//	err := lock.WithLock(ctx, "lock:user:password:123", func(ctx context.Context) error {
 //	    return updatePassword(123, newPassword)
 //	})
-func (dl *DistributedLock) WithLock(ctx context.Context, lockKey string, fn func() error) error {
+func (dl *DistributedLock) WithLock(ctx context.Context, lockKey string, fn func(context.Context) error) error {
+	if dl == nil {
+		return errors.New("distributed lock is nil")
+	}
+
 	return dl.WithLockOptions(ctx, lockKey, DefaultLockOptions(), fn)
 }
 
@@ -146,11 +156,32 @@ func (dl *DistributedLock) WithLock(ctx context.Context, lockKey string, fn func
 //	    Tries:      5,                 // More aggressive retries
 //	    RetryDelay: 1 * time.Second,
 //	}
-//	err := lock.WithLockOptions(ctx, "lock:report:generation", opts, func() error {
+//	err := lock.WithLockOptions(ctx, "lock:report:generation", opts, func(ctx context.Context) error {
 //	    return generateReport()
 //	})
-func (dl *DistributedLock) WithLockOptions(ctx context.Context, lockKey string, opts LockOptions, fn func() error) error {
+func (dl *DistributedLock) WithLockOptions(ctx context.Context, lockKey string, opts LockOptions, fn func(context.Context) error) error {
+	if dl == nil {
+		return errors.New("distributed lock is nil")
+	}
+
+	if dl.redsync == nil {
+		return errors.New("distributed lock is not initialized")
+	}
+
+	if fn == nil {
+		return errors.New("fn is nil")
+	}
+
+	if strings.TrimSpace(lockKey) == "" {
+		return errors.New("lock key cannot be empty")
+	}
+
+	if err := validateLockOptions(opts); err != nil {
+		return err
+	}
+
 	logger, tracer, _, _ := libCommons.NewTrackingFromContext(ctx)
+	safeLockKey := safeLockKeyForLogs(lockKey)
 
 	ctx, span := tracer.Start(ctx, "distributed_lock.with_lock")
 	defer span.End()
@@ -164,38 +195,38 @@ func (dl *DistributedLock) WithLockOptions(ctx context.Context, lockKey string, 
 		redsync.WithDriftFactor(opts.DriftFactor),
 	)
 
-	logger.Debugf("Attempting to acquire lock: %s", lockKey)
+	logger.Log(ctx, log.LevelDebug, "attempting to acquire lock", log.String("lock_key", safeLockKey))
 
 	// Try to acquire the lock
 	if err := mutex.LockContext(ctx); err != nil {
-		logger.Errorf("Failed to acquire lock %s: %v", lockKey, err)
-		opentelemetry.HandleSpanError(&span, "Failed to acquire lock", err)
+		logger.Log(ctx, log.LevelError, "failed to acquire lock", log.String("lock_key", safeLockKey), log.Err(err))
+		opentelemetry.HandleSpanError(span, "Failed to acquire lock", err)
 
-		return fmt.Errorf("failed to acquire lock %s: %w", lockKey, err)
+		return fmt.Errorf("failed to acquire lock %s: %w", safeLockKey, err)
 	}
 
-	logger.Debugf("Lock acquired: %s", lockKey)
+	logger.Log(ctx, log.LevelDebug, "lock acquired", log.String("lock_key", safeLockKey))
 
 	// Ensure lock is released even if function panics
 	defer func() {
 		if ok, err := mutex.UnlockContext(ctx); !ok || err != nil {
-			logger.Errorf("Failed to release lock %s: ok=%v err=%v", lockKey, ok, err)
+			logger.Log(ctx, log.LevelError, "failed to release lock", log.String("lock_key", safeLockKey), log.Bool("unlock_ok", ok), log.Err(err))
 		} else {
-			logger.Debugf("Lock released: %s", lockKey)
+			logger.Log(ctx, log.LevelDebug, "lock released", log.String("lock_key", safeLockKey))
 		}
 	}()
 
 	// Execute the function while holding the lock
-	logger.Debugf("Executing function under lock: %s", lockKey)
+	logger.Log(ctx, log.LevelDebug, "executing function under lock", log.String("lock_key", safeLockKey))
 
-	if err := fn(); err != nil {
-		logger.Errorf("Function execution failed under lock %s: %v", lockKey, err)
-		opentelemetry.HandleSpanError(&span, "Function execution failed", err)
+	if err := fn(ctx); err != nil {
+		logger.Log(ctx, log.LevelError, "function execution failed under lock", log.String("lock_key", safeLockKey), log.Err(err))
+		opentelemetry.HandleSpanError(span, "Function execution failed", err)
 
 		return err
 	}
 
-	logger.Debugf("Function completed successfully under lock: %s", lockKey)
+	logger.Log(ctx, log.LevelDebug, "function completed successfully under lock", log.String("lock_key", safeLockKey))
 
 	return nil
 }
@@ -218,14 +249,29 @@ func (dl *DistributedLock) WithLockOptions(ctx context.Context, lockKey string, 
 //	defer lock.Unlock(ctx, mutex)
 //	// Perform cache refresh...
 func (dl *DistributedLock) TryLock(ctx context.Context, lockKey string) (*redsync.Mutex, bool, error) {
+	if dl == nil {
+		return nil, false, errors.New("distributed lock is nil")
+	}
+
+	if dl.redsync == nil {
+		return nil, false, errors.New("distributed lock is not initialized")
+	}
+
+	if strings.TrimSpace(lockKey) == "" {
+		return nil, false, errors.New("lock key cannot be empty")
+	}
+
 	logger, tracer, _, _ := libCommons.NewTrackingFromContext(ctx)
+	safeLockKey := safeLockKeyForLogs(lockKey)
 
 	ctx, span := tracer.Start(ctx, "distributed_lock.try_lock")
 	defer span.End()
 
+	defaultOpts := DefaultLockOptions()
+
 	mutex := dl.redsync.NewMutex(
 		lockKey,
-		redsync.WithExpiry(10*time.Second),
+		redsync.WithExpiry(defaultOpts.Expiry),
 		redsync.WithTries(1), // Only try once
 	)
 
@@ -240,19 +286,19 @@ func (dl *DistributedLock) TryLock(ctx context.Context, lockKey string) (*redsyn
 			strings.Contains(errMsg, "failed to acquire lock")
 
 		if isLockContention {
-			logger.Debugf("Could not acquire lock %s as it is already held by another process", lockKey)
+			logger.Log(ctx, log.LevelDebug, "lock already held by another process", log.String("lock_key", safeLockKey))
 			return nil, false, nil
 		}
 
 		// Any other error (e.g., network, context cancellation) is an actual failure
 		// and should be propagated to the caller.
-		logger.Debugf("Could not acquire lock %s: %v", lockKey, err)
-		opentelemetry.HandleSpanError(&span, "Failed to attempt lock acquisition", err)
+		logger.Log(ctx, log.LevelDebug, "could not acquire lock", log.String("lock_key", safeLockKey), log.Err(err))
+		opentelemetry.HandleSpanError(span, "Failed to attempt lock acquisition", err)
 
-		return nil, false, fmt.Errorf("failed to attempt lock acquisition for %s: %w", lockKey, err)
+		return nil, false, fmt.Errorf("failed to attempt lock acquisition for %s: %w", safeLockKey, err)
 	}
 
-	logger.Debugf("Lock acquired: %s", lockKey)
+	logger.Log(ctx, log.LevelDebug, "lock acquired", log.String("lock_key", safeLockKey))
 
 	return mutex, true, nil
 }
@@ -260,6 +306,10 @@ func (dl *DistributedLock) TryLock(ctx context.Context, lockKey string) (*redsyn
 // Unlock releases a previously acquired lock.
 // This is only needed if you use TryLock(). WithLock() handles unlocking automatically.
 func (dl *DistributedLock) Unlock(ctx context.Context, mutex *redsync.Mutex) error {
+	if dl == nil {
+		return errors.New("distributed lock is nil")
+	}
+
 	logger := libCommons.NewLoggerFromContext(ctx)
 
 	if mutex == nil {
@@ -268,14 +318,45 @@ func (dl *DistributedLock) Unlock(ctx context.Context, mutex *redsync.Mutex) err
 
 	ok, err := mutex.UnlockContext(ctx)
 	if err != nil {
-		logger.Errorf("Failed to unlock mutex: %v", err)
+		logger.Log(ctx, log.LevelError, "failed to unlock mutex", log.Err(err))
 		return err
 	}
 
 	if !ok {
-		logger.Warnf("Mutex was not locked or already expired")
+		logger.Log(ctx, log.LevelWarn, "mutex was not locked or already expired")
 		return errors.New("mutex was not locked")
 	}
 
 	return nil
+}
+
+func validateLockOptions(opts LockOptions) error {
+	if opts.Expiry <= 0 {
+		return errors.New("lock expiry must be greater than 0")
+	}
+
+	if opts.Tries < 1 {
+		return errors.New("lock tries must be at least 1")
+	}
+
+	if opts.RetryDelay < 0 {
+		return errors.New("lock retry delay cannot be negative")
+	}
+
+	if opts.DriftFactor < 0 || opts.DriftFactor >= 1 {
+		return errors.New("lock drift factor must be between 0 (inclusive) and 1 (exclusive)")
+	}
+
+	return nil
+}
+
+func safeLockKeyForLogs(lockKey string) string {
+	const maxLockKeyLogLength = 128
+
+	safeLockKey := strconv.QuoteToASCII(lockKey)
+	if len(safeLockKey) <= maxLockKeyLogLength {
+		return safeLockKey
+	}
+
+	return safeLockKey[:maxLockKeyLogLength] + "...(truncated)"
 }

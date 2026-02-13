@@ -13,22 +13,22 @@ import (
 //
 //	type MockDistributedLock struct{}
 //
-//	func (m *MockDistributedLock) WithLock(ctx context.Context, lockKey string, fn func() error) error {
+//	func (m *MockDistributedLock) WithLock(ctx context.Context, lockKey string, fn func(context.Context) error) error {
 //	    // In tests, just execute the function without actual locking
-//	    return fn()
+//	    return fn(ctx)
 //	}
 //
-//	func (m *MockDistributedLock) WithLockOptions(ctx context.Context, lockKey string, opts LockOptions, fn func() error) error {
-//	    return fn()
+//	func (m *MockDistributedLock) WithLockOptions(ctx context.Context, lockKey string, opts LockOptions, fn func(context.Context) error) error {
+//	    return fn(ctx)
 //	}
 type DistributedLocker interface {
 	// WithLock executes a function while holding a distributed lock with default options.
 	// The lock is automatically released when the function returns.
-	WithLock(ctx context.Context, lockKey string, fn func() error) error
+	WithLock(ctx context.Context, lockKey string, fn func(context.Context) error) error
 
 	// WithLockOptions executes a function while holding a distributed lock with custom options.
 	// Use this for fine-grained control over lock behavior.
-	WithLockOptions(ctx context.Context, lockKey string, opts LockOptions, fn func() error) error
+	WithLockOptions(ctx context.Context, lockKey string, opts LockOptions, fn func(context.Context) error) error
 
 	// TryLock attempts to acquire a lock without retrying.
 	// Returns the mutex and true if lock was acquired, nil and false otherwise.
