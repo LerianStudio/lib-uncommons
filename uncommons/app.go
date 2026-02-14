@@ -130,7 +130,7 @@ func (l *Launcher) RunWithError() error {
 
 	// Surface any errors collected during option application.
 	if len(l.configErrors) > 0 {
-		return fmt.Errorf("%w: %v", ErrConfigFailed, errors.Join(l.configErrors...))
+		return errors.Join(append([]error{ErrConfigFailed}, l.configErrors...)...)
 	}
 
 	count := len(l.apps)
