@@ -18,50 +18,57 @@ go get github.com/LerianStudio/lib-uncommons/v2
 
 ### Core (`uncommons`)
 
-- `app.go`: launcher and app lifecycle helpers
-- `context.go`: safe timeout helpers and request-scoped logger/tracer/metrics/header-id tracking (deprecated context helpers `NewTracerFromContext`, `NewMetricFactoryFromContext`, `NewHeaderIDFromContext`, and `WithTimeout` are now removed)
-- `errors.go`: standardized business error mapping
-- `utils.go`, `stringUtils.go`, `time.go`, `os.go`: utility set used across Lerian services
-- `uncommons/constants`: shared constants for datasources, errors, headers, metadata, pagination, transactions, etc.
+- `app.go`: `Launcher` for concurrent app lifecycle management with `NewLauncher(opts...)` and `RunApp` options
+- `context.go`: request-scoped logger/tracer/metrics/header-id tracking via `ContextWith*` helpers, safe timeout with `WithTimeoutSafe`, span attribute propagation
+- `errors.go`: standardized business error mapping with `ValidateBusinessError`
+- `utils.go`: UUID generation (`GenerateUUIDv7` returns error), struct-to-JSON, map merging, CPU/memory metrics, internal service detection
+- `stringUtils.go`: accent removal, case conversion, UUID placeholder replacement, SHA-256 hashing, server address validation
+- `time.go`: date/time validation, range checking, parsing with end-of-day support
+- `os.go`: environment variable helpers (`GetenvOrDefault`, `GetenvBoolOrDefault`, `GetenvIntOrDefault`), struct population from env tags via `SetConfigFromEnvVars`
+- `uncommons/constants`: shared constants for datasource status, errors, headers, metadata, pagination, transactions, OTEL attributes, obfuscation values, and `SanitizeMetricLabel` utility
 
 ### Observability and logging
 
-- `uncommons/opentelemetry`: telemetry bootstrap (`NewTelemetry`), propagation, span helpers, redaction
-- `uncommons/opentelemetry/metrics`: fluent metrics factory with explicit error returns
-- `uncommons/log`: v2 logging interface (`Logger` with `Log`/`With`/`WithGroup`/`Enabled`/`Sync`), typed `Field` constructors, log-injection prevention
-- `uncommons/zap`: zap adapter for `uncommons/log` with OTEL bridge support and explicit `Config`-based construction with `New()`
+- `uncommons/opentelemetry`: telemetry bootstrap (`NewTelemetry`), propagation (HTTP/gRPC/queue), span helpers, redaction (`Redactor` with `RedactionRule` patterns), struct-to-attribute conversion
+- `uncommons/opentelemetry/metrics`: fluent metrics factory (`NewMetricsFactory`, `NewNopFactory`) with Counter/Gauge/Histogram builders, explicit error returns, convenience recorders for accounts/transactions
+- `uncommons/log`: v2 logging interface (`Logger` with `Log`/`With`/`WithGroup`/`Enabled`/`Sync`), typed `Field` constructors (`String`, `Int`, `Bool`, `Err`, `Any`), `GoLogger` with CWE-117 log-injection prevention, sanitizer (`SafeError`, `SanitizeExternalResponse`)
+- `uncommons/zap`: zap adapter for `uncommons/log` with OTEL bridge, `Config`-based construction via `New()`, direct zap convenience methods (`Debug`/`Info`/`Warn`/`Error`), underlying access via `Raw()` and `Level()`
 
 ### Data and messaging connectors
 
-- `uncommons/postgres`: explicit `Config` constructor + `Migrator` with thread-safe connection manager
-- `uncommons/mongo`: `Config`-based client with functional options, URI builder, and index helpers
-- `uncommons/redis`: topology-based `Config` (standalone/sentinel/cluster) + IAM auth and distributed locking (Redsync)
-- `uncommons/rabbitmq`: connection/channel/health helpers for AMQP with context-aware methods
+- `uncommons/postgres`: `Config`-based constructor (`New`), `Resolver(ctx)` for dbresolver access, `Primary()` for raw `*sql.DB`, `NewMigrator` for schema migrations, backoff-based lazy-connect
+- `uncommons/mongo`: `Config`-based client with functional options (`NewClient`), URI builder (`BuildURI`), `Client(ctx)`/`ResolveClient(ctx)` for access, `EnsureIndexes` (variadic), TLS support, credential clearing
+- `uncommons/redis`: topology-based `Config` (standalone/sentinel/cluster), GCP IAM auth with token refresh, distributed locking via `LockManager` interface (`NewRedisLockManager`, `LockHandle`), `SetPackageLogger` for diagnostics
+- `uncommons/rabbitmq`: connection/channel/health helpers for AMQP with `*Context()` variants, `HealthCheck() (bool, error)`, `Close()`/`CloseContext()`
 
 ### HTTP and server utilities
 
-- `uncommons/net/http`: Fiber HTTP helpers (response/error/context parsing/SSRF-protected reverse proxy/middleware)
-- `uncommons/net/http/ratelimit`: Redis-backed rate limit storage utilities
-- `uncommons/server`: `ServerManager`-based graceful shutdown and lifecycle helpers
+- `uncommons/net/http`: Fiber HTTP helpers -- response (`Respond`/`RespondStatus`/`RespondError`/`RenderError`), health (`Ping`/`HealthWithDependencies`), SSRF-protected reverse proxy (`ServeReverseProxy` with `ReverseProxyPolicy`), pagination (offset/opaque cursor/timestamp cursor/sort cursor), validation (`ParseBodyAndValidate`/`ValidateStruct`/`ValidateSortDirection`/`ValidateLimit`), context/ownership (`ParseAndVerifyTenantScopedID`/`ParseAndVerifyResourceScopedID`), middleware (`WithHTTPLogging`/`WithGrpcLogging`/`WithCORS`/`WithBasicAuth`/`NewTelemetryMiddleware`), `FiberErrorHandler`
+- `uncommons/net/http/ratelimit`: Redis-backed rate limit storage (`NewRedisStorage`) with `WithRedisStorageLogger` option
+- `uncommons/server`: `ServerManager`-based graceful shutdown with `WithHTTPServer`/`WithGRPCServer`/`WithShutdownChannel`/`WithShutdownTimeout`/`WithShutdownHook`, `StartWithGracefulShutdown()`/`StartWithGracefulShutdownWithError()`, `ServersStarted()` for test coordination
 
 ### Resilience and safety
 
-- `uncommons/circuitbreaker`: service-level circuit breaker manager and health checker with error-returning constructors
-- `uncommons/backoff`: exponential backoff with jitter and context-aware sleep
-- `uncommons/errgroup`: error-group concurrency helpers with panic recovery
-- `uncommons/runtime`: panic recovery, panic metrics, safe goroutine wrappers
-- `uncommons/assert`: production-safe assertion primitives with telemetry integration
-- `uncommons/safe`: panic-safe wrappers (math/regex/slice operations)
-- `uncommons/security`: sensitive field handling and obfuscation helpers
+- `uncommons/circuitbreaker`: `Manager` interface with error-returning constructors (`NewManager`), config validation, preset configs (`DefaultConfig`/`AggressiveConfig`/`ConservativeConfig`/`HTTPServiceConfig`/`DatabaseConfig`), health checker (`NewHealthCheckerWithValidation`), metrics via `WithMetricsFactory`
+- `uncommons/backoff`: exponential backoff with jitter (`ExponentialWithJitter`) and context-aware sleep (`WaitContext`)
+- `uncommons/errgroup`: error-group concurrency with panic recovery (`WithContext`, `Go`, `Wait`), configurable logger via `SetLogger`
+- `uncommons/runtime`: panic recovery (`RecoverAndLog`/`RecoverAndCrash`/`RecoverWithPolicy` with `*WithContext` variants), safe goroutines (`SafeGo`/`SafeGoWithContext`/`SafeGoWithContextAndComponent`), panic metrics (`InitPanicMetrics`), span recording (`RecordPanicToSpan`), error reporter (`SetErrorReporter`/`GetErrorReporter`), production mode (`SetProductionMode`/`IsProductionMode`)
+- `uncommons/assert`: production-safe assertions (`New` + `That`/`NotNil`/`NotEmpty`/`NoError`/`Never`/`Halt`), assertion metrics (`InitAssertionMetrics`), domain predicates (`Positive`/`ValidUUID`/`ValidAmount`/`DebitsEqualCredits`/`TransactionCanTransitionTo`/`BalanceSufficientForRelease` and more)
+- `uncommons/safe`: panic-safe math (`Divide`/`DivideRound`/`Percentage` on `decimal.Decimal`, `DivideFloat64`), regex with caching (`Compile`/`MatchString`/`FindString`), slices (`First`/`Last`/`At` with `*OrDefault` variants)
+- `uncommons/security`: sensitive field detection (`IsSensitiveField`), default field lists (`DefaultSensitiveFields`/`DefaultSensitiveFieldsMap`)
 
 ### Domain and support packages
 
-- `uncommons/transaction`: intent-based transaction planning, balance eligibility validation, and posting flow
-- `uncommons/crypto`: hashing and symmetric encryption helpers
-- `uncommons/jwt`: HS256/384/512 JWT signing and verification
-- `uncommons/license`: license validation and enforcement helpers
-- `uncommons/pointers`: pointer helper utilities
-- `uncommons/cron`: cron expression parser and scheduler
+- `uncommons/transaction`: intent-based transaction planning (`BuildIntentPlan`), balance eligibility validation (`ValidateBalanceEligibility`), posting flow (`ApplyPosting`), operation resolution (`ResolveOperation`), typed domain errors (`NewDomainError`)
+- `uncommons/crypto`: hashing (`GenerateHash`) and symmetric encryption (`InitializeCipher`/`Encrypt`/`Decrypt`) with credential-safe `fmt` output (`String()`/`GoString()` redact secrets)
+- `uncommons/jwt`: HS256/384/512 JWT signing (`Sign`), signature verification (`Parse`), combined signature + time-claim validation (`ParseAndValidate`), standalone time-claim validation (`ValidateTimeClaims`/`ValidateTimeClaimsAt`)
+- `uncommons/license`: license validation with functional options (`New(opts...)`, `WithLogger`), handler management (`SetHandler`), termination (`Terminate`/`TerminateWithError`/`TerminateSafe`)
+- `uncommons/pointers`: pointer conversion helpers (`String`, `Bool`, `Time`, `Int`, `Int64`, `Float64`)
+- `uncommons/cron`: cron expression parser (`Parse`) and scheduler (`Schedule.Next`)
+
+### Build and shell
+
+- `uncommons/shell/`: Makefile include helpers (`makefile_colors.mk`, `makefile_utils.mk`), shell scripts (`colors.sh`, `ascii.sh`), ASCII art (`logo.txt`)
 
 ## Minimal v2 usage
 
@@ -123,21 +130,51 @@ Additionally, `uncommons.SetConfigFromEnvVars` populates any struct using `env:"
 
 ## Development commands
 
-- `make test` - run all tests
-- `make test-unit` - run unit tests
-- `make test-integration` - run integration tests with testcontainers
-- `make test-all` - run all tests (unit + integration)
-- `make coverage-unit` - run unit tests with coverage report
-- `make coverage-integration` - run integration tests with coverage report
-- `make coverage` - run all coverage targets
-- `make lint` - run lint checks
-- `make lint-fix` - auto-fix lint issues
-- `make format` - format code
-- `make build` - build all packages
-- `make clean` - clean build artifacts
-- `make tidy` - clean dependencies
-- `make sec` - run security checks using gosec
-- `make tools` - install test tools (gotestsum)
+### Core
+
+- `make build` -- build all packages
+- `make clean` -- clean build artifacts and caches
+- `make tidy` -- clean dependencies (`go mod tidy`)
+- `make format` -- format code with gofmt
+- `make help` -- display all available commands
+
+### Testing
+
+- `make test` -- run unit tests (uses gotestsum if available)
+- `make test-unit` -- run unit tests excluding integration
+- `make test-integration` -- run integration tests with testcontainers (requires Docker)
+- `make test-all` -- run all tests (unit + integration)
+
+### Coverage
+
+- `make coverage-unit` -- unit tests with coverage report (respects `.ignorecoverunit`)
+- `make coverage-integration` -- integration tests with coverage
+- `make coverage` -- run all coverage targets
+
+### Code quality
+
+- `make lint` -- run lint checks (read-only)
+- `make lint-fix` -- auto-fix lint issues
+- `make sec` -- run security checks using gosec (`make sec SARIF=1` for SARIF output)
+- `make check-tests` -- verify test coverage for packages
+
+### Test flags
+
+- `LOW_RESOURCE=1` -- reduces parallelism and disables race detector for constrained machines
+- `RETRY_ON_FAIL=1` -- retries failed tests once
+- `RUN=<pattern>` -- filter integration tests by name pattern
+- `PKG=<path>` -- filter to specific package(s)
+
+### Git hooks
+
+- `make setup-git-hooks` -- install and configure git hooks
+- `make check-hooks` -- verify git hooks installation
+- `make check-envs` -- check hooks + environment file security
+
+### Tooling and release
+
+- `make tools` -- install test tools (gotestsum)
+- `make goreleaser` -- create release snapshot
 
 ## Project Rules
 
