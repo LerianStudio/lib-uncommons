@@ -14,9 +14,22 @@ import (
 	"time"
 
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/backoff"
+	constant "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	libOpentelemetry "github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry/metrics"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
+
+// connectionFailuresMetric defines the counter for rabbitmq connection failures.
+var connectionFailuresMetric = metrics.Metric{
+	Name:        "rabbitmq_connection_failures_total",
+	Unit:        "1",
+	Description: "Total number of rabbitmq connection failures",
+}
 
 // RabbitMQConnection is a hub which deal with rabbitmq connections.
 type RabbitMQConnection struct {
@@ -32,6 +45,7 @@ type RabbitMQConnection struct {
 	VHost                  string
 	Channel                *amqp.Channel
 	Logger                 log.Logger
+	MetricsFactory         *metrics.MetricsFactory
 	Connected              bool
 
 	dialer                  func(string) (*amqp.Connection, error)
@@ -50,9 +64,17 @@ type RabbitMQConnection struct {
 	// the health check HTTP client has TLS certificate verification disabled.
 	// Without this flag, applyDefaults returns ErrInsecureTLS.
 	AllowInsecureTLS bool
+
+	// Reconnect rate-limiting: prevents thundering-herd reconnect storms
+	// when the broker is down by enforcing exponential backoff between attempts.
+	lastReconnectAttempt time.Time
+	reconnectAttempts    int
 }
 
 const defaultRabbitMQHealthCheckTimeout = 5 * time.Second
+
+// reconnectBackoffCap is the maximum delay between reconnect attempts.
+const reconnectBackoffCap = 30 * time.Second
 
 // ErrInsecureTLS is returned when the health check HTTP client has TLS verification disabled
 // without explicitly acknowledging the risk via AllowInsecureTLS.
@@ -60,6 +82,17 @@ var ErrInsecureTLS = errors.New("rabbitmq health check HTTP client has TLS verif
 
 // ErrNilConnection is returned when a method is called on a nil RabbitMQConnection.
 var ErrNilConnection = errors.New("rabbitmq connection is nil")
+
+// nilConnectionAssert fires a telemetry assertion for nil-receiver calls and returns ErrNilConnection.
+// The logger is intentionally nil here because this function is called on a nil *RabbitMQConnection
+// receiver, so there is no struct instance from which to extract a logger. The assert package
+// handles nil loggers gracefully by falling back to stderr.
+func nilConnectionAssert(operation string) error {
+	asserter := assert.New(context.Background(), nil, "rabbitmq", operation)
+	_ = asserter.Never(context.Background(), "rabbitmq connection receiver is nil")
+
+	return ErrNilConnection
+}
 
 // Connect keeps a singleton connection with rabbitmq.
 func (rc *RabbitMQConnection) Connect() error {
@@ -69,10 +102,7 @@ func (rc *RabbitMQConnection) Connect() error {
 // ConnectContext keeps a singleton connection with rabbitmq.
 func (rc *RabbitMQConnection) ConnectContext(ctx context.Context) error {
 	if rc == nil {
-		asserter := assert.New(context.Background(), nil, "rabbitmq", "ConnectContext")
-		_ = asserter.Never(context.Background(), "rabbitmq connection receiver is nil")
-
-		return ErrNilConnection
+		return nilConnectionAssert("connect_context")
 	}
 
 	if ctx == nil {
@@ -80,15 +110,24 @@ func (rc *RabbitMQConnection) ConnectContext(ctx context.Context) error {
 	}
 
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("rabbitmq connect: %w", err)
 	}
+
+	tracer := otel.Tracer("rabbitmq")
+
+	ctx, span := tracer.Start(ctx, "rabbitmq.connect")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemRabbitMQ))
 
 	rc.mu.Lock()
 
 	if err := rc.applyDefaults(); err != nil {
 		rc.mu.Unlock()
 
-		return err
+		libOpentelemetry.HandleSpanError(span, "Failed to apply defaults", err)
+
+		return fmt.Errorf("rabbitmq connect: %w", err)
 	}
 
 	connStr := rc.ConnectionStringSource
@@ -103,20 +142,26 @@ func (rc *RabbitMQConnection) ConnectContext(ctx context.Context) error {
 	logger := rc.logger()
 	rc.mu.Unlock()
 
-	logger.Log(context.Background(), log.LevelInfo, "Connecting on rabbitmq...")
+	logger.Log(context.Background(), log.LevelInfo, "connecting to rabbitmq")
 
 	conn, err := dialer(ctx, connStr)
 	if err != nil {
-		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to connect to rabbitmq: %v", sanitizeAMQPErr(err, connStr)))
+		logger.Log(context.Background(), log.LevelError, "failed to connect to rabbitmq", log.String("error_detail", sanitizeAMQPErr(err, connStr)))
+		rc.recordConnectionFailure("connect")
 
-		return newSanitizedError(err, connStr, "failed to connect to rabbitmq")
+		sanitizedErr := newSanitizedError(err, connStr, "failed to connect to rabbitmq")
+		libOpentelemetry.HandleSpanError(span, "Failed to connect to rabbitmq", sanitizedErr)
+
+		return sanitizedErr
 	}
 
 	ch, err := channelFactory(ctx, conn)
 	if err != nil {
 		rc.closeConnectionWith(conn, connCloser)
 
-		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to open channel on rabbitmq: %v", err))
+		logger.Log(context.Background(), log.LevelError, "failed to open channel on rabbitmq", log.Err(err))
+
+		libOpentelemetry.HandleSpanError(span, "Failed to open channel on rabbitmq", err)
 
 		return fmt.Errorf("failed to open channel on rabbitmq: %w", err)
 	}
@@ -128,10 +173,12 @@ func (rc *RabbitMQConnection) ConnectContext(ctx context.Context) error {
 
 		logger.Log(context.Background(), log.LevelError, "rabbitmq health check failed")
 
+		libOpentelemetry.HandleSpanError(span, "RabbitMQ health check failed", err)
+
 		return fmt.Errorf("rabbitmq health check failed: %w", err)
 	}
 
-	logger.Log(context.Background(), log.LevelInfo, "Connected on rabbitmq")
+	logger.Log(context.Background(), log.LevelInfo, "connected to rabbitmq")
 
 	rc.mu.Lock()
 	if rc.Connection != nil && rc.Connection != conn && !connectionClosedFn(rc.Connection) {
@@ -155,13 +202,65 @@ func (rc *RabbitMQConnection) EnsureChannel() error {
 	return rc.EnsureChannelContext(context.Background())
 }
 
+// ensureChannelSnapshot captures state needed by EnsureChannelContext under the lock.
+type ensureChannelSnapshot struct {
+	connStr            string
+	logger             log.Logger
+	dialer             func(context.Context, string) (*amqp.Connection, error)
+	channelFactory     func(context.Context, *amqp.Connection) (*amqp.Channel, error)
+	connCloser         func(*amqp.Connection) error
+	connectionClosedFn func(*amqp.Connection) bool
+	needConnection     bool
+	needChannel        bool
+	existingConn       *amqp.Connection
+}
+
+// snapshotEnsureChannelState captures and returns a snapshot of state needed for channel
+// ensuring, applying defaults and rate-limiting under the lock. Returns an error if
+// defaults fail or the request is rate-limited.
+func (rc *RabbitMQConnection) snapshotEnsureChannelState() (ensureChannelSnapshot, error) {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+
+	if err := rc.applyDefaults(); err != nil {
+		return ensureChannelSnapshot{}, fmt.Errorf("rabbitmq ensure channel: %w", err)
+	}
+
+	connectionClosedFn := rc.connectionClosedFn
+	channelClosedFn := rc.channelClosedFn
+	needConnection := rc.Connection == nil || connectionClosedFn(rc.Connection)
+	needChannel := needConnection || rc.Channel == nil || channelClosedFn(rc.Channel)
+
+	// Rate-limit reconnect attempts: if we've failed recently, enforce a
+	// minimum delay before the next attempt to prevent reconnect storms.
+	if needConnection && rc.reconnectAttempts > 0 {
+		delay := backoff.ExponentialWithJitter(500*time.Millisecond, rc.reconnectAttempts)
+		if delay > reconnectBackoffCap {
+			delay = reconnectBackoffCap
+		}
+
+		if elapsed := time.Since(rc.lastReconnectAttempt); elapsed < delay {
+			return ensureChannelSnapshot{}, fmt.Errorf("rabbitmq ensure channel: rate-limited (next attempt in %s)", delay-elapsed)
+		}
+	}
+
+	return ensureChannelSnapshot{
+		connStr:            rc.ConnectionStringSource,
+		logger:             rc.logger(),
+		dialer:             rc.dialerContext,
+		channelFactory:     rc.channelFactoryContext,
+		connCloser:         rc.connectionCloser,
+		connectionClosedFn: connectionClosedFn,
+		needConnection:     needConnection,
+		needChannel:        needChannel,
+		existingConn:       rc.Connection,
+	}, nil
+}
+
 // EnsureChannelContext ensures that the channel is open and connected.
 func (rc *RabbitMQConnection) EnsureChannelContext(ctx context.Context) error {
 	if rc == nil {
-		asserter := assert.New(context.Background(), nil, "rabbitmq", "EnsureChannelContext")
-		_ = asserter.Never(context.Background(), "rabbitmq connection receiver is nil")
-
-		return ErrNilConnection
+		return nilConnectionAssert("ensure_channel_context")
 	}
 
 	if ctx == nil {
@@ -169,32 +268,23 @@ func (rc *RabbitMQConnection) EnsureChannelContext(ctx context.Context) error {
 	}
 
 	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("rabbitmq ensure channel: %w", err)
+	}
+
+	tracer := otel.Tracer("rabbitmq")
+
+	ctx, span := tracer.Start(ctx, "rabbitmq.ensure_channel")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemRabbitMQ))
+
+	snap, err := rc.snapshotEnsureChannelState()
+	if err != nil {
+		libOpentelemetry.HandleSpanError(span, "Failed to prepare ensure channel state", err)
 		return err
 	}
 
-	// Snapshot state under lock, then release before any I/O (same discipline as ConnectContext).
-	rc.mu.Lock()
-
-	if err := rc.applyDefaults(); err != nil {
-		rc.mu.Unlock()
-
-		return err
-	}
-
-	connStr := rc.ConnectionStringSource
-	logger := rc.logger()
-	dialer := rc.dialerContext
-	channelFactory := rc.channelFactoryContext
-	connCloser := rc.connectionCloser
-	connectionClosedFn := rc.connectionClosedFn
-	channelClosedFn := rc.channelClosedFn
-
-	needConnection := rc.Connection == nil || connectionClosedFn(rc.Connection)
-	needChannel := needConnection || rc.Channel == nil || channelClosedFn(rc.Channel)
-	existingConn := rc.Connection
-	rc.mu.Unlock()
-
-	if !needChannel {
+	if !snap.needChannel {
 		return nil
 	}
 
@@ -202,41 +292,52 @@ func (rc *RabbitMQConnection) EnsureChannelContext(ctx context.Context) error {
 
 	newConnection := false
 
-	if needConnection {
-		var err error
+	if snap.needConnection {
+		rc.mu.Lock()
+		rc.lastReconnectAttempt = time.Now()
+		rc.mu.Unlock()
 
-		conn, err = dialer(ctx, connStr)
+		conn, err = snap.dialer(ctx, snap.connStr)
 		if err != nil {
-			logger.Log(context.Background(), log.LevelError, fmt.Sprintf("can't connect to rabbitmq: %v", sanitizeAMQPErr(err, connStr)))
+			snap.logger.Log(context.Background(), log.LevelError, "failed to connect to rabbitmq", log.String("error_detail", sanitizeAMQPErr(err, snap.connStr)))
+			rc.recordConnectionFailure("ensure_channel_connect")
 
 			rc.mu.Lock()
 			rc.Connected = false
+			rc.reconnectAttempts++
 			rc.mu.Unlock()
 
-			return newSanitizedError(err, connStr, "can't connect to rabbitmq")
+			sanitizedErr := newSanitizedError(err, snap.connStr, "can't connect to rabbitmq")
+			libOpentelemetry.HandleSpanError(span, "Failed to connect to rabbitmq", sanitizedErr)
+
+			return sanitizedErr
 		}
 
 		newConnection = true
 	} else {
-		conn = existingConn
+		conn = snap.existingConn
 	}
 
-	ch, err := channelFactory(ctx, conn)
+	ch, err := snap.channelFactory(ctx, conn)
 	if err == nil && ch == nil {
 		err = errors.New("channel factory returned nil channel")
 	}
 
 	if err != nil {
-		rc.handleChannelFailure(conn, existingConn, newConnection, connCloser)
+		rc.handleChannelFailure(conn, snap.existingConn, newConnection, snap.connCloser)
+		rc.recordConnectionFailure("ensure_channel")
 
-		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("can't open channel on rabbitmq: %v", err))
+		snap.logger.Log(context.Background(), log.LevelError, "failed to open channel on rabbitmq", log.Err(err))
 
-		return err
+		libOpentelemetry.HandleSpanError(span, "Failed to open channel on rabbitmq", err)
+
+		return fmt.Errorf("rabbitmq ensure channel: %w", err)
 	}
 
 	rc.mu.Lock()
 	if newConnection {
 		rc.Connection = conn
+		rc.reconnectAttempts = 0
 	}
 
 	rc.Channel = ch
@@ -254,10 +355,7 @@ func (rc *RabbitMQConnection) GetNewConnect() (*amqp.Channel, error) {
 // GetNewConnectContext returns a pointer to the rabbitmq connection, initializing it if necessary.
 func (rc *RabbitMQConnection) GetNewConnectContext(ctx context.Context) (*amqp.Channel, error) {
 	if rc == nil {
-		asserter := assert.New(context.Background(), nil, "rabbitmq", "GetNewConnectContext")
-		_ = asserter.Never(context.Background(), "rabbitmq connection receiver is nil")
-
-		return nil, ErrNilConnection
+		return nil, nilConnectionAssert("get_new_connect_context")
 	}
 
 	if ctx == nil {
@@ -285,7 +383,7 @@ func (rc *RabbitMQConnection) GetNewConnectContext(ctx context.Context) (*amqp.C
 	rc.mu.Unlock()
 
 	if err := rc.EnsureChannelContext(ctx); err != nil {
-		rc.logger().Log(context.Background(), log.LevelError, fmt.Sprintf("failed to ensure channel: %v", err))
+		rc.logger().Log(context.Background(), log.LevelError, "failed to ensure channel", log.Err(err))
 
 		return nil, err
 	}
@@ -311,18 +409,26 @@ func (rc *RabbitMQConnection) HealthCheck() (bool, error) {
 // It captures config fields under lock to avoid reading them during concurrent mutation.
 func (rc *RabbitMQConnection) HealthCheckContext(ctx context.Context) (bool, error) {
 	if rc == nil {
-		asserter := assert.New(context.Background(), nil, "rabbitmq", "HealthCheckContext")
-		_ = asserter.Never(context.Background(), "rabbitmq connection receiver is nil")
-
-		return false, ErrNilConnection
+		return false, nilConnectionAssert("health_check_context")
 	}
 
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
+	tracer := otel.Tracer("rabbitmq")
+
+	ctx, span := tracer.Start(ctx, "rabbitmq.health_check")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemRabbitMQ))
+
 	rc.mu.Lock()
-	_ = rc.applyDefaults()
+
+	if err := rc.applyDefaults(); err != nil {
+		rc.logger().Log(context.Background(), log.LevelWarn, "rabbitmq apply defaults warning in health check", log.Err(err))
+	}
+
 	healthURL := rc.HealthCheckURL
 	user := rc.User
 	pass := rc.Pass
@@ -331,7 +437,10 @@ func (rc *RabbitMQConnection) HealthCheckContext(ctx context.Context) (bool, err
 	rc.mu.Unlock()
 
 	if !rc.healthCheck(ctx, healthURL, user, pass, client, logger) {
-		return false, errors.New("rabbitmq health check failed")
+		err := errors.New("rabbitmq health check failed")
+		libOpentelemetry.HandleSpanError(span, "RabbitMQ health check failed", err)
+
+		return false, err
 	}
 
 	return true, nil
@@ -345,21 +454,21 @@ func (rc *RabbitMQConnection) healthCheck(ctx context.Context, rawHealthURL, use
 	}
 
 	if err := ctx.Err(); err != nil {
-		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("context canceled while running rabbitmq health check: %v", err))
+		logger.Log(context.Background(), log.LevelError, "context canceled during rabbitmq health check", log.Err(err))
 
 		return false
 	}
 
 	healthURL, err := validateHealthCheckURL(rawHealthURL)
 	if err != nil {
-		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("invalid rabbitmq health check url: %v", err))
+		logger.Log(context.Background(), log.LevelError, "invalid rabbitmq health check URL", log.Err(err))
 
 		return false
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
 	if err != nil {
-		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to make GET request for rabbitmq health check: %v", err))
+		logger.Log(context.Background(), log.LevelError, "failed to create rabbitmq health check request", log.Err(err))
 
 		return false
 	}
@@ -372,21 +481,21 @@ func (rc *RabbitMQConnection) healthCheck(ctx context.Context, rawHealthURL, use
 
 	resp, err := client.Do(req)
 	if err != nil {
-		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to execute rabbitmq health check request: %v", err))
+		logger.Log(context.Background(), log.LevelError, "failed to execute rabbitmq health check request", log.Err(err))
 
 		return false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("rabbitmq health check failed with status %q", resp.Status))
+		logger.Log(context.Background(), log.LevelError, "rabbitmq health check failed", log.String("status", resp.Status))
 
 		return false
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to read rabbitmq health check response: %v", err))
+		logger.Log(context.Background(), log.LevelError, "failed to read rabbitmq health check response", log.Err(err))
 
 		return false
 	}
@@ -395,7 +504,7 @@ func (rc *RabbitMQConnection) healthCheck(ctx context.Context, rawHealthURL, use
 
 	err = json.Unmarshal(body, &result)
 	if err != nil {
-		logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to parse rabbitmq health check response: %v", err))
+		logger.Log(context.Background(), log.LevelError, "failed to parse rabbitmq health check response", log.Err(err))
 
 		return false
 	}
@@ -529,7 +638,7 @@ func (rc *RabbitMQConnection) closeConnectionWith(connection *amqp.Connection, c
 	}
 
 	if err := closer(connection); err != nil {
-		rc.logger().Log(context.Background(), log.LevelWarn, fmt.Sprintf("failed to close rabbitmq connection during cleanup: %v", err))
+		rc.logger().Log(context.Background(), log.LevelWarn, "failed to close rabbitmq connection during cleanup", log.Err(err))
 	}
 }
 
@@ -558,10 +667,7 @@ func (rc *RabbitMQConnection) Close() error {
 // CloseContext closes the rabbitmq channel and connection.
 func (rc *RabbitMQConnection) CloseContext(ctx context.Context) error {
 	if rc == nil {
-		asserter := assert.New(context.Background(), nil, "rabbitmq", "CloseContext")
-		_ = asserter.Never(context.Background(), "rabbitmq connection receiver is nil")
-
-		return ErrNilConnection
+		return nilConnectionAssert("close_context")
 	}
 
 	if ctx == nil {
@@ -569,8 +675,15 @@ func (rc *RabbitMQConnection) CloseContext(ctx context.Context) error {
 	}
 
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("rabbitmq close: %w", err)
 	}
+
+	tracer := otel.Tracer("rabbitmq")
+
+	ctx, span := tracer.Start(ctx, "rabbitmq.close")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemRabbitMQ))
 
 	rc.mu.Lock()
 	_ = rc.applyDefaults() // Close must not fail due to TLS config — resources still need cleanup.
@@ -589,7 +702,7 @@ func (rc *RabbitMQConnection) CloseContext(ctx context.Context) error {
 	if channel != nil {
 		if err := chCloser(ctx, channel); err != nil {
 			closeErr = fmt.Errorf("failed to close rabbitmq channel: %w", err)
-			logger.Log(context.Background(), log.LevelWarn, fmt.Sprintf("failed to close rabbitmq channel: %v", err))
+			logger.Log(context.Background(), log.LevelWarn, "failed to close rabbitmq channel", log.Err(err))
 		}
 	}
 
@@ -598,11 +711,15 @@ func (rc *RabbitMQConnection) CloseContext(ctx context.Context) error {
 			if closeErr == nil {
 				closeErr = fmt.Errorf("failed to close rabbitmq connection: %w", err)
 			} else {
-				closeErr = fmt.Errorf("%w; failed to close rabbitmq connection: %v", closeErr, err)
+				closeErr = errors.Join(closeErr, fmt.Errorf("failed to close rabbitmq connection: %w", err))
 			}
 
-			logger.Log(context.Background(), log.LevelWarn, fmt.Sprintf("failed to close rabbitmq connection: %v", err))
+			logger.Log(context.Background(), log.LevelWarn, "failed to close rabbitmq connection", log.Err(err))
 		}
+	}
+
+	if closeErr != nil {
+		libOpentelemetry.HandleSpanError(span, "Failed to close rabbitmq", closeErr)
 	}
 
 	return closeErr
@@ -715,6 +832,29 @@ func sanitizeAMQPErr(err error, connectionString string) string {
 	}
 
 	return errMsg
+}
+
+// recordConnectionFailure increments the rabbitmq connection failure counter.
+// No-op when MetricsFactory is nil.
+func (rc *RabbitMQConnection) recordConnectionFailure(operation string) {
+	if rc == nil || rc.MetricsFactory == nil {
+		return
+	}
+
+	counter, err := rc.MetricsFactory.Counter(connectionFailuresMetric)
+	if err != nil {
+		rc.logger().Log(context.Background(), log.LevelWarn, "failed to create rabbitmq metric counter", log.Err(err))
+		return
+	}
+
+	err = counter.
+		WithLabels(map[string]string{
+			"operation": constant.SanitizeMetricLabel(operation),
+		}).
+		AddOne(context.Background())
+	if err != nil {
+		rc.logger().Log(context.Background(), log.LevelWarn, "failed to record rabbitmq metric", log.Err(err))
+	}
 }
 
 // BuildRabbitMQConnectionString constructs an AMQP connection string.
