@@ -99,6 +99,28 @@ func bootstrap() error {
 }
 ```
 
+## Environment Variables
+
+The following environment variables are recognized by lib-uncommons:
+
+| Variable | Type | Default | Package | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `VERSION` | `string` | `"NO-VERSION"` | `uncommons` | Application version, printed at startup by `InitLocalEnvConfig` |
+| `ENV_NAME` | `string` | `"local"` | `uncommons` | Environment name; when `"local"`, a `.env` file is loaded automatically |
+| `ENV` | `string` | _(none)_ | `uncommons/assert` | When set to `"production"`, stack traces are omitted from assertion failures |
+| `GO_ENV` | `string` | _(none)_ | `uncommons/assert` | Fallback production check (same behavior as `ENV`) |
+| `LOG_LEVEL` | `string` | `"debug"` (dev/local) / `"info"` (other) | `uncommons/zap` | Log level override (`debug`, `info`, `warn`, `error`); `Config.Level` takes precedence if set |
+| `LOG_ENCODING` | `string` | `"console"` (dev/local) / `"json"` (other) | `uncommons/zap` | Log output format: `"json"` for structured JSON, `"console"` for human-readable colored output |
+| `LOG_OBFUSCATION_DISABLED` | `bool` | `false` | `uncommons/net/http` | Set to `"true"` to disable sensitive-field obfuscation in HTTP access logs (**not recommended in production**) |
+| `METRICS_COLLECTION_INTERVAL` | `duration` | `"5s"` | `uncommons/net/http` | Background system-metrics collection interval (Go duration format, e.g. `"10s"`, `"1m"`) |
+| `ACCESS_CONTROL_ALLOW_CREDENTIALS` | `bool` | `"false"` | `uncommons/net/http` | CORS `Access-Control-Allow-Credentials` header value |
+| `ACCESS_CONTROL_ALLOW_ORIGIN` | `string` | `"*"` | `uncommons/net/http` | CORS `Access-Control-Allow-Origin` header value |
+| `ACCESS_CONTROL_ALLOW_METHODS` | `string` | `"POST, GET, OPTIONS, PUT, DELETE, PATCH"` | `uncommons/net/http` | CORS `Access-Control-Allow-Methods` header value |
+| `ACCESS_CONTROL_ALLOW_HEADERS` | `string` | `"Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization"` | `uncommons/net/http` | CORS `Access-Control-Allow-Headers` header value |
+| `ACCESS_CONTROL_EXPOSE_HEADERS` | `string` | `""` | `uncommons/net/http` | CORS `Access-Control-Expose-Headers` header value |
+
+Additionally, `uncommons.SetConfigFromEnvVars` populates any struct using `env:"VAR_NAME"` field tags, supporting `string`, `bool`, and integer types. Consuming applications define their own variable names through these tags.
+
 ## Development commands
 
 - `make test` - run all tests
