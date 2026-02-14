@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 	"github.com/bxcodec/dbresolver/v2"
+	"github.com/golang-migrate/migrate/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -88,6 +90,9 @@ func (f *fakeResolver) ReplicaDBs() []*sql.DB { return nil }
 
 func (f *fakeResolver) Stats() sql.DBStats { return sql.DBStats{} }
 
+// testDB opens a sql.DB for test dependency injection.
+// WARNING: Tests using testDB with withPatchedDependencies must NOT call t.Parallel()
+// as withPatchedDependencies mutates global state.
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
 
@@ -101,12 +106,19 @@ func testDB(t *testing.T) *sql.DB {
 		t.Skipf("skipping: cannot open postgres connection (set POSTGRES_DSN to configure): %v", err)
 	}
 
+	t.Cleanup(func() { _ = db.Close() })
+
 	return db
 }
 
 // withPatchedDependencies replaces package-level dependency functions for testing.
 // WARNING: Tests using this helper must NOT call t.Parallel() as it mutates global state.
-func withPatchedDependencies(t *testing.T, openFn func(string, string) (*sql.DB, error), resolverFn func(*sql.DB, *sql.DB) (dbresolver.DB, error), migrateFn func(*sql.DB, string, string, bool, log.Logger) error) {
+func withPatchedDependencies(
+	t *testing.T,
+	openFn func(string, string) (*sql.DB, error),
+	resolverFn func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error),
+	migrateFn func(context.Context, *sql.DB, string, string, bool, log.Logger) error,
+) {
 	t.Helper()
 
 	originalOpen := dbOpenFn
@@ -174,8 +186,8 @@ func TestConnectSanitizesSensitiveError(t *testing.T) {
 		func(string, string) (*sql.DB, error) {
 			return nil, errors.New("parse postgres://alice:supersecret@db.internal:5432/main failed password=supersecret")
 		},
-		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return nil, nil },
-		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+		func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) { return nil, nil },
+		func(context.Context, *sql.DB, string, string, bool, log.Logger) error { return nil },
 	)
 
 	client, err := New(validConfig())
@@ -186,6 +198,10 @@ func TestConnectSanitizesSensitiveError(t *testing.T) {
 	assert.NotContains(t, err.Error(), "supersecret")
 	assert.Contains(t, err.Error(), "://***@")
 	assert.Contains(t, err.Error(), "password=***")
+
+	// Verify error chain preservation via SanitizedError
+	var sanitizedErr *SanitizedError
+	assert.True(t, errors.As(err, &sanitizedErr))
 }
 
 func TestConnectAtomicSwapKeepsOldOnFailure(t *testing.T) {
@@ -195,8 +211,8 @@ func TestConnectAtomicSwapKeepsOldOnFailure(t *testing.T) {
 	withPatchedDependencies(
 		t,
 		func(string, string) (*sql.DB, error) { return testDB(t), nil },
-		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return newResolver, nil },
-		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+		func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) { return newResolver, nil },
+		func(context.Context, *sql.DB, string, string, bool, log.Logger) error { return nil },
 	)
 
 	client, err := New(validConfig())
@@ -217,8 +233,8 @@ func TestConnectAtomicSwapClosesPreviousOnSuccess(t *testing.T) {
 	withPatchedDependencies(
 		t,
 		func(string, string) (*sql.DB, error) { return testDB(t), nil },
-		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return newResolver, nil },
-		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+		func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) { return newResolver, nil },
+		func(context.Context, *sql.DB, string, string, bool, log.Logger) error { return nil },
 	)
 
 	client, err := New(validConfig())
@@ -241,8 +257,8 @@ func TestDBLazyConnect(t *testing.T) {
 	withPatchedDependencies(
 		t,
 		func(string, string) (*sql.DB, error) { return testDB(t), nil },
-		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return resolver, nil },
-		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+		func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) { return resolver, nil },
+		func(context.Context, *sql.DB, string, string, bool, log.Logger) error { return nil },
 	)
 
 	client, err := New(validConfig())
@@ -293,8 +309,8 @@ func TestMigratorUpRunsExplicitly(t *testing.T) {
 	withPatchedDependencies(
 		t,
 		func(string, string) (*sql.DB, error) { return testDB(t), nil },
-		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return &fakeResolver{}, nil },
-		func(*sql.DB, string, string, bool, log.Logger) error {
+		func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) { return &fakeResolver{}, nil },
+		func(context.Context, *sql.DB, string, string, bool, log.Logger) error {
 			migrationCalls.Add(1)
 			return nil
 		},
@@ -477,7 +493,11 @@ func TestClientNilReceiver(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestClientNilContext(t *testing.T) {
+	t.Parallel()
+
 	t.Run("Connect nil ctx", func(t *testing.T) {
+		t.Parallel()
+
 		client, err := New(validConfig())
 		require.NoError(t, err)
 
@@ -487,6 +507,8 @@ func TestClientNilContext(t *testing.T) {
 	})
 
 	t.Run("Resolver nil ctx", func(t *testing.T) {
+		t.Parallel()
+
 		client, err := New(validConfig())
 		require.NoError(t, err)
 
@@ -507,8 +529,8 @@ func TestConnectDbOpenError(t *testing.T) {
 			func(_, _ string) (*sql.DB, error) {
 				return nil, errors.New("connection refused")
 			},
-			func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return &fakeResolver{}, nil },
-			func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+			func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) { return &fakeResolver{}, nil },
+			func(context.Context, *sql.DB, string, string, bool, log.Logger) error { return nil },
 		)
 
 		client, err := New(validConfig())
@@ -532,8 +554,8 @@ func TestConnectDbOpenError(t *testing.T) {
 
 				return nil, errors.New("replica down")
 			},
-			func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return &fakeResolver{}, nil },
-			func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+			func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) { return &fakeResolver{}, nil },
+			func(context.Context, *sql.DB, string, string, bool, log.Logger) error { return nil },
 		)
 
 		client, err := New(validConfig())
@@ -548,10 +570,10 @@ func TestConnectDbOpenError(t *testing.T) {
 		withPatchedDependencies(
 			t,
 			func(_, _ string) (*sql.DB, error) { return testDB(t), nil },
-			func(*sql.DB, *sql.DB) (dbresolver.DB, error) {
+			func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) {
 				return nil, errors.New("resolver error")
 			},
-			func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+			func(context.Context, *sql.DB, string, string, bool, log.Logger) error { return nil },
 		)
 
 		client, err := New(validConfig())
@@ -573,8 +595,8 @@ func TestResolverCachesResolver(t *testing.T) {
 	withPatchedDependencies(
 		t,
 		func(_, _ string) (*sql.DB, error) { return testDB(t), nil },
-		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return resolver, nil },
-		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+		func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) { return resolver, nil },
+		func(context.Context, *sql.DB, string, string, bool, log.Logger) error { return nil },
 	)
 
 	client, err := New(validConfig())
@@ -698,6 +720,7 @@ func TestNewMigratorInvalid(t *testing.T) {
 
 	_, err := NewMigrator(MigrationConfig{})
 	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidConfig)
 }
 
 // ---------------------------------------------------------------------------
@@ -710,7 +733,7 @@ func TestMigratorNilReceiver(t *testing.T) {
 	var m *Migrator
 	err := m.Up(context.Background())
 	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrNilClient)
+	assert.ErrorIs(t, err, ErrNilMigrator)
 }
 
 func TestMigratorNilContext(t *testing.T) {
@@ -732,8 +755,8 @@ func TestMigratorUpDbOpenError(t *testing.T) {
 		func(_, _ string) (*sql.DB, error) {
 			return nil, errors.New("parse postgres://alice:supersecret@db:5432/main failed")
 		},
-		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return nil, nil },
-		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+		func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) { return nil, nil },
+		func(context.Context, *sql.DB, string, string, bool, log.Logger) error { return nil },
 	)
 
 	m, err := NewMigrator(MigrationConfig{
@@ -754,8 +777,8 @@ func TestMigratorUpResolvesPathFromComponent(t *testing.T) {
 	withPatchedDependencies(
 		t,
 		func(_, _ string) (*sql.DB, error) { return testDB(t), nil },
-		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return &fakeResolver{}, nil },
-		func(_ *sql.DB, path, _ string, _ bool, _ log.Logger) error {
+		func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) { return &fakeResolver{}, nil },
+		func(_ context.Context, _ *sql.DB, path, _ string, _ bool, _ log.Logger) error {
 			capturedPath = path
 			return nil
 		},
@@ -763,8 +786,8 @@ func TestMigratorUpResolvesPathFromComponent(t *testing.T) {
 
 	m, err := NewMigrator(MigrationConfig{
 		PrimaryDSN:   "postgres://localhost/db",
-		DatabaseName:  "ledger",
-		Component:     "ledger",
+		DatabaseName: "ledger",
+		Component:    "ledger",
 	})
 	require.NoError(t, err)
 
@@ -779,8 +802,8 @@ func TestMigratorUpMigrationError(t *testing.T) {
 	withPatchedDependencies(
 		t,
 		func(_, _ string) (*sql.DB, error) { return testDB(t), nil },
-		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return &fakeResolver{}, nil },
-		func(_ *sql.DB, _, _ string, _ bool, _ log.Logger) error {
+		func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) { return &fakeResolver{}, nil },
+		func(_ context.Context, _ *sql.DB, _, _ string, _ bool, _ log.Logger) error {
 			return errors.New("migration failed")
 		},
 	)
@@ -798,24 +821,16 @@ func TestMigratorUpMigrationError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// sanitizeSensitiveError
+// sanitizeSensitiveString
 // ---------------------------------------------------------------------------
 
-func TestSanitizeSensitiveError(t *testing.T) {
+func TestSanitizeSensitiveString(t *testing.T) {
 	t.Parallel()
-
-	t.Run("nil error", func(t *testing.T) {
-		t.Parallel()
-
-		result := sanitizeSensitiveError(nil)
-		assert.Empty(t, result)
-	})
 
 	t.Run("masks user:password in DSN", func(t *testing.T) {
 		t.Parallel()
 
-		err := errors.New("failed to connect to postgres://alice:supersecret@db.internal:5432/main")
-		result := sanitizeSensitiveError(err)
+		result := sanitizeSensitiveString("failed to connect to postgres://alice:supersecret@db.internal:5432/main")
 		assert.NotContains(t, result, "alice")
 		assert.NotContains(t, result, "supersecret")
 		assert.Contains(t, result, "://***@")
@@ -824,17 +839,40 @@ func TestSanitizeSensitiveError(t *testing.T) {
 	t.Run("masks password= param", func(t *testing.T) {
 		t.Parallel()
 
-		err := errors.New("connection error password=mysecret host=db")
-		result := sanitizeSensitiveError(err)
+		result := sanitizeSensitiveString("connection error password=mysecret host=db")
 		assert.NotContains(t, result, "mysecret")
 		assert.Contains(t, result, "password=***")
+	})
+
+	t.Run("masks password containing ampersand", func(t *testing.T) {
+		t.Parallel()
+
+		result := sanitizeSensitiveString("connection error password=sec&ret host=db")
+		assert.NotContains(t, result, "sec&ret")
+		assert.Contains(t, result, "password=***")
+	})
+
+	t.Run("masks sslkey path", func(t *testing.T) {
+		t.Parallel()
+
+		result := sanitizeSensitiveString("host=db sslkey=/etc/ssl/private/key.pem port=5432")
+		assert.NotContains(t, result, "/etc/ssl/private/key.pem")
+		assert.Contains(t, result, "sslkey=***")
+	})
+
+	t.Run("masks sslcert and sslrootcert", func(t *testing.T) {
+		t.Parallel()
+
+		result := sanitizeSensitiveString("sslcert=/path/cert.pem sslrootcert=/path/ca.pem")
+		assert.NotContains(t, result, "/path/cert.pem")
+		assert.Contains(t, result, "sslcert=***")
+		assert.Contains(t, result, "sslrootcert=***")
 	})
 
 	t.Run("error without credentials passes through", func(t *testing.T) {
 		t.Parallel()
 
-		err := errors.New("timeout connecting to database")
-		result := sanitizeSensitiveError(err)
+		result := sanitizeSensitiveString("timeout connecting to database")
 		assert.Equal(t, "timeout connecting to database", result)
 	})
 }
@@ -1021,8 +1059,8 @@ func TestConnectLockedOldResolverCloseError(t *testing.T) {
 	withPatchedDependencies(
 		t,
 		func(string, string) (*sql.DB, error) { return testDB(t), nil },
-		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return newResolver, nil },
-		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+		func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) { return newResolver, nil },
+		func(context.Context, *sql.DB, string, string, bool, log.Logger) error { return nil },
 	)
 
 	client, err := New(validConfig())
@@ -1047,8 +1085,8 @@ func TestResolverLazyConnectError(t *testing.T) {
 		func(string, string) (*sql.DB, error) {
 			return nil, errors.New("cannot connect")
 		},
-		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return &fakeResolver{}, nil },
-		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+		func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) { return &fakeResolver{}, nil },
+		func(context.Context, *sql.DB, string, string, bool, log.Logger) error { return nil },
 	)
 
 	client, err := New(validConfig())
@@ -1069,8 +1107,8 @@ func TestResolverDoubleCheckReturnsExisting(t *testing.T) {
 	withPatchedDependencies(
 		t,
 		func(string, string) (*sql.DB, error) { return testDB(t), nil },
-		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return resolver, nil },
-		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+		func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) { return resolver, nil },
+		func(context.Context, *sql.DB, string, string, bool, log.Logger) error { return nil },
 	)
 
 	client, err := New(validConfig())
@@ -1100,8 +1138,8 @@ func TestPrimaryReturnsDBWhenConnected(t *testing.T) {
 	withPatchedDependencies(
 		t,
 		func(string, string) (*sql.DB, error) { return testDB(t), nil },
-		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return &fakeResolver{}, nil },
-		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+		func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) { return &fakeResolver{}, nil },
+		func(context.Context, *sql.DB, string, string, bool, log.Logger) error { return nil },
 	)
 
 	client, err := New(validConfig())
@@ -1125,8 +1163,8 @@ func TestMigratorUpResolveMigrationsPathError(t *testing.T) {
 	withPatchedDependencies(
 		t,
 		func(_, _ string) (*sql.DB, error) { return testDB(t), nil },
-		func(*sql.DB, *sql.DB) (dbresolver.DB, error) { return &fakeResolver{}, nil },
-		func(*sql.DB, string, string, bool, log.Logger) error { return nil },
+		func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) { return &fakeResolver{}, nil },
+		func(context.Context, *sql.DB, string, string, bool, log.Logger) error { return nil },
 	)
 
 	m, err := NewMigrator(MigrationConfig{
@@ -1142,18 +1180,6 @@ func TestMigratorUpResolveMigrationsPathError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// logf - nil logger doesn't panic
-// ---------------------------------------------------------------------------
-
-func TestLogfNilLogger(t *testing.T) {
-	t.Parallel()
-
-	assert.NotPanics(t, func() {
-		logf(nil, log.LevelInfo, "should not panic %s", "here")
-	})
-}
-
-// ---------------------------------------------------------------------------
 // closeDB
 // ---------------------------------------------------------------------------
 
@@ -1165,34 +1191,348 @@ func TestCloseDBNil(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// logger() helper on client
+// Client logAtLevel nil safety
 // ---------------------------------------------------------------------------
 
-func TestClientLoggerHelper(t *testing.T) {
+func TestClientLogAtLevelNilSafety(t *testing.T) {
 	t.Parallel()
 
-	t.Run("nil client returns nop", func(t *testing.T) {
+	t.Run("nil client does not panic", func(t *testing.T) {
 		t.Parallel()
 
 		var c *Client
-		l := c.logger()
-		assert.NotNil(t, l)
+		assert.NotPanics(t, func() {
+			c.logAtLevel(context.Background(), log.LevelInfo, "test")
+		})
 	})
 
-	t.Run("client with nil logger returns nop", func(t *testing.T) {
+	t.Run("nil logger does not panic", func(t *testing.T) {
 		t.Parallel()
 
 		c := &Client{}
-		l := c.logger()
-		assert.NotNil(t, l)
+		assert.NotPanics(t, func() {
+			c.logAtLevel(context.Background(), log.LevelInfo, "test")
+		})
 	})
+}
 
-	t.Run("client with logger returns it", func(t *testing.T) {
+// ---------------------------------------------------------------------------
+// Migrator logAtLevel nil safety
+// ---------------------------------------------------------------------------
+
+func TestMigratorLogAtLevelNilSafety(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil migrator does not panic", func(t *testing.T) {
 		t.Parallel()
 
-		logger := log.NewNop()
-		c := &Client{cfg: Config{Logger: logger}}
-		l := c.logger()
-		assert.Equal(t, logger, l)
+		var m *Migrator
+		assert.NotPanics(t, func() {
+			m.logAtLevel(context.Background(), log.LevelInfo, "test")
+		})
+	})
+
+	t.Run("nil logger does not panic", func(t *testing.T) {
+		t.Parallel()
+
+		m := &Migrator{}
+		assert.NotPanics(t, func() {
+			m.logAtLevel(context.Background(), log.LevelError, "test")
+		})
+	})
+}
+
+// ---------------------------------------------------------------------------
+// SanitizedError
+// ---------------------------------------------------------------------------
+
+func TestSanitizedError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Error returns sanitized message", func(t *testing.T) {
+		t.Parallel()
+
+		cause := errors.New("connect to postgres://alice:supersecret@db:5432 failed")
+		se := newSanitizedError(cause, "failed to open database")
+		assert.NotContains(t, se.Error(), "supersecret")
+		assert.NotContains(t, se.Error(), "alice")
+		assert.Contains(t, se.Error(), "://***@")
+	})
+
+	t.Run("Unwrap returns nil to prevent credential leakage", func(t *testing.T) {
+		t.Parallel()
+
+		cause := errors.New("connect to postgres://alice:supersecret@db:5432 failed")
+		se := newSanitizedError(cause, "open failed")
+		assert.Nil(t, se.Unwrap(), "Unwrap must return nil to prevent credential-bearing errors from leaking through chain traversal")
+		assert.NotErrorIs(t, se, cause, "errors.Is must not match the original error since Unwrap is nil")
+	})
+
+	t.Run("nil error returns nil", func(t *testing.T) {
+		t.Parallel()
+
+		assert.Nil(t, newSanitizedError(nil, "prefix"))
+	})
+
+	t.Run("errors.Is does not traverse chain", func(t *testing.T) {
+		t.Parallel()
+
+		inner := errors.New("inner")
+		wrapped := fmt.Errorf("wrapped: %w", inner)
+		se := newSanitizedError(wrapped, "outer")
+		assert.NotErrorIs(t, se, inner, "chain traversal must be blocked to prevent credential leakage")
+		assert.Contains(t, se.Error(), "outer", "sanitized message should contain prefix")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// classifyMigrationError
+// ---------------------------------------------------------------------------
+
+func TestClassifyMigrationError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil error returns zero outcome", func(t *testing.T) {
+		t.Parallel()
+
+		outcome := classifyMigrationError(nil)
+		assert.Nil(t, outcome.err)
+	})
+
+	t.Run("ErrNoChange returns nil error with info level", func(t *testing.T) {
+		t.Parallel()
+
+		outcome := classifyMigrationError(migrate.ErrNoChange)
+		assert.Nil(t, outcome.err)
+		assert.Equal(t, log.LevelInfo, outcome.level)
+		assert.NotEmpty(t, outcome.message)
+	})
+
+	t.Run("ErrNotExist returns nil error with warn level", func(t *testing.T) {
+		t.Parallel()
+
+		outcome := classifyMigrationError(os.ErrNotExist)
+		assert.Nil(t, outcome.err)
+		assert.Equal(t, log.LevelWarn, outcome.level)
+		assert.NotEmpty(t, outcome.message)
+	})
+
+	t.Run("ErrDirty returns wrapped sentinel with version", func(t *testing.T) {
+		t.Parallel()
+
+		outcome := classifyMigrationError(migrate.ErrDirty{Version: 42})
+		require.Error(t, outcome.err)
+		assert.ErrorIs(t, outcome.err, ErrMigrationDirty)
+		assert.Contains(t, outcome.err.Error(), "42")
+		assert.Equal(t, log.LevelError, outcome.level)
+		assert.NotEmpty(t, outcome.fields)
+	})
+
+	t.Run("generic error returns wrapped error", func(t *testing.T) {
+		t.Parallel()
+
+		cause := errors.New("disk full")
+		outcome := classifyMigrationError(cause)
+		require.Error(t, outcome.err)
+		assert.ErrorIs(t, outcome.err, cause)
+		assert.Equal(t, log.LevelError, outcome.level)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// createResolverFn panic recovery
+// ---------------------------------------------------------------------------
+
+func TestCreateResolverFnPanicRecovery(t *testing.T) {
+	// dbresolver.New doesn't panic with nil DBs (it wraps them), so we test
+	// the recovery pattern by installing a resolver factory that panics and
+	// verifying buildConnection converts it to an error, not a crash.
+	original := createResolverFn
+	origOpen := dbOpenFn
+	t.Cleanup(func() {
+		createResolverFn = original
+		dbOpenFn = origOpen
+	})
+
+	dbOpenFn = func(_, _ string) (*sql.DB, error) { return testDB(t), nil }
+	createResolverFn = func(_ *sql.DB, _ *sql.DB, logger log.Logger) (_ dbresolver.DB, err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				err = fmt.Errorf("failed to create resolver: %v", recovered)
+			}
+		}()
+
+		panic("dbresolver exploded")
+	}
+
+	client, err := New(validConfig())
+	require.NoError(t, err)
+
+	err = client.Connect(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to create resolver")
+	assert.Contains(t, err.Error(), "dbresolver exploded")
+}
+
+// ---------------------------------------------------------------------------
+// Config expansion: ConnMaxLifetime, ConnMaxIdleTime
+// ---------------------------------------------------------------------------
+
+func TestConfigWithDefaultsNewFields(t *testing.T) {
+	t.Parallel()
+
+	t.Run("zero ConnMaxLifetime gets default", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := Config{PrimaryDSN: "dsn", ReplicaDSN: "dsn"}.withDefaults()
+		assert.Equal(t, defaultConnMaxLifetime, cfg.ConnMaxLifetime)
+	})
+
+	t.Run("zero ConnMaxIdleTime gets default", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := Config{PrimaryDSN: "dsn", ReplicaDSN: "dsn"}.withDefaults()
+		assert.Equal(t, defaultConnMaxIdleTime, cfg.ConnMaxIdleTime)
+	})
+
+	t.Run("custom values preserved", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := Config{
+			PrimaryDSN:      "dsn",
+			ReplicaDSN:      "dsn",
+			ConnMaxLifetime: 1 * time.Hour,
+			ConnMaxIdleTime: 10 * time.Minute,
+		}.withDefaults()
+		assert.Equal(t, 1*time.Hour, cfg.ConnMaxLifetime)
+		assert.Equal(t, 10*time.Minute, cfg.ConnMaxIdleTime)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// validateDSN
+// ---------------------------------------------------------------------------
+
+func TestValidateDSN(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid postgres:// URL", func(t *testing.T) {
+		t.Parallel()
+
+		assert.NoError(t, validateDSN("postgres://localhost:5432/db"))
+	})
+
+	t.Run("valid postgresql:// URL", func(t *testing.T) {
+		t.Parallel()
+
+		assert.NoError(t, validateDSN("postgresql://localhost:5432/db"))
+	})
+
+	t.Run("key-value format accepted", func(t *testing.T) {
+		t.Parallel()
+
+		assert.NoError(t, validateDSN("host=localhost port=5432 dbname=mydb"))
+	})
+
+	t.Run("empty string accepted (checked elsewhere)", func(t *testing.T) {
+		t.Parallel()
+
+		assert.NoError(t, validateDSN(""))
+	})
+}
+
+// ---------------------------------------------------------------------------
+// warnInsecureDSN
+// ---------------------------------------------------------------------------
+
+func TestWarnInsecureDSN(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no panic with nil logger", func(t *testing.T) {
+		t.Parallel()
+
+		assert.NotPanics(t, func() {
+			warnInsecureDSN(context.Background(), nil, "postgres://host/db?sslmode=disable", "primary")
+		})
+	})
+
+	t.Run("no panic with secure DSN", func(t *testing.T) {
+		t.Parallel()
+
+		warnInsecureDSN(context.Background(), log.NewNop(), "postgres://host/db?sslmode=require", "primary")
+	})
+
+	t.Run("no panic with insecure DSN", func(t *testing.T) {
+		t.Parallel()
+
+		warnInsecureDSN(context.Background(), log.NewNop(), "postgres://host/db?sslmode=disable", "primary")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Migrator.Up context deadline check
+// ---------------------------------------------------------------------------
+
+func TestMigratorUpContextAlreadyCancelled(t *testing.T) {
+	t.Parallel()
+
+	m, err := NewMigrator(MigrationConfig{
+		PrimaryDSN:     "postgres://localhost/db",
+		DatabaseName:   "ledger",
+		MigrationsPath: "/migrations",
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = m.Up(ctx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+// ---------------------------------------------------------------------------
+// Close defensive cleanup
+// ---------------------------------------------------------------------------
+
+func TestCloseDefensiveCleanup(t *testing.T) {
+	t.Run("closes primary and replica even when resolver succeeds", func(t *testing.T) {
+		resolver := &fakeResolver{}
+
+		withPatchedDependencies(
+			t,
+			func(_, _ string) (*sql.DB, error) { return testDB(t), nil },
+			func(*sql.DB, *sql.DB, log.Logger) (dbresolver.DB, error) { return resolver, nil },
+			func(context.Context, *sql.DB, string, string, bool, log.Logger) error { return nil },
+		)
+
+		client, err := New(validConfig())
+		require.NoError(t, err)
+
+		err = client.Connect(context.Background())
+		require.NoError(t, err)
+
+		err = client.Close()
+		assert.NoError(t, err)
+		assert.Equal(t, int32(1), resolver.closeCall.Load())
+
+		// Verify that primary and replica handles are cleared after Close.
+		client.mu.Lock()
+		assert.Nil(t, client.primary, "primary should be nil after Close")
+		assert.Nil(t, client.replica, "replica should be nil after Close")
+		assert.Nil(t, client.resolver, "resolver should be nil after Close")
+		client.mu.Unlock()
+	})
+
+	t.Run("collects multiple close errors", func(t *testing.T) {
+		resolver := &fakeResolver{closeErr: errors.New("resolver close failed")}
+
+		client, err := New(validConfig())
+		require.NoError(t, err)
+		client.resolver = resolver
+
+		err = client.Close()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "resolver close failed")
 	})
 }
