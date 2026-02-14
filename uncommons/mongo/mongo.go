@@ -215,7 +215,7 @@ func (c *Client) Client(ctx context.Context) (*mongo.Client, error) {
 // DatabaseName returns the configured database name.
 func (c *Client) DatabaseName() (string, error) {
 	if c == nil {
-		asserter := assert.New(context.Background(), nil, "mongo", "DatabaseName")
+		asserter := assert.New(context.Background(), &log.GoLogger{Level: log.LevelError}, "mongo", "DatabaseName")
 		_ = asserter.Never(context.Background(), "mongo client receiver is nil")
 
 		return "", ErrClientClosed
@@ -325,6 +325,8 @@ func (c *Client) EnsureIndexes(ctx context.Context, collection string, indexes .
 		return err
 	}
 
+	var indexErrors []error
+
 	for _, index := range indexes {
 		fields := indexKeysString(index.Keys)
 		c.log(ctx, "ensuring mongo index", log.String("collection", collection), log.String("fields", fields))
@@ -336,8 +338,12 @@ func (c *Client) EnsureIndexes(ctx context.Context, collection string, indexes .
 				log.Err(err),
 			)
 
-			return fmt.Errorf("%w: collection=%s fields=%s err=%w", ErrCreateIndex, collection, fields, err)
+			indexErrors = append(indexErrors, fmt.Errorf("%w: collection=%s fields=%s: %w", ErrCreateIndex, collection, fields, err))
 		}
+	}
+
+	if len(indexErrors) > 0 {
+		return errors.Join(indexErrors...)
 	}
 
 	return nil
