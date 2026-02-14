@@ -131,4 +131,18 @@ func TestRunWithError(t *testing.T) {
 		err := l.RunWithError()
 		assert.NoError(t, err)
 	})
+
+	t.Run("app_run_error_is_handled_gracefully", func(t *testing.T) {
+		t.Parallel()
+
+		sentinel := errors.New("boom")
+
+		l := NewLauncher(WithLogger(&log.NopLogger{}))
+		require.NoError(t, l.Add("failing", &stubApp{err: sentinel}))
+
+		// RunWithError launches apps in goroutines; app errors are logged
+		// but not propagated, so the launcher completes without error.
+		err := l.RunWithError()
+		assert.NoError(t, err)
+	})
 }
