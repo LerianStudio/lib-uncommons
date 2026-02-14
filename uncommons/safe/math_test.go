@@ -207,3 +207,120 @@ func TestPercentageOrZero_ZeroNumerator(t *testing.T) {
 
 	assert.True(t, result.IsZero())
 }
+
+func TestDivideFloat64(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		numerator   float64
+		denominator float64
+		want        float64
+		wantErr     error
+	}{
+		{
+			name:        "success",
+			numerator:   100,
+			denominator: 4,
+			want:        25,
+			wantErr:     nil,
+		},
+		{
+			name:        "zero denominator",
+			numerator:   100,
+			denominator: 0,
+			want:        0,
+			wantErr:     ErrDivisionByZero,
+		},
+		{
+			name:        "zero numerator",
+			numerator:   0,
+			denominator: 4,
+			want:        0,
+			wantErr:     nil,
+		},
+		{
+			name:        "negative numerator",
+			numerator:   -100,
+			denominator: 4,
+			want:        -25,
+			wantErr:     nil,
+		},
+		{
+			name:        "negative denominator",
+			numerator:   100,
+			denominator: -4,
+			want:        -25,
+			wantErr:     nil,
+		},
+		{
+			name:        "both negative",
+			numerator:   -100,
+			denominator: -4,
+			want:        25,
+			wantErr:     nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := DivideFloat64(tt.numerator, tt.denominator)
+
+			if tt.wantErr != nil {
+				assert.ErrorIs(t, err, tt.wantErr)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			assert.InDelta(t, tt.want, result, 1e-9)
+		})
+	}
+}
+
+func TestDivideFloat64OrZero(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		numerator   float64
+		denominator float64
+		want        float64
+	}{
+		{
+			name:        "success",
+			numerator:   100,
+			denominator: 4,
+			want:        25,
+		},
+		{
+			name:        "zero denominator",
+			numerator:   100,
+			denominator: 0,
+			want:        0,
+		},
+		{
+			name:        "zero numerator",
+			numerator:   0,
+			denominator: 4,
+			want:        0,
+		},
+		{
+			name:        "negative numerator",
+			numerator:   -100,
+			denominator: 4,
+			want:        -25,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := DivideFloat64OrZero(tt.numerator, tt.denominator)
+
+			assert.InDelta(t, tt.want, result, 1e-9)
+		})
+	}
+}
