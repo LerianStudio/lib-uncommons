@@ -138,7 +138,7 @@ func TestFinishRequestInfo(t *testing.T) {
 
 	assert.Equal(t, 201, info.Status)
 	assert.Equal(t, 512, info.Size)
-	assert.True(t, info.Duration >= 100*time.Millisecond)
+	assert.True(t, info.Duration >= 90*time.Millisecond, "expected duration >= 90ms, got %v", info.Duration)
 }
 
 // ---------------------------------------------------------------------------

@@ -58,8 +58,7 @@ func TestRespond_Status100IsValid(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, resp.Body.Close()) }()
 
-	// Status 100 is valid — Fiber may upgrade it, but our code won't clamp it
-	assert.True(t, resp.StatusCode >= 100 && resp.StatusCode <= 599)
+	assert.Equal(t, http.StatusContinue, resp.StatusCode)
 }
 
 func TestRespond_EmptyPayload(t *testing.T) {

@@ -122,6 +122,19 @@ func TestHealthWithDependencies_CustomHealthCheck(t *testing.T) {
 	defer func() { require.NoError(t, resp.Body.Close()) }()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result map[string]any
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	require.NoError(t, err)
+	assert.Equal(t, "available", result["status"])
+
+	deps, ok := result["dependencies"].(map[string]any)
+	require.True(t, ok, "expected dependencies map")
+	require.Len(t, deps, 1)
+
+	dep, ok := deps["external-api"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, true, dep["healthy"])
 }
 
 func TestHealthWithDependencies_CustomHealthCheckUnhealthy(t *testing.T) {
@@ -141,6 +154,19 @@ func TestHealthWithDependencies_CustomHealthCheckUnhealthy(t *testing.T) {
 	defer func() { require.NoError(t, resp.Body.Close()) }()
 
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+
+	var result map[string]any
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	require.NoError(t, err)
+	assert.Equal(t, "degraded", result["status"])
+
+	deps, ok := result["dependencies"].(map[string]any)
+	require.True(t, ok, "expected dependencies map")
+	require.Len(t, deps, 1)
+
+	dep, ok := deps["external-api"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, false, dep["healthy"])
 }
 
 func TestHealthWithDependencies_HealthCheckOverridesCB(t *testing.T) {
@@ -164,4 +190,24 @@ func TestHealthWithDependencies_HealthCheckOverridesCB(t *testing.T) {
 	defer func() { require.NoError(t, resp.Body.Close()) }()
 
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+}
+
+func TestHealthWithDependencies_CBWithoutServiceName(t *testing.T) {
+	t.Parallel()
+
+	mgr := &mockCBManager{state: circuitbreaker.StateOpen, healthy: false}
+
+	app := fiber.New()
+	app.Get("/health", HealthWithDependencies(
+		DependencyCheck{Name: "orphan-cb", CircuitBreaker: mgr, ServiceName: ""},
+	))
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	// ServiceName is empty so HealthWithDependencies skips the CB check
+	// and treats the dependency as healthy.
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }

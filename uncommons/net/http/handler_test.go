@@ -21,7 +21,7 @@ func TestFileHandler(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/file", nil)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
-	defer func() { require.NoError(t, resp.Body.Close()) }()
+	defer func() { assert.NoError(t, resp.Body.Close()) }()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
