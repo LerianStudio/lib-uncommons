@@ -6,11 +6,12 @@ import (
 	"strings"
 	"testing"
 
+	constant "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/stretchr/testify/assert"
 )
 
-// TestSanitizeLabel tests the sanitizeLabel function.
-func TestSanitizeLabel(t *testing.T) {
+// TestSanitizeMetricLabel tests the shared constant.SanitizeMetricLabel function.
+func TestSanitizeMetricLabel(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -30,18 +31,18 @@ func TestSanitizeLabel(t *testing.T) {
 		},
 		{
 			name:     "exactly max length",
-			input:    strings.Repeat("a", maxLabelLength),
-			expected: strings.Repeat("a", maxLabelLength),
+			input:    strings.Repeat("a", constant.MaxMetricLabelLength),
+			expected: strings.Repeat("a", constant.MaxMetricLabelLength),
 		},
 		{
 			name:     "exceeds max length",
-			input:    strings.Repeat("b", maxLabelLength+10),
-			expected: strings.Repeat("b", maxLabelLength),
+			input:    strings.Repeat("b", constant.MaxMetricLabelLength+10),
+			expected: strings.Repeat("b", constant.MaxMetricLabelLength),
 		},
 		{
 			name:     "much longer than max",
 			input:    strings.Repeat("c", 200),
-			expected: strings.Repeat("c", maxLabelLength),
+			expected: strings.Repeat("c", constant.MaxMetricLabelLength),
 		},
 	}
 
@@ -49,9 +50,9 @@ func TestSanitizeLabel(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			result := sanitizeLabel(tt.input)
+			result := constant.SanitizeMetricLabel(tt.input)
 			assert.Equal(t, tt.expected, result)
-			assert.LessOrEqual(t, len(result), maxLabelLength)
+			assert.LessOrEqual(t, len(result), constant.MaxMetricLabelLength)
 		})
 	}
 }

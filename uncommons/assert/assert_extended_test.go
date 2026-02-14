@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	constant "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/runtime"
 
 	"github.com/stretchr/testify/require"
@@ -167,30 +168,30 @@ func TestValues_BothNilFallsToBackground(t *testing.T) {
 	require.NotNil(t, ctx)
 }
 
-// --- sanitizeLabel Tests ---
+// --- SanitizeMetricLabel Tests ---
 
-func TestSanitizeLabel_ShortLabel(t *testing.T) {
+func TestSanitizeMetricLabel_ShortLabel(t *testing.T) {
 	t.Parallel()
 
-	result := sanitizeLabel("short")
+	result := constant.SanitizeMetricLabel("short")
 	require.Equal(t, "short", result)
 }
 
-func TestSanitizeLabel_ExactMaxLength(t *testing.T) {
+func TestSanitizeMetricLabel_ExactMaxLength(t *testing.T) {
 	t.Parallel()
 
-	val := strings.Repeat("x", maxLabelLength)
-	result := sanitizeLabel(val)
+	val := strings.Repeat("x", constant.MaxMetricLabelLength)
+	result := constant.SanitizeMetricLabel(val)
 	require.Equal(t, val, result)
 }
 
-func TestSanitizeLabel_TruncatesLongLabel(t *testing.T) {
+func TestSanitizeMetricLabel_TruncatesLongLabel(t *testing.T) {
 	t.Parallel()
 
-	val := strings.Repeat("y", maxLabelLength+20)
-	result := sanitizeLabel(val)
-	require.Len(t, result, maxLabelLength)
-	require.Equal(t, strings.Repeat("y", maxLabelLength), result)
+	val := strings.Repeat("y", constant.MaxMetricLabelLength+20)
+	result := constant.SanitizeMetricLabel(val)
+	require.Len(t, result, constant.MaxMetricLabelLength)
+	require.Equal(t, strings.Repeat("y", constant.MaxMetricLabelLength), result)
 }
 
 // --- assertionStatusMessage Tests ---

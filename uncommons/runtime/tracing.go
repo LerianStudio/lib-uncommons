@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	constant "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -14,7 +15,7 @@ import (
 var ErrPanic = errors.New("panic")
 
 // PanicSpanEventName is the event name used when recording panic events on spans.
-const PanicSpanEventName = "panic.recovered"
+const PanicSpanEventName = constant.EventPanicRecovered
 
 // RecordPanicToSpan records a recovered panic as an error event on the current span.
 // This enriches distributed traces with panic information for debugging.

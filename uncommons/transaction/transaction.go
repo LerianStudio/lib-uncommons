@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	constant "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/shopspring/decimal"
 )
 
@@ -13,13 +14,13 @@ type Operation string
 
 const (
 	// OperationDebit decreases available balance from a source.
-	OperationDebit Operation = "DEBIT"
+	OperationDebit Operation = Operation(constant.DEBIT)
 	// OperationCredit increases available balance on a destination.
-	OperationCredit Operation = "CREDIT"
+	OperationCredit Operation = Operation(constant.CREDIT)
 	// OperationOnHold moves value from available to on-hold.
-	OperationOnHold Operation = "ON_HOLD"
+	OperationOnHold Operation = Operation(constant.ONHOLD)
 	// OperationRelease moves value from on-hold back to available.
-	OperationRelease Operation = "RELEASE"
+	OperationRelease Operation = Operation(constant.RELEASE)
 )
 
 // TransactionStatus represents the lifecycle state of a transaction intent.
@@ -39,13 +40,13 @@ type TransactionStatus string
 
 const (
 	// StatusCreated marks an intent as recorded but not yet approved.
-	StatusCreated TransactionStatus = "CREATED"
+	StatusCreated TransactionStatus = TransactionStatus(constant.CREATED)
 	// StatusApproved marks an intent as approved for processing.
-	StatusApproved TransactionStatus = "APPROVED"
+	StatusApproved TransactionStatus = TransactionStatus(constant.APPROVED)
 	// StatusPending marks an intent as currently being processed.
-	StatusPending TransactionStatus = "PENDING"
+	StatusPending TransactionStatus = TransactionStatus(constant.PENDING)
 	// StatusCanceled marks an intent as rejected or rolled back.
-	StatusCanceled TransactionStatus = "CANCELED"
+	StatusCanceled TransactionStatus = TransactionStatus(constant.CANCELED)
 )
 
 // AccountType classifies balances by ownership boundary.
@@ -63,19 +64,19 @@ type ErrorCode string
 
 const (
 	// ErrorInsufficientFunds indicates the source balance cannot cover the amount.
-	ErrorInsufficientFunds ErrorCode = "0018"
+	ErrorInsufficientFunds ErrorCode = ErrorCode(constant.CodeInsufficientFunds)
 	// ErrorAccountIneligibility indicates the account cannot participate in the transaction.
-	ErrorAccountIneligibility ErrorCode = "0019"
+	ErrorAccountIneligibility ErrorCode = ErrorCode(constant.CodeAccountIneligibility)
 	// ErrorAccountStatusTransactionRestriction indicates account status blocks this transaction.
-	ErrorAccountStatusTransactionRestriction ErrorCode = "0024"
+	ErrorAccountStatusTransactionRestriction ErrorCode = ErrorCode(constant.CodeAccountStatusTransactionRestriction)
 	// ErrorAssetCodeNotFound indicates the requested asset was not found.
-	ErrorAssetCodeNotFound ErrorCode = "0034"
+	ErrorAssetCodeNotFound ErrorCode = ErrorCode(constant.CodeAssetCodeNotFound)
 	// ErrorTransactionValueMismatch indicates allocations do not match transaction total.
-	ErrorTransactionValueMismatch ErrorCode = "0073"
+	ErrorTransactionValueMismatch ErrorCode = ErrorCode(constant.CodeTransactionValueMismatch)
 	// ErrorTransactionAmbiguous indicates transaction routing cannot be determined uniquely.
-	ErrorTransactionAmbiguous ErrorCode = "0090"
+	ErrorTransactionAmbiguous ErrorCode = ErrorCode(constant.CodeTransactionAmbiguous)
 	// ErrorOnHoldExternalAccount indicates on-hold operations are not allowed for external accounts.
-	ErrorOnHoldExternalAccount ErrorCode = "0098"
+	ErrorOnHoldExternalAccount ErrorCode = ErrorCode(constant.CodeOnHoldExternalAccount)
 	// ErrorDataCorruption indicates persisted transaction data is inconsistent.
 	ErrorDataCorruption ErrorCode = "0099"
 	// ErrorInvalidInput indicates request payload validation failed.
