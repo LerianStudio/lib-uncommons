@@ -66,19 +66,20 @@ var (
 	localEnvConfigOnce sync.Once
 )
 
-// InitLocalEnvConfig load a .env file to set up local environment vars
+// InitLocalEnvConfig load a .env file to set up local environment vars.
 // It's called once per application process.
+// Version and environment are always logged in a plain startup banner format.
 func InitLocalEnvConfig() *LocalEnvConfig {
 	version := GetenvOrDefault("VERSION", "NO-VERSION")
 	envName := GetenvOrDefault("ENV_NAME", "local")
 
-	fmt.Printf("VERSION: \u001B[31m%s\u001B[0m\n", version)
-	fmt.Printf("ENVIRONMENT NAME: \u001B[31m(%s)\u001B[0m\n", envName)
+	fmt.Printf("VERSION: %s\n\n", version)
+	fmt.Printf("ENVIRONMENT NAME: %s\n\n", envName)
 
 	if envName == "local" {
 		localEnvConfigOnce.Do(func() {
 			if err := godotenv.Load(); err != nil {
-				fmt.Println("Skipping \u001B[31m.env\u001B[0m file, using env", envName)
+				fmt.Printf("Skipping .env file; using environment: %s\n", envName)
 
 				localEnvConfig = &LocalEnvConfig{
 					Initialized: false,

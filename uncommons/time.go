@@ -1,9 +1,13 @@
 package uncommons
 
 import (
+	"errors"
 	"fmt"
 	"time"
 )
+
+// ErrInvalidDateFormat indicates the date string could not be parsed by any known format.
+var ErrInvalidDateFormat = errors.New("invalid date format")
 
 // IsValidDate checks if the provided date string is in the format "YYYY-MM-DD".
 func IsValidDate(date string) bool {
@@ -83,7 +87,7 @@ func ParseDateTime(dateStr string, isEndDate bool) (time.Time, bool, error) {
 		return t, false, nil
 	}
 
-	return time.Time{}, false, fmt.Errorf("invalid date format: %s", dateStr)
+	return time.Time{}, false, fmt.Errorf("%w: %s", ErrInvalidDateFormat, dateStr)
 }
 
 // IsValidDateTime checks if the provided date string is in the format "YYYY-MM-DD HH:MM:SS".

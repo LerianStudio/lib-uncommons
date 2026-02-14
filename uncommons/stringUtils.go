@@ -14,6 +14,11 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
+var (
+	uuidPattern          = regexp.MustCompile(`[0-9a-fA-F-]{36}`)
+	serverAddressPattern = regexp.MustCompile(`^[^:]+:\d+$`)
+)
+
 // RemoveAccents removes accents of a given word and returns it
 func RemoveAccents(word string) (string, error) {
 	t := transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
@@ -169,15 +174,12 @@ func RemoveChars(str string, chars map[string]bool) string {
 
 // ReplaceUUIDWithPlaceholder replaces UUIDs with a placeholder in a given path string.
 func ReplaceUUIDWithPlaceholder(path string) string {
-	re := regexp.MustCompile(`[0-9a-fA-F-]{36}`)
-
-	return re.ReplaceAllString(path, ":id")
+	return uuidPattern.ReplaceAllString(path, ":id")
 }
 
 // ValidateServerAddress checks if the value matches the pattern <some-address>:<some-port> and returns the value if it does.
 func ValidateServerAddress(value string) string {
-	matched, _ := regexp.MatchString(`^[^:]+:\d+$`, value)
-	if !matched {
+	if !serverAddressPattern.MatchString(value) {
 		return ""
 	}
 
@@ -190,11 +192,18 @@ func HashSHA256(input string) string {
 	return hex.EncodeToString(hash[:])
 }
 
-// StringToInt func that convert string to int.
+// StringToInt converts a string to an int, returning 100 on failure.
+//
+// Deprecated: Use StringToIntOrDefault for explicit default values.
 func StringToInt(s string) int {
+	return StringToIntOrDefault(s, 100)
+}
+
+// StringToIntOrDefault converts a string to an int, returning defaultVal on parse failure.
+func StringToIntOrDefault(s string, defaultVal int) int {
 	i, err := strconv.Atoi(s)
 	if err != nil {
-		return 100
+		return defaultVal
 	}
 
 	return i
