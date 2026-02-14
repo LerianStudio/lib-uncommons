@@ -165,7 +165,7 @@ func (r *Redactor) hashString(v string) string {
 		mac := hmac.New(sha256.New, r.hmacKey)
 		mac.Write([]byte(v))
 
-		return fmt.Sprintf("sha256:%s", hex.EncodeToString(mac.Sum(nil)))
+		return "sha256:" + hex.EncodeToString(mac.Sum(nil))
 	}
 
 	// Fallback for zero-key edge case (should not happen with proper construction).
