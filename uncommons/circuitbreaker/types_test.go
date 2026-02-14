@@ -67,7 +67,7 @@ func TestConfig_Validate_OnlyConsecutiveFailuresSet(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestConfig_Validate_OnlyMinRequestsSet(t *testing.T) {
+func TestConfig_Validate_MinRequestsAndFailureRatioSet(t *testing.T) {
 	cfg := Config{
 		ConsecutiveFailures: 0,
 		MinRequests:         10,

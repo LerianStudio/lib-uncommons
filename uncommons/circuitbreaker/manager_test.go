@@ -368,7 +368,7 @@ func TestGetOrCreate_ReturnExistingBreaker(t *testing.T) {
 	assert.Equal(t, cb1.State(), cb2.State())
 }
 
-func TestExecute_ErrTooManyRequests(t *testing.T) {
+func TestExecute_OpenStateRejection(t *testing.T) {
 	logger := &log.NopLogger{}
 	m, err := NewManager(logger)
 	require.NoError(t, err)
@@ -385,7 +385,7 @@ func TestExecute_ErrTooManyRequests(t *testing.T) {
 	_, err = m.GetOrCreate("svc", cfg)
 	require.NoError(t, err)
 
-	// Trip the breaker open
+	// Trip the breaker open by sending consecutive failures
 	for i := 0; i < 3; i++ {
 		_, _ = m.Execute("svc", func() (any, error) {
 			return nil, errors.New("fail")
@@ -393,38 +393,28 @@ func TestExecute_ErrTooManyRequests(t *testing.T) {
 	}
 	assert.Equal(t, StateOpen, m.GetState("svc"))
 
-	// Wait for timeout so the breaker moves to half-open
-	time.Sleep(300 * time.Millisecond)
-	assert.Equal(t, StateHalfOpen, m.GetState("svc"))
+	// Poll until the breaker transitions to half-open (timeout is 200ms)
+	require.Eventually(t, func() bool {
+		return m.GetState("svc") == StateHalfOpen
+	}, 2*time.Second, 10*time.Millisecond, "breaker should transition to half-open after timeout")
 
 	// MaxRequests=1, so the first call in half-open is the probe.
-	// Make it fail so breaker re-opens.
+	// Make it fail so the breaker re-opens.
 	_, _ = m.Execute("svc", func() (any, error) {
 		return nil, errors.New("still failing")
 	})
 
-	// Wait again for half-open
-	time.Sleep(300 * time.Millisecond)
-	assert.Equal(t, StateHalfOpen, m.GetState("svc"))
+	// Poll again until the breaker transitions back to half-open
+	require.Eventually(t, func() bool {
+		return m.GetState("svc") == StateHalfOpen
+	}, 2*time.Second, 10*time.Millisecond, "breaker should transition to half-open after second timeout")
 
-	// First call is the allowed probe — it consumes the one MaxRequests slot.
-	// We need to issue two calls: the first goes through, the second should be rejected.
-	// Use a channel to synchronize: hold the first call while issuing the second.
-	// Actually with MaxRequests=1, after the first call completes (success or fail),
-	// the breaker transitions. Instead, just issue two rapid calls. The second may get rejected.
-	// Simpler approach: verify error message format when we get ErrTooManyRequests
-	// by directly testing via the breaker wrapper.
-
-	// Let's just verify the error wrapping for the too-many-requests path
-	// by making the first probe succeed (closing the breaker), reopening, waiting,
-	// then using a goroutine.
-
-	// Simplified: verify the error message format from the Execute open-state path
+	// In half-open the probe call (first) is allowed; make it fail to re-open
 	_, err = m.Execute("svc", func() (any, error) {
 		return nil, errors.New("probe fail")
 	})
-	// After this probe fails in half-open, breaker re-opens
-	// Next call should get open-state rejection
+	// After the probe fails in half-open, breaker re-opens.
+	// The next call should be rejected with an open-state error.
 	_, err = m.Execute("svc", func() (any, error) {
 		return nil, nil
 	})

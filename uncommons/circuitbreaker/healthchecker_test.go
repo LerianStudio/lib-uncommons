@@ -457,14 +457,12 @@ func TestHealthCheckLoop_PeriodicChecks(t *testing.T) {
 	})
 
 	hc.Start()
+	defer hc.Stop()
 
-	// Wait for at least one tick to process
-	time.Sleep(150 * time.Millisecond)
-
-	hc.Stop()
-
-	// Service should have recovered via periodic check
-	assert.Equal(t, StateClosed, mgr.GetState("periodic-svc"))
+	// Poll until the periodic health check fires and recovers the breaker
+	require.Eventually(t, func() bool {
+		return mgr.GetState("periodic-svc") == StateClosed
+	}, 2*time.Second, 50*time.Millisecond, "periodic health check should recover the breaker")
 }
 
 func TestOnStateChange_ImmediateCheckChannelFull(t *testing.T) {
