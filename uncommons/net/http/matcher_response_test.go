@@ -102,6 +102,35 @@ func TestErrorResponse_EmptyJSON(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Nil guard tests
+// ---------------------------------------------------------------------------
+
+func TestRenderError_NilContext(t *testing.T) {
+	t.Parallel()
+
+	err := RenderError(nil, ErrorResponse{Code: 400, Title: "bad", Message: "nil ctx"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrContextNotFound)
+}
+
+func TestRenderError_NilError(t *testing.T) {
+	t.Parallel()
+
+	app := fiber.New()
+	app.Get("/test", func(c *fiber.Ctx) error {
+		return RenderError(c, nil)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	// RenderError(c, nil) returns nil, so no response body is written -> Fiber defaults to 200
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// ---------------------------------------------------------------------------
 // RenderError code boundary tests
 // ---------------------------------------------------------------------------
 

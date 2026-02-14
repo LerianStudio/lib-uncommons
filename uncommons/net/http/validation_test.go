@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	cn "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/gofiber/fiber/v2"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
@@ -883,8 +884,8 @@ func TestValidationSentinelErrors(t *testing.T) {
 func TestPaginationConstants_Validation(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, 20, DefaultLimit)
-	assert.Equal(t, 200, MaxLimit)
+	assert.Equal(t, 20, cn.DefaultLimit)
+	assert.Equal(t, 200, cn.MaxLimit)
 }
 
 func TestQueryParamLengthConstants(t *testing.T) {
@@ -959,6 +960,19 @@ func TestValidateQueryParamLength(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Nil guard tests
+// ---------------------------------------------------------------------------
+
+func TestParseBodyAndValidate_NilContext(t *testing.T) {
+	t.Parallel()
+
+	payload := &testPayload{}
+	err := ParseBodyAndValidate(nil, payload)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrContextNotFound)
 }
 
 func TestUnknownValidationTag(t *testing.T) {

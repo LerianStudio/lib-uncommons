@@ -1014,6 +1014,53 @@ func TestClassifyOwnershipError_UnknownErrorPreservesOriginal(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// classifyOwnershipError with non-nil accessErr
+// ---------------------------------------------------------------------------
+
+func TestClassifyOwnershipError_WithAccessErr_NotOwned(t *testing.T) {
+	t.Parallel()
+
+	customErr := errors.New("custom access denied")
+	err := classifyOwnershipError(ErrContextNotOwned, customErr)
+	assert.Equal(t, customErr, err)
+}
+
+func TestClassifyOwnershipError_WithAccessErr_AccessDenied(t *testing.T) {
+	t.Parallel()
+
+	customErr := errors.New("custom forbidden")
+	err := classifyOwnershipError(ErrContextAccessDenied, customErr)
+	assert.Equal(t, customErr, err)
+}
+
+func TestClassifyOwnershipError_WithAccessErr_NotFound(t *testing.T) {
+	t.Parallel()
+
+	// For not-found, accessErr is irrelevant -- returns ErrContextNotFound
+	customErr := errors.New("custom err")
+	err := classifyOwnershipError(ErrContextNotFound, customErr)
+	assert.ErrorIs(t, err, ErrContextNotFound)
+}
+
+func TestClassifyOwnershipError_WithAccessErr_NotActive(t *testing.T) {
+	t.Parallel()
+
+	// For not-active, accessErr is irrelevant
+	customErr := errors.New("custom err")
+	err := classifyOwnershipError(ErrContextNotActive, customErr)
+	assert.ErrorIs(t, err, ErrContextNotActive)
+}
+
+func TestClassifyOwnershipError_WithAccessErr_Unknown(t *testing.T) {
+	t.Parallel()
+
+	// For unknown errors, accessErr is irrelevant
+	customErr := errors.New("custom err")
+	err := classifyOwnershipError(errors.New("db timeout"), customErr)
+	assert.ErrorIs(t, err, ErrContextLookupFailed)
+}
+
+// ---------------------------------------------------------------------------
 // classifyResourceOwnershipError
 // ---------------------------------------------------------------------------
 
@@ -1041,6 +1088,73 @@ func TestClassifyResourceOwnershipError_AllSentinels(t *testing.T) {
 			assert.ErrorIs(t, err, tc.expected)
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// ResourceErrorMapping registry
+// ---------------------------------------------------------------------------
+
+func snapshotResourceRegistry() []ResourceErrorMapping {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
+	snapshot := make([]ResourceErrorMapping, len(resourceErrorRegistry))
+	copy(snapshot, resourceErrorRegistry)
+
+	return snapshot
+}
+
+func restoreResourceRegistry(snapshot []ResourceErrorMapping) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+
+	resourceErrorRegistry = make([]ResourceErrorMapping, len(snapshot))
+	copy(resourceErrorRegistry, snapshot)
+}
+
+func TestRegisterResourceErrors_CustomMapping(t *testing.T) {
+	original := snapshotResourceRegistry()
+	t.Cleanup(func() {
+		restoreResourceRegistry(original)
+	})
+
+	// Define custom resource errors
+	errInvoiceNotFound := errors.New("invoice not found")
+	errInvoiceAccessDenied := errors.New("invoice access denied")
+
+	// Register custom mappings for this test.
+	RegisterResourceErrors(ResourceErrorMapping{
+		NotFoundErr:     errInvoiceNotFound,
+		AccessDeniedErr: errInvoiceAccessDenied,
+	})
+
+	// classifyResourceOwnershipError should recognize the new mapping
+	err := classifyResourceOwnershipError("invoice", errInvoiceNotFound, nil)
+	assert.ErrorIs(t, err, errInvoiceNotFound)
+
+	err = classifyResourceOwnershipError("invoice", errInvoiceAccessDenied, nil)
+	assert.ErrorIs(t, err, errInvoiceAccessDenied)
+}
+
+func TestClassifyResourceOwnershipError_WithAccessErr_ReturnsAccessErr(t *testing.T) {
+	t.Parallel()
+
+	customAccessErr := errors.New("custom forbidden for exception")
+
+	// When verifier returns ErrExceptionAccessDenied and we provide a custom accessErr,
+	// classifyResourceOwnershipError should return the custom accessErr.
+	err := classifyResourceOwnershipError("exception", ErrExceptionAccessDenied, customAccessErr)
+	assert.Equal(t, customAccessErr, err)
+}
+
+func TestClassifyResourceOwnershipError_WithAccessErr_NotFoundIgnoresAccessErr(t *testing.T) {
+	t.Parallel()
+
+	customAccessErr := errors.New("custom denied")
+
+	// For not-found errors, accessErr is ignored -- the original error is returned.
+	err := classifyResourceOwnershipError("exception", ErrExceptionNotFound, customAccessErr)
+	assert.ErrorIs(t, err, ErrExceptionNotFound)
 }
 
 func TestClassifyResourceOwnershipError_LabelInMessage(t *testing.T) {

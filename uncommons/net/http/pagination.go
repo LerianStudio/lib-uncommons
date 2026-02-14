@@ -10,22 +10,13 @@ import (
 	"strings"
 	"time"
 
+	cn "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 )
 
-// Pagination limits for API endpoints.
-const (
-	DefaultLimit  = 20
-	DefaultOffset = 0
-	MaxLimit      = 200
-)
-
 // ErrLimitMustBePositive is returned when limit is below 1.
 var ErrLimitMustBePositive = errors.New("limit must be greater than zero")
-
-// ErrOffsetMustBePositive is returned when offset is negative.
-var ErrOffsetMustBePositive = errors.New("offset must be non-negative")
 
 // ErrInvalidCursor is returned when the cursor cannot be decoded.
 var ErrInvalidCursor = errors.New("invalid cursor format")
@@ -34,9 +25,14 @@ var ErrInvalidCursor = errors.New("invalid cursor format")
 var sortColumnPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // ParsePagination parses limit/offset query params with defaults.
+// Invalid or negative values are coerced to defaults rather than returning errors.
 func ParsePagination(fiberCtx *fiber.Ctx) (int, int, error) {
-	limit := DefaultLimit
-	offset := DefaultOffset
+	if fiberCtx == nil {
+		return 0, 0, ErrContextNotFound
+	}
+
+	limit := cn.DefaultLimit
+	offset := cn.DefaultOffset
 
 	if limitValue := fiberCtx.Query("limit"); limitValue != "" {
 		parsed, err := strconv.Atoi(limitValue)
@@ -57,15 +53,15 @@ func ParsePagination(fiberCtx *fiber.Ctx) (int, int, error) {
 	}
 
 	if limit <= 0 {
-		limit = DefaultLimit
+		limit = cn.DefaultLimit
 	}
 
-	if limit > MaxLimit {
-		limit = MaxLimit
+	if limit > cn.MaxLimit {
+		limit = cn.MaxLimit
 	}
 
 	if offset < 0 {
-		return 0, 0, ErrOffsetMustBePositive
+		offset = cn.DefaultOffset
 	}
 
 	return limit, offset, nil
@@ -75,7 +71,11 @@ func ParsePagination(fiberCtx *fiber.Ctx) (int, int, error) {
 // It validates limit but does not attempt to decode the cursor string.
 // Returns the raw cursor string (empty for first page), limit, and any error.
 func ParseOpaqueCursorPagination(fiberCtx *fiber.Ctx) (string, int, error) {
-	limit := DefaultLimit
+	if fiberCtx == nil {
+		return "", 0, ErrContextNotFound
+	}
+
+	limit := cn.DefaultLimit
 
 	if limitValue := fiberCtx.Query("limit"); limitValue != "" {
 		parsed, err := strconv.Atoi(limitValue)
@@ -87,11 +87,11 @@ func ParseOpaqueCursorPagination(fiberCtx *fiber.Ctx) (string, int, error) {
 	}
 
 	if limit <= 0 {
-		limit = DefaultLimit
+		limit = cn.DefaultLimit
 	}
 
-	if limit > MaxLimit {
-		limit = MaxLimit
+	if limit > cn.MaxLimit {
+		limit = cn.MaxLimit
 	}
 
 	cursorParam := fiberCtx.Query("cursor")
@@ -130,7 +130,7 @@ type TimestampCursor struct {
 }
 
 // EncodeTimestampCursor encodes a timestamp and UUID into a base64 cursor string.
-func EncodeTimestampCursor(timestamp time.Time, id uuid.UUID) string {
+func EncodeTimestampCursor(timestamp time.Time, id uuid.UUID) (string, error) {
 	cursor := TimestampCursor{
 		Timestamp: timestamp.UTC(),
 		ID:        id,
@@ -138,10 +138,10 @@ func EncodeTimestampCursor(timestamp time.Time, id uuid.UUID) string {
 
 	data, err := json.Marshal(cursor)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("encode timestamp cursor: %w", err)
 	}
 
-	return base64.StdEncoding.EncodeToString(data)
+	return base64.StdEncoding.EncodeToString(data), nil
 }
 
 // DecodeTimestampCursor decodes a base64 cursor string into a TimestampCursor.
@@ -166,7 +166,11 @@ func DecodeTimestampCursor(cursor string) (*TimestampCursor, error) {
 // ParseTimestampCursorPagination parses cursor/limit query params for timestamp-based cursor pagination.
 // Returns the decoded TimestampCursor (nil for first page), limit, and any error.
 func ParseTimestampCursorPagination(fiberCtx *fiber.Ctx) (*TimestampCursor, int, error) {
-	limit := DefaultLimit
+	if fiberCtx == nil {
+		return nil, 0, ErrContextNotFound
+	}
+
+	limit := cn.DefaultLimit
 
 	if limitValue := fiberCtx.Query("limit"); limitValue != "" {
 		parsed, err := strconv.Atoi(limitValue)
@@ -178,11 +182,11 @@ func ParseTimestampCursorPagination(fiberCtx *fiber.Ctx) (*TimestampCursor, int,
 	}
 
 	if limit <= 0 {
-		limit = DefaultLimit
+		limit = cn.DefaultLimit
 	}
 
-	if limit > MaxLimit {
-		limit = MaxLimit
+	if limit > cn.MaxLimit {
+		limit = cn.MaxLimit
 	}
 
 	cursorParam := fiberCtx.Query("cursor")
@@ -209,7 +213,7 @@ type SortCursor struct {
 }
 
 // EncodeSortCursor encodes sort cursor data into a base64 string.
-func EncodeSortCursor(sortColumn, sortValue, id string, pointsNext bool) string {
+func EncodeSortCursor(sortColumn, sortValue, id string, pointsNext bool) (string, error) {
 	cursor := SortCursor{
 		SortColumn: sortColumn,
 		SortValue:  sortValue,
@@ -219,10 +223,10 @@ func EncodeSortCursor(sortColumn, sortValue, id string, pointsNext bool) string 
 
 	data, err := json.Marshal(cursor)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("encode sort cursor: %w", err)
 	}
 
-	return base64.StdEncoding.EncodeToString(data)
+	return base64.StdEncoding.EncodeToString(data), nil
 }
 
 // DecodeSortCursor decodes a base64 cursor string into a SortCursor.
@@ -252,22 +256,22 @@ func DecodeSortCursor(cursor string) (*SortCursor, error) {
 // operator for composite keyset pagination based on the requested direction and
 // whether the cursor points forward or backward.
 func SortCursorDirection(requestedDir string, pointsNext bool) (actualDir, operator string) {
-	isAsc := strings.EqualFold(requestedDir, SortDirASC)
+	isAsc := strings.EqualFold(requestedDir, cn.SortDirASC)
 
 	if pointsNext {
 		if isAsc {
-			return SortDirASC, ">"
+			return cn.SortDirASC, ">"
 		}
 
-		return SortDirDESC, "<"
+		return cn.SortDirDESC, "<"
 	}
 
 	// Backward navigation: flip the direction
 	if isAsc {
-		return SortDirDESC, "<"
+		return cn.SortDirDESC, "<"
 	}
 
-	return SortDirASC, ">"
+	return cn.SortDirASC, ">"
 }
 
 // CalculateSortCursorPagination computes Next/Prev cursor strings for composite keyset pagination.
@@ -276,18 +280,24 @@ func CalculateSortCursorPagination(
 	sortColumn string,
 	firstSortValue, firstID string,
 	lastSortValue, lastID string,
-) (next, prev string) {
+) (next, prev string, err error) {
 	hasNext := (pointsNext && hasPagination) || (!pointsNext && (hasPagination || isFirstPage))
 
 	if hasNext {
-		next = EncodeSortCursor(sortColumn, lastSortValue, lastID, true)
+		next, err = EncodeSortCursor(sortColumn, lastSortValue, lastID, true)
+		if err != nil {
+			return "", "", err
+		}
 	}
 
 	if !isFirstPage {
-		prev = EncodeSortCursor(sortColumn, firstSortValue, firstID, false)
+		prev, err = EncodeSortCursor(sortColumn, firstSortValue, firstID, false)
+		if err != nil {
+			return "", "", err
+		}
 	}
 
-	return next, prev
+	return next, prev, nil
 }
 
 // ValidateSortColumn checks whether column is in the allowed list (case-insensitive)

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	cn "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -25,56 +26,46 @@ func (e ErrorResponse) Error() string {
 
 // RenderError writes all transport errors through a single, stable contract.
 func RenderError(ctx *fiber.Ctx, err error) error {
+	if ctx == nil {
+		return ErrContextNotFound
+	}
+
 	if err == nil {
 		return nil
 	}
 
-	var presp *ErrorResponse
-	if errors.As(err, &presp) {
-		status := fiber.StatusInternalServerError
-
-		if presp.Code >= http.StatusContinue && presp.Code <= 599 {
-			status = presp.Code
-		}
-
-		title := presp.Title
-		if title == "" {
-			title = "request_failed"
-		}
-
-		message := presp.Message
-		if message == "" {
-			message = http.StatusText(status)
-		}
-
-		return RespondError(ctx, status, title, message)
-	}
-
+	// errors.As with a value target matches both ErrorResponse and *ErrorResponse,
+	// since ErrorResponse implements error via a value receiver.
 	var responseErr ErrorResponse
 	if errors.As(err, &responseErr) {
-		status := fiber.StatusInternalServerError
-
-		if responseErr.Code >= http.StatusContinue && responseErr.Code <= 599 {
-			status = responseErr.Code
-		}
-
-		title := responseErr.Title
-		if title == "" {
-			title = "request_failed"
-		}
-
-		message := responseErr.Message
-		if message == "" {
-			message = http.StatusText(status)
-		}
-
-		return RespondError(ctx, status, title, message)
+		return renderErrorResponse(ctx, responseErr)
 	}
 
 	var fiberErr *fiber.Error
 	if errors.As(err, &fiberErr) {
-		return RespondError(ctx, fiberErr.Code, "request_failed", fiberErr.Message)
+		return RespondError(ctx, fiberErr.Code, cn.DefaultErrorTitle, fiberErr.Message)
 	}
 
-	return RespondError(ctx, fiber.StatusInternalServerError, "request_failed", "An internal error occurred")
+	return RespondError(ctx, fiber.StatusInternalServerError, cn.DefaultErrorTitle, cn.DefaultInternalErrorMessage)
+}
+
+// renderErrorResponse normalizes and sends an ErrorResponse with safe defaults.
+func renderErrorResponse(ctx *fiber.Ctx, resp ErrorResponse) error {
+	status := fiber.StatusInternalServerError
+
+	if resp.Code >= http.StatusContinue && resp.Code <= 599 {
+		status = resp.Code
+	}
+
+	title := resp.Title
+	if title == "" {
+		title = cn.DefaultErrorTitle
+	}
+
+	message := resp.Message
+	if message == "" {
+		message = http.StatusText(status)
+	}
+
+	return RespondError(ctx, status, title, message)
 }
