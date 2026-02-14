@@ -336,7 +336,7 @@ func TestExponentialWithJitter_EdgeCases(t *testing.T) {
 	}
 }
 
-func TestSleepWithContext(t *testing.T) {
+func TestWaitContext(t *testing.T) {
 	t.Parallel()
 
 	t.Run("completes sleep successfully", func(t *testing.T) {
@@ -344,7 +344,7 @@ func TestSleepWithContext(t *testing.T) {
 
 		ctx := context.Background()
 		start := time.Now()
-		err := SleepWithContext(ctx, 50*time.Millisecond)
+		err := WaitContext(ctx, 50*time.Millisecond)
 		elapsed := time.Since(start)
 
 		require.NoError(t, err)
@@ -362,7 +362,7 @@ func TestSleepWithContext(t *testing.T) {
 		}()
 
 		start := time.Now()
-		err := SleepWithContext(ctx, 1*time.Second)
+		err := WaitContext(ctx, 1*time.Second)
 		elapsed := time.Since(start)
 
 		require.Error(t, err)
@@ -376,7 +376,7 @@ func TestSleepWithContext(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 		defer cancel()
 
-		err := SleepWithContext(ctx, 1*time.Second)
+		err := WaitContext(ctx, 1*time.Second)
 
 		require.Error(t, err)
 		assert.ErrorIs(t, err, context.DeadlineExceeded)
@@ -387,7 +387,7 @@ func TestSleepWithContext(t *testing.T) {
 
 		ctx := context.Background()
 		start := time.Now()
-		err := SleepWithContext(ctx, 0)
+		err := WaitContext(ctx, 0)
 		elapsed := time.Since(start)
 
 		require.NoError(t, err)
@@ -399,7 +399,7 @@ func TestSleepWithContext(t *testing.T) {
 
 		ctx := context.Background()
 		start := time.Now()
-		err := SleepWithContext(ctx, -100*time.Millisecond)
+		err := WaitContext(ctx, -100*time.Millisecond)
 		elapsed := time.Since(start)
 
 		require.NoError(t, err)
@@ -413,7 +413,7 @@ func TestSleepWithContext(t *testing.T) {
 		cancel()
 
 		start := time.Now()
-		err := SleepWithContext(ctx, 1*time.Second)
+		err := WaitContext(ctx, 1*time.Second)
 		elapsed := time.Since(start)
 
 		require.Error(t, err)
