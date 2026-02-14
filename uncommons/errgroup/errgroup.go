@@ -29,6 +29,10 @@ type Group struct {
 // When set, panics recovered in goroutines will be logged before the
 // error is propagated via Wait.
 func (grp *Group) SetLogger(logger libLog.Logger) {
+	if grp == nil {
+		return
+	}
+
 	grp.logger = logger
 }
 
@@ -64,7 +68,9 @@ func (grp *Group) Go(fn func() error) {
 
 				grp.errOnce.Do(func() {
 					grp.err = fmt.Errorf("%w: %v", ErrPanicRecovered, recovered)
-					grp.cancel()
+					if grp.cancel != nil {
+						grp.cancel()
+					}
 				})
 			}
 		}()
@@ -72,7 +78,9 @@ func (grp *Group) Go(fn func() error) {
 		if err := fn(); err != nil {
 			grp.errOnce.Do(func() {
 				grp.err = err
-				grp.cancel()
+				if grp.cancel != nil {
+					grp.cancel()
+				}
 			})
 		}
 	}()
@@ -83,7 +91,10 @@ func (grp *Group) Go(fn func() error) {
 // the first non-nil error (if any) recorded by Go.
 func (grp *Group) Wait() error {
 	grp.wg.Wait()
-	grp.cancel()
+
+	if grp.cancel != nil {
+		grp.cancel()
+	}
 
 	return grp.err
 }

@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 )
 
 var (
@@ -18,6 +19,18 @@ var (
 
 // Handler defines the function signature for termination handlers
 type Handler func(reason string)
+
+// ManagerOption is a functional option for configuring ManagerShutdown.
+type ManagerOption func(*ManagerShutdown)
+
+// WithLogger provides a structured logger for assertion and validation logging.
+func WithLogger(l log.Logger) ManagerOption {
+	return func(m *ManagerShutdown) {
+		if l != nil {
+			m.Logger = l
+		}
+	}
+}
 
 // DefaultHandler is the default termination behavior
 // It records an assertion failure without panicking.
@@ -35,20 +48,28 @@ func DefaultHandlerWithError(reason string) error {
 // ManagerShutdown handles termination behavior
 type ManagerShutdown struct {
 	handler Handler
+	Logger  log.Logger
 	mu      sync.RWMutex
 }
 
-// New creates a new termination manager with the default handler
-func New() *ManagerShutdown {
-	return &ManagerShutdown{
+// New creates a new termination manager with the default handler.
+// Options can be provided to configure the manager (e.g., WithLogger).
+func New(opts ...ManagerOption) *ManagerShutdown {
+	m := &ManagerShutdown{
 		handler: DefaultHandler,
 	}
+
+	for _, opt := range opts {
+		opt(m)
+	}
+
+	return m
 }
 
 // SetHandler updates the termination handler
 // This should be called during application startup, before any validation occurs
 func (m *ManagerShutdown) SetHandler(handler Handler) {
-	if handler == nil {
+	if m == nil || handler == nil {
 		return
 	}
 
@@ -64,12 +85,21 @@ func (m *ManagerShutdown) SetHandler(handler Handler) {
 // Note: This method no longer panics if the manager was not initialized with New().
 // In that case it records an assertion failure and returns.
 func (m *ManagerShutdown) Terminate(reason string) {
+	if m == nil {
+		// nil receiver: no logger available, nil is legitimate here.
+		asserter := assert.New(context.Background(), nil, "license", "Terminate")
+		_ = asserter.Never(context.Background(), "license.ManagerShutdown is nil")
+
+		return
+	}
+
 	m.mu.RLock()
 	handler := m.handler
+	logger := m.Logger
 	m.mu.RUnlock()
 
 	if handler == nil {
-		asserter := assert.New(context.Background(), nil, "license", "Terminate")
+		asserter := assert.New(context.Background(), logger, "license", "Terminate")
 		_ = asserter.NoError(context.Background(), ErrManagerNotInitialized,
 			"license terminate called without initialization",
 			"reason", reason,
@@ -90,6 +120,16 @@ func (m *ManagerShutdown) Terminate(reason string) {
 // and invokes the configured handler. Use Terminate() for actual shutdown behavior,
 // and TerminateWithError() for validation checks that should return errors.
 func (m *ManagerShutdown) TerminateWithError(reason string) error {
+	if m == nil {
+		return ErrManagerNotInitialized
+	}
+
+	if m.Logger != nil {
+		m.Logger.Log(context.Background(), log.LevelWarn, "license validation failed",
+			log.String("reason", reason),
+		)
+	}
+
 	return fmt.Errorf("%w: %s", ErrLicenseValidationFailed, reason)
 }
 
@@ -101,11 +141,22 @@ func (m *ManagerShutdown) TerminateWithError(reason string) error {
 // For normal shutdown behavior where assertion-based handling is acceptable,
 // use Terminate() instead.
 func (m *ManagerShutdown) TerminateSafe(reason string) error {
+	if m == nil {
+		return ErrManagerNotInitialized
+	}
+
 	m.mu.RLock()
 	handler := m.handler
+	logger := m.Logger
 	m.mu.RUnlock()
 
 	if handler == nil {
+		if logger != nil {
+			logger.Log(context.Background(), log.LevelWarn, "license terminate called without initialization",
+				log.String("reason", reason),
+			)
+		}
+
 		return ErrManagerNotInitialized
 	}
 
