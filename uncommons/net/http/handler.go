@@ -3,24 +3,20 @@ package http
 import (
 	"context"
 	"errors"
-	"fmt"
-	"log"
 	"strings"
 	"time"
 
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons"
+	cn "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	libLog "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	libOpentelemetry "github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry"
 	"github.com/gofiber/fiber/v2"
 	"go.opentelemetry.io/otel/trace"
 )
 
 // Ping returns HTTP Status 200 with response "pong".
 func Ping(c *fiber.Ctx) error {
-	if err := c.SendString("healthy"); err != nil {
-		log.Print(err.Error())
-	}
-
-	return nil
+	return c.SendString("pong")
 }
 
 // Version returns HTTP Status 200 with given version.
@@ -46,7 +42,7 @@ func NotImplementedEndpoint(c *fiber.Ctx) error {
 	return RespondError(c, fiber.StatusNotImplemented, "not_implemented", "Not implemented yet")
 }
 
-// File servers a specific file.
+// File serves a specific file.
 func File(filePath string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		return c.SendFile(filePath)
@@ -64,7 +60,7 @@ func ExtractTokenFromHeader(c *fiber.Ctx) string {
 
 	splitToken := strings.Split(authHeader, " ")
 
-	if len(splitToken) > 1 && strings.EqualFold(splitToken[0], "bearer") {
+	if len(splitToken) > 1 && strings.EqualFold(splitToken[0], cn.Bearer) {
 		return strings.TrimSpace(splitToken[1])
 	}
 
@@ -83,14 +79,16 @@ func FiberErrorHandler(c *fiber.Ctx, err error) error {
 	// Safely end spans if user context exists
 	ctx := c.UserContext()
 	if ctx != nil {
-		trace.SpanFromContext(ctx).End()
+		span := trace.SpanFromContext(ctx)
+		libOpentelemetry.HandleSpanError(span, "handler error", err)
+		span.End()
 	}
 
 	var fe *fiber.Error
 	if errors.As(err, &fe) {
 		return RenderError(c, ErrorResponse{
 			Code:    fe.Code,
-			Title:   "request_failed",
+			Title:   cn.DefaultErrorTitle,
 			Message: fe.Message,
 		})
 	}
@@ -101,7 +99,9 @@ func FiberErrorHandler(c *fiber.Ctx, err error) error {
 
 	logger := uncommons.NewLoggerFromContext(ctx)
 	logger.Log(ctx, libLog.LevelError,
-		fmt.Sprintf("handler error on %s %s", c.Method(), c.Path()),
+		"handler error",
+		libLog.String("method", c.Method()),
+		libLog.String("path", c.Path()),
 		libLog.Err(err),
 	)
 
