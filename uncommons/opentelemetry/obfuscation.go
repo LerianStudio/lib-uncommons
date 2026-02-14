@@ -11,6 +11,7 @@ import (
 	"regexp"
 
 	cn "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/safe"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/security"
 )
 
@@ -57,13 +58,10 @@ func NewDefaultRedactor() *Redactor {
 
 	r, err := NewRedactor(rules, cn.ObfuscatedValue)
 	if err != nil {
-		// WARNING: rule compilation failed; returning a minimal redactor that masks nothing.
+		// WARNING: rule compilation failed; returning a mask-only redactor without HMAC.
 		// This should never happen with default rules as they use QuoteMeta patterns.
 		// If this occurs, investigate the DefaultSensitiveFields() patterns.
-		key := make([]byte, hmacKeySize)
-		_, _ = rand.Read(key)
-
-		return &Redactor{maskValue: cn.ObfuscatedValue, hmacKey: key}
+		return &Redactor{maskValue: cn.ObfuscatedValue}
 	}
 
 	return r
@@ -83,7 +81,7 @@ func NewRedactor(rules []RedactionRule, maskValue string) (*Redactor, error) {
 		}
 
 		if rule.FieldPattern != "" {
-			re, err := regexp.Compile(rule.FieldPattern)
+			re, err := safe.Compile(rule.FieldPattern)
 			if err != nil {
 				return nil, fmt.Errorf("invalid redaction field pattern at index %d: %w", i, err)
 			}
@@ -92,7 +90,7 @@ func NewRedactor(rules []RedactionRule, maskValue string) (*Redactor, error) {
 		}
 
 		if rule.PathPattern != "" {
-			re, err := regexp.Compile(rule.PathPattern)
+			re, err := safe.Compile(rule.PathPattern)
 			if err != nil {
 				return nil, fmt.Errorf("invalid redaction path pattern at index %d: %w", i, err)
 			}

@@ -171,6 +171,7 @@ func NewTelemetry(cfg TelemetryConfig) (*Telemetry, error) {
 // ApplyGlobals sets this instance as the process-global OTEL providers/propagator.
 func (tl *Telemetry) ApplyGlobals() {
 	if tl == nil {
+		// Logger is intentionally nil: nil receiver means no Telemetry instance to extract logger from.
 		asserter := assert.New(context.Background(), nil, "opentelemetry", "ApplyGlobals")
 		_ = asserter.NoError(context.Background(), ErrNilTelemetry, "cannot apply globals from nil telemetry instance")
 
@@ -186,6 +187,7 @@ func (tl *Telemetry) ApplyGlobals() {
 // Tracer returns a tracer from this telemetry instance.
 func (tl *Telemetry) Tracer(name string) (trace.Tracer, error) {
 	if tl == nil || tl.TracerProvider == nil {
+		// Logger is intentionally nil: nil/incomplete Telemetry means no reliable logger available.
 		asserter := assert.New(context.Background(), nil, "opentelemetry", "Tracer")
 		_ = asserter.NoError(context.Background(), ErrNilTelemetry, "telemetry tracer provider is nil")
 
@@ -198,6 +200,7 @@ func (tl *Telemetry) Tracer(name string) (trace.Tracer, error) {
 // Meter returns a meter from this telemetry instance.
 func (tl *Telemetry) Meter(name string) (metric.Meter, error) {
 	if tl == nil || tl.MeterProvider == nil {
+		// Logger is intentionally nil: nil/incomplete Telemetry means no reliable logger available.
 		asserter := assert.New(context.Background(), nil, "opentelemetry", "Meter")
 		_ = asserter.NoError(context.Background(), ErrNilTelemetry, "telemetry meter provider is nil")
 
@@ -224,6 +227,7 @@ func (tl *Telemetry) ShutdownTelemetry() {
 // ShutdownTelemetryWithContext shuts down telemetry components with caller context.
 func (tl *Telemetry) ShutdownTelemetryWithContext(ctx context.Context) error {
 	if tl == nil {
+		// Logger is intentionally nil: nil receiver means no Telemetry instance to extract logger from.
 		asserter := assert.New(context.Background(), nil, "opentelemetry", "ShutdownTelemetryWithContext")
 		_ = asserter.NoError(context.Background(), ErrNilTelemetry, "cannot shutdown nil telemetry")
 
@@ -329,7 +333,7 @@ func buildShutdownHandlers(l log.Logger, components ...shutdownable) (func(), fu
 			}
 
 			if err := c.Shutdown(ctx); err != nil {
-				l.Log(ctx, log.LevelError, fmt.Sprintf("telemetry shutdown error: %v", err))
+				l.Log(ctx, log.LevelError, "telemetry shutdown error", log.Err(err))
 			}
 		}
 	}
@@ -478,6 +482,10 @@ func flattenAttributes(attrs *[]attribute.KeyValue, prefix string, value any, de
 
 // SetSpanAttributeForParam adds a request parameter attribute to the current context bag.
 func SetSpanAttributeForParam(c *fiber.Ctx, param, value, entityName string) {
+	if c == nil {
+		return
+	}
+
 	spanAttrKey := "app.request." + param
 	if entityName != "" && param == "id" {
 		spanAttrKey = "app.request." + entityName + "_id"
@@ -535,14 +543,14 @@ func InjectGRPCContext(ctx context.Context, md metadata.MD) metadata.MD {
 
 	InjectTraceContext(ctx, propagation.HeaderCarrier(md))
 
-	if traceparentValues, exists := md["Traceparent"]; exists && len(traceparentValues) > 0 {
+	if traceparentValues, exists := md[constant.HeaderTraceparentPascal]; exists && len(traceparentValues) > 0 {
 		md[constant.MetadataTraceparent] = traceparentValues
-		delete(md, "Traceparent")
+		delete(md, constant.HeaderTraceparentPascal)
 	}
 
-	if tracestateValues, exists := md["Tracestate"]; exists && len(tracestateValues) > 0 {
+	if tracestateValues, exists := md[constant.HeaderTracestatePascal]; exists && len(tracestateValues) > 0 {
 		md[constant.MetadataTracestate] = tracestateValues
-		delete(md, "Tracestate")
+		delete(md, constant.HeaderTracestatePascal)
 	}
 
 	return md
@@ -557,12 +565,12 @@ func ExtractGRPCContext(ctx context.Context, md metadata.MD) context.Context {
 	mdCopy := md.Copy()
 
 	if traceparentValues, exists := mdCopy[constant.MetadataTraceparent]; exists && len(traceparentValues) > 0 {
-		mdCopy["Traceparent"] = traceparentValues
+		mdCopy[constant.HeaderTraceparentPascal] = traceparentValues
 		delete(mdCopy, constant.MetadataTraceparent)
 	}
 
 	if tracestateValues, exists := mdCopy[constant.MetadataTracestate]; exists && len(tracestateValues) > 0 {
-		mdCopy["Tracestate"] = tracestateValues
+		mdCopy[constant.HeaderTracestatePascal] = tracestateValues
 		delete(mdCopy, constant.MetadataTracestate)
 	}
 
