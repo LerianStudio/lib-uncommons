@@ -169,6 +169,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.logger == nil {
+		c.logger = &log.NopLogger{}
+	}
+
 	return c.connectLocked(ctx)
 }
 
@@ -191,6 +195,10 @@ func (c *Client) GetClient(ctx context.Context) (redis.UniversalClient, error) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if c.logger == nil {
+		c.logger = &log.NopLogger{}
+	}
 
 	if c.client != nil {
 		return c.client, nil
