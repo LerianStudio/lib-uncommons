@@ -100,6 +100,9 @@ type Counts struct {
 	ConsecutiveFailures  uint32
 }
 
+// ErrNilCircuitBreaker is returned when a circuit breaker method is called on a nil or uninitialized instance.
+var ErrNilCircuitBreaker = errors.New("circuitbreaker: not initialized")
+
 // circuitBreaker is the internal implementation wrapping gobreaker
 type circuitBreaker struct {
 	breaker *gobreaker.CircuitBreaker
@@ -107,16 +110,28 @@ type circuitBreaker struct {
 
 // Execute runs fn through the underlying circuit breaker.
 func (cb *circuitBreaker) Execute(fn func() (any, error)) (any, error) {
+	if cb == nil || cb.breaker == nil {
+		return nil, ErrNilCircuitBreaker
+	}
+
 	return cb.breaker.Execute(fn)
 }
 
 // State returns the current circuit breaker state.
 func (cb *circuitBreaker) State() State {
+	if cb == nil || cb.breaker == nil {
+		return StateUnknown
+	}
+
 	return convertGobreakerState(cb.breaker.State())
 }
 
 // Counts returns the current breaker counters.
 func (cb *circuitBreaker) Counts() Counts {
+	if cb == nil || cb.breaker == nil {
+		return Counts{}
+	}
+
 	counts := cb.breaker.Counts()
 
 	return Counts{
