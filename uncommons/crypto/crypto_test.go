@@ -112,8 +112,8 @@ func TestInitializeCipher(t *testing.T) {
 			expectErr: true,
 		},
 		{
-			name:      "wrong key length (16 bytes instead of 16/24/32)",
-			key:       "0123456789abcdef0123456789abcde",
+			name:      "wrong key length (15 bytes)",
+			key:       "0123456789abcdef0123456789abcd",
 			expectErr: true,
 		},
 	}
