@@ -127,16 +127,7 @@ func (tm *TelemetryMiddleware) EndTracingSpans(c *fiber.Ctx) error {
 
 	err := c.Next()
 
-	runtime.SafeGoWithContextAndComponent(
-		ctx,
-		telemetryRuntimeLogger(tm),
-		"http",
-		"end_tracing_spans",
-		runtime.KeepRunning,
-		func(spanCtx context.Context) {
-			trace.SpanFromContext(spanCtx).End()
-		},
-	)
+	trace.SpanFromContext(ctx).End()
 
 	return err
 }
@@ -205,16 +196,7 @@ func (tm *TelemetryMiddleware) EndTracingSpansInterceptor() grpc.UnaryServerInte
 	) (any, error) {
 		resp, err := handler(ctx, req)
 
-		runtime.SafeGoWithContextAndComponent(
-			ctx,
-			telemetryRuntimeLogger(tm),
-			"grpc",
-			"end_tracing_spans_interceptor",
-			runtime.KeepRunning,
-			func(spanCtx context.Context) {
-				trace.SpanFromContext(spanCtx).End()
-			},
-		)
+		trace.SpanFromContext(ctx).End()
 
 		return resp, err
 	}
