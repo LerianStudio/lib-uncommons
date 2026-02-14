@@ -9,14 +9,21 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	iamcredentials "cloud.google.com/go/iam/credentials/apiv1"
 	iamcredentialspb "cloud.google.com/go/iam/credentials/apiv1/credentialspb"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/backoff"
+	constant "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	libOpentelemetry "github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry/metrics"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/runtime"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -37,15 +44,53 @@ var (
 	ErrNilClient = errors.New("redis client is nil")
 	// ErrInvalidConfig indicates the provided redis configuration is invalid.
 	ErrInvalidConfig = errors.New("invalid redis config")
+
+	// pkgLogger holds the package-level logger for nil-receiver diagnostics.
+	// Defaults to NopLogger; consumers can override via SetPackageLogger.
+	pkgLogger atomic.Value // stores log.Logger
 )
+
+func init() {
+	pkgLogger.Store(log.Logger(&log.NopLogger{}))
+}
+
+// SetPackageLogger configures a package-level logger used for nil-receiver
+// assertion diagnostics and telemetry reporting. This is typically called
+// once during application bootstrap. If l is nil, a NopLogger is used.
+func SetPackageLogger(l log.Logger) {
+	if l == nil {
+		l = &log.NopLogger{}
+	}
+
+	pkgLogger.Store(l)
+}
+
+func resolvePackageLogger() log.Logger {
+	if v := pkgLogger.Load(); v != nil {
+		if l, ok := v.(log.Logger); ok {
+			return l
+		}
+	}
+
+	return &log.NopLogger{}
+}
+
+// nilClientAssert fires a nil-receiver assertion and returns ErrNilClient.
+func nilClientAssert(ctx context.Context, operation string) error {
+	a := assert.New(ctx, resolvePackageLogger(), "redis.Client", operation)
+	_ = a.Never(ctx, "nil receiver on *redis.Client")
+
+	return ErrNilClient
+}
 
 // Config defines Redis client topology, auth, TLS, and connection settings.
 type Config struct {
-	Topology Topology
-	TLS      *TLSConfig
-	Auth     Auth
-	Options  ConnectionOptions
-	Logger   log.Logger
+	Topology       Topology
+	TLS            *TLSConfig
+	Auth           Auth
+	Options        ConnectionOptions
+	Logger         log.Logger
+	MetricsFactory *metrics.MetricsFactory
 }
 
 // Topology selects exactly one Redis deployment mode.
@@ -88,6 +133,12 @@ type StaticPasswordAuth struct {
 	Password string
 }
 
+// String returns a redacted representation to prevent accidental credential logging.
+func (StaticPasswordAuth) String() string { return "StaticPasswordAuth{Password:REDACTED}" }
+
+// GoString returns a redacted representation for fmt %#v.
+func (a StaticPasswordAuth) GoString() string { return a.String() }
+
 // GCPIAMAuth authenticates with short-lived GCP IAM access tokens.
 type GCPIAMAuth struct {
 	CredentialsBase64       string
@@ -97,6 +148,14 @@ type GCPIAMAuth struct {
 	RefreshCheckInterval    time.Duration
 	RefreshOperationTimeout time.Duration
 }
+
+// String returns a redacted representation to prevent accidental credential logging.
+func (a GCPIAMAuth) String() string {
+	return fmt.Sprintf("GCPIAMAuth{ServiceAccount:%s, CredentialsBase64:REDACTED}", a.ServiceAccount)
+}
+
+// GoString returns a redacted representation for fmt %#v.
+func (a GCPIAMAuth) GoString() string { return a.String() }
 
 // ConnectionOptions configures protocol, timeouts, pools, and retries.
 type ConnectionOptions struct {
@@ -121,20 +180,40 @@ type Status struct {
 	RefreshLoopRunning bool
 }
 
+// connectionFailuresMetric defines the counter for redis connection failures.
+var connectionFailuresMetric = metrics.Metric{
+	Name:        "redis_connection_failures_total",
+	Unit:        "1",
+	Description: "Total number of redis connection failures",
+}
+
+// reconnectionsMetric defines the counter for redis reconnection attempts.
+var reconnectionsMetric = metrics.Metric{
+	Name:        "redis_reconnections_total",
+	Unit:        "1",
+	Description: "Total number of redis reconnection attempts",
+}
+
 // Client wraps a redis.UniversalClient with reconnection and IAM token refresh logic.
 type Client struct {
-	mu          sync.RWMutex
-	cfg         Config
-	logger      log.Logger
-	client      redis.UniversalClient
-	connected   bool
-	token       string
-	lastRefresh time.Time
-	refreshErr  error
+	mu             sync.RWMutex
+	cfg            Config
+	logger         log.Logger
+	metricsFactory *metrics.MetricsFactory
+	client         redis.UniversalClient
+	connected      bool
+	token          string
+	lastRefresh    time.Time
+	refreshErr     error
 
 	refreshCancel      context.CancelFunc
 	refreshLoopRunning bool
 	refreshGeneration  uint64
+
+	// Reconnect rate-limiting: prevents thundering-herd reconnect storms
+	// when the server is down by enforcing exponential backoff between attempts.
+	lastReconnectAttempt time.Time
+	reconnectAttempts    int
 
 	// test hooks
 	tokenRetriever func(ctx context.Context) (string, error)
@@ -149,8 +228,9 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	}
 
 	c := &Client{
-		cfg:    normalized,
-		logger: normalized.Logger,
+		cfg:            normalized,
+		logger:         normalized.Logger,
+		metricsFactory: normalized.MetricsFactory,
 	}
 
 	if err := c.Connect(ctx); err != nil {
@@ -163,8 +243,15 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 // Connect establishes a Redis connection using the current client configuration.
 func (c *Client) Connect(ctx context.Context) error {
 	if c == nil {
-		return ErrNilClient
+		return nilClientAssert(ctx, "Connect")
 	}
+
+	tracer := otel.Tracer("redis")
+
+	ctx, span := tracer.Start(ctx, "redis.connect")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemRedis))
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -173,13 +260,24 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.logger = &log.NopLogger{}
 	}
 
-	return c.connectLocked(ctx)
+	if err := c.connectLocked(ctx); err != nil {
+		c.recordConnectionFailure("connect")
+
+		libOpentelemetry.HandleSpanError(span, "Failed to connect to redis", err)
+
+		return err
+	}
+
+	return nil
 }
+
+// reconnectBackoffCap is the maximum delay between reconnect attempts.
+const reconnectBackoffCap = 30 * time.Second
 
 // GetClient returns a connected redis client, reconnecting on demand if needed.
 func (c *Client) GetClient(ctx context.Context) (redis.UniversalClient, error) {
 	if c == nil {
-		return nil, ErrNilClient
+		return nil, nilClientAssert(ctx, "GetClient")
 	}
 
 	c.mu.RLock()
@@ -204,9 +302,41 @@ func (c *Client) GetClient(ctx context.Context) (redis.UniversalClient, error) {
 		return c.client, nil
 	}
 
+	// Rate-limit reconnect attempts: if we've failed recently, enforce a
+	// minimum delay before the next attempt to avoid hammering the server.
+	if c.reconnectAttempts > 0 {
+		delay := backoff.ExponentialWithJitter(500*time.Millisecond, c.reconnectAttempts)
+		if delay > reconnectBackoffCap {
+			delay = reconnectBackoffCap
+		}
+
+		if elapsed := time.Since(c.lastReconnectAttempt); elapsed < delay {
+			return nil, fmt.Errorf("redis reconnect: rate-limited (next attempt in %s)", delay-elapsed)
+		}
+	}
+
+	c.lastReconnectAttempt = time.Now()
+
+	// Only trace when actually reconnecting.
+	tracer := otel.Tracer("redis")
+
+	ctx, span := tracer.Start(ctx, "redis.reconnect")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemRedis))
+
 	if err := c.connectLocked(ctx); err != nil {
+		c.reconnectAttempts++
+		c.recordConnectionFailure("reconnect")
+		c.recordReconnection("failure")
+
+		libOpentelemetry.HandleSpanError(span, "Failed to reconnect redis", err)
+
 		return nil, err
 	}
+
+	c.reconnectAttempts = 0
+	c.recordReconnection("success")
 
 	return c.client, nil
 }
@@ -214,24 +344,34 @@ func (c *Client) GetClient(ctx context.Context) (redis.UniversalClient, error) {
 // Close stops background refresh and closes the underlying Redis client.
 func (c *Client) Close() error {
 	if c == nil {
-		return ErrNilClient
+		return nilClientAssert(context.Background(), "Close")
 	}
+
+	tracer := otel.Tracer("redis")
+
+	_, span := tracer.Start(context.Background(), "redis.close")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemRedis))
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.stopRefreshLoopLocked()
 
-	return c.closeClientLocked()
+	if err := c.closeClientLocked(); err != nil {
+		libOpentelemetry.HandleSpanError(span, "Failed to close redis client", err)
+
+		return err
+	}
+
+	return nil
 }
 
 // Status returns a snapshot of connectivity and token refresh state.
 func (c *Client) Status() (Status, error) {
 	if c == nil {
-		asserter := assert.New(context.Background(), nil, "redis", "Status")
-		_ = asserter.Never(context.Background(), "redis client receiver is nil")
-
-		return Status{}, ErrNilClient
+		return Status{}, nilClientAssert(context.Background(), "Status")
 	}
 
 	c.mu.RLock()
@@ -258,7 +398,7 @@ func (c *Client) IsConnected() (bool, error) {
 // LastRefreshError returns the latest IAM refresh/reconnect error.
 func (c *Client) LastRefreshError() error {
 	if c == nil {
-		return ErrNilClient
+		return nilClientAssert(context.Background(), "LastRefreshError")
 	}
 
 	status, err := c.Status()
@@ -279,7 +419,7 @@ func (c *Client) connectLocked(ctx context.Context) error {
 		if err != nil {
 			c.logger.Log(ctx, log.LevelError, "initial token retrieval failed", log.Err(err))
 
-			return err
+			return fmt.Errorf("redis connect: token retrieval: %w", err)
 		}
 
 		c.token = token
@@ -306,7 +446,7 @@ func (c *Client) connectLocked(ctx context.Context) error {
 func (c *Client) connectClientLocked(ctx context.Context) error {
 	opts, err := c.buildUniversalOptionsLocked()
 	if err != nil {
-		return err
+		return fmt.Errorf("redis connect: build options: %w", err)
 	}
 
 	rdb := redis.NewUniversalClient(opts)
@@ -316,7 +456,7 @@ func (c *Client) connectClientLocked(ctx context.Context) error {
 		c.logger.Log(ctx, log.LevelError, "redis ping failed", log.Err(err))
 		c.connected = false
 
-		return err
+		return fmt.Errorf("redis connect: ping: %w", err)
 	}
 
 	c.client = rdb
@@ -329,9 +469,13 @@ func (c *Client) connectClientLocked(ctx context.Context) error {
 	case *redis.Client:
 		c.logger.Log(ctx, log.LevelInfo, "connected to Redis/Valkey in standalone mode")
 	case *redis.Ring:
-		c.logger.Log(ctx, log.LevelInfo, "connected to Redis/Valkey in sentinel mode")
+		c.logger.Log(ctx, log.LevelInfo, "connected to Redis/Valkey in ring mode")
 	default:
 		c.logger.Log(ctx, log.LevelWarn, "connected to Redis/Valkey in unknown mode")
+	}
+
+	if c.cfg.TLS == nil {
+		c.logger.Log(ctx, log.LevelWarn, "redis connection established without TLS; consider configuring TLS for production use")
 	}
 
 	return nil
@@ -378,6 +522,13 @@ func (c *Client) buildUniversalOptionsLocked() (*redis.UniversalOptions, error) 
 		opts.Addrs = c.cfg.Topology.Cluster.Addresses
 	}
 
+	// Guard against zero-value Config producing Addrs: nil, which causes
+	// go-redis to silently default to localhost:6379. This can happen when
+	// GetClient triggers a reconnect on a Client not created via New().
+	if len(opts.Addrs) == 0 {
+		return nil, configError("no topology configured: at least one address is required")
+	}
+
 	if c.cfg.Auth.StaticPassword != nil {
 		opts.Password = c.cfg.Auth.StaticPassword.Password
 	}
@@ -390,7 +541,7 @@ func (c *Client) buildUniversalOptionsLocked() (*redis.UniversalOptions, error) 
 	if c.cfg.TLS != nil {
 		tlsCfg, err := buildTLSConfig(*c.cfg.TLS)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("redis: TLS config: %w", err)
 		}
 
 		opts.TLSConfig = tlsCfg
@@ -401,7 +552,7 @@ func (c *Client) buildUniversalOptionsLocked() (*redis.UniversalOptions, error) 
 
 func (c *Client) retrieveToken(ctx context.Context) (string, error) {
 	if c == nil {
-		return "", ErrNilClient
+		return "", nilClientAssert(ctx, "retrieveToken")
 	}
 
 	if c.tokenRetriever != nil {
@@ -417,12 +568,22 @@ func (c *Client) retrieveToken(ctx context.Context) (string, error) {
 	if err != nil {
 		c.logger.Log(ctx, log.LevelError, "failed to decode base64 credentials", log.Err(err))
 
-		return "", err
+		return "", fmt.Errorf("redis: generate IAM token: %w", err)
 	}
+
+	// Defense-in-depth: zero decoded credentials when done to reduce memory exposure window.
+	defer func() {
+		for i := range credentialsJSON {
+			credentialsJSON[i] = 0
+		}
+	}()
 
 	creds, err := google.CredentialsFromJSONWithType(ctx, credentialsJSON, google.ServiceAccount)
 	if err != nil {
-		return "", fmt.Errorf("parsing credentials JSON: %w", err)
+		// Wrap error to prevent potential credential fragments in the original error message
+		// from leaking into logs or upstream callers.
+		return "", fmt.Errorf("parsing credentials JSON failed (content redacted): %w",
+			errors.New("invalid service account credentials format"))
 	}
 
 	client, err := iamcredentials.NewIamCredentialsClient(ctx, option.WithCredentials(creds))
@@ -453,65 +614,114 @@ func (c *Client) refreshTokenLoop(ctx context.Context) {
 	}
 
 	auth := c.cfg.Auth.GCPIAM
+	if auth == nil {
+		// Should never happen in production (startRefreshLoopLocked checks usesGCPIAM()),
+		// but guard defensively against direct invocations.
+		return
+	}
 
 	ticker := time.NewTicker(auth.RefreshCheckInterval)
 	defer ticker.Stop()
 
+	var consecutiveFailures int
+
 	for {
 		select {
 		case <-ticker.C:
-			func() {
-				c.mu.RLock()
-				lastRefresh := c.lastRefresh
-				c.mu.RUnlock()
+			if c.refreshTick(ctx, auth) {
+				consecutiveFailures = 0
 
-				if !time.Now().After(lastRefresh.Add(auth.RefreshEvery)) {
-					return
-				}
+				continue
+			}
 
-				refreshCtx, cancel := context.WithTimeout(ctx, auth.RefreshOperationTimeout)
-				defer cancel()
+			// On failure, apply exponential backoff before the next attempt.
+			// The ticker continues to fire, but we wait an additional delay
+			// proportional to the number of consecutive failures. The base
+			// derives from the configured check interval so that test configs
+			// with sub-millisecond intervals produce proportionally small delays.
+			consecutiveFailures++
 
-				token, err := c.retrieveToken(refreshCtx)
-				if err != nil {
-					c.mu.Lock()
-					c.refreshErr = err
-					c.logger.Log(refreshCtx, log.LevelWarn, "IAM token refresh failed", log.Err(err))
-					c.mu.Unlock()
+			delay := backoff.ExponentialWithJitter(auth.RefreshCheckInterval, consecutiveFailures)
+			if delay > reconnectBackoffCap {
+				delay = reconnectBackoffCap
+			}
 
-					return
-				}
-
-				c.mu.Lock()
-				oldToken := c.token
-				c.token = token
-
-				reconnectFn := c.reconnectFn
-				if reconnectFn == nil {
-					reconnectFn = c.reconnectLocked
-				}
-
-				if err := reconnectFn(refreshCtx); err != nil {
-					c.refreshErr = err
-					// Restore old token: reconnect failed, so the new token is useless
-					// and the old client (if any) is still using the previous token.
-					c.token = oldToken
-					c.logger.Log(refreshCtx, log.LevelError, "failed to reconnect after IAM token refresh, keeping existing client", log.Err(err))
-					c.mu.Unlock()
-
-					return
-				}
-
-				c.lastRefresh = time.Now()
-				c.refreshErr = nil
-				c.logger.Log(refreshCtx, log.LevelInfo, "IAM token refreshed")
-				c.mu.Unlock()
-			}()
+			if err := backoff.WaitContext(ctx, delay); err != nil {
+				return
+			}
 
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+// refreshTick handles a single tick of the IAM token refresh cycle.
+// Returns true if the tick completed successfully (including when no refresh
+// was needed), false if a token retrieval or reconnect failed.
+func (c *Client) refreshTick(ctx context.Context, auth *GCPIAMAuth) bool {
+	c.mu.RLock()
+	lastRefresh := c.lastRefresh
+	c.mu.RUnlock()
+
+	if !time.Now().After(lastRefresh.Add(auth.RefreshEvery)) {
+		return true
+	}
+
+	tracer := otel.Tracer("redis")
+
+	refreshCtx, cancel := context.WithTimeout(ctx, auth.RefreshOperationTimeout)
+	defer cancel()
+
+	refreshCtx, span := tracer.Start(refreshCtx, "redis.iam_refresh")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemRedis))
+
+	token, err := c.retrieveToken(refreshCtx)
+	if err != nil {
+		c.mu.Lock()
+		c.refreshErr = err
+		c.logger.Log(refreshCtx, log.LevelWarn, "IAM token refresh failed", log.Err(err))
+		c.mu.Unlock()
+
+		libOpentelemetry.HandleSpanError(span, "IAM token refresh failed", err)
+
+		return false
+	}
+
+	return c.applyTokenAndReconnect(refreshCtx, token)
+}
+
+// applyTokenAndReconnect sets the new token and reconnects the client.
+// On reconnect failure, the old token is restored to keep the existing client usable.
+func (c *Client) applyTokenAndReconnect(ctx context.Context, token string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	oldToken := c.token
+	c.token = token
+
+	reconnectFn := c.reconnectFn
+	if reconnectFn == nil {
+		reconnectFn = c.reconnectLocked
+	}
+
+	if err := reconnectFn(ctx); err != nil {
+		c.refreshErr = err
+		// Restore old token: reconnect failed, so the new token is useless
+		// and the old client (if any) is still using the previous token.
+		c.token = oldToken
+		c.logger.Log(ctx, log.LevelError, "failed to reconnect after IAM token refresh, keeping existing client", log.Err(err))
+
+		return false
+	}
+
+	c.lastRefresh = time.Now()
+	c.refreshErr = nil
+	c.logger.Log(ctx, log.LevelInfo, "IAM token refreshed")
+
+	return true
 }
 
 func (c *Client) reconnectLocked(ctx context.Context) error {
@@ -613,9 +823,17 @@ func normalizeLoggerDefault(cfg *Config) {
 	}
 }
 
+const (
+	maxPoolSize = 1000
+)
+
 func normalizeConnectionOptionsDefaults(options *ConnectionOptions) {
 	if options.PoolSize == 0 {
 		options.PoolSize = 10
+	}
+
+	if options.PoolSize > maxPoolSize {
+		options.PoolSize = maxPoolSize
 	}
 
 	if options.ReadTimeout == 0 {
@@ -712,6 +930,10 @@ func validateConfig(cfg Config) error {
 		return configError("credentials are required for GCP IAM auth")
 	}
 
+	if cfg.Auth.GCPIAM.RefreshEvery >= cfg.Auth.GCPIAM.TokenLifetime {
+		return configError("RefreshEvery must be less than TokenLifetime to prevent token expiry before refresh")
+	}
+
 	return nil
 }
 
@@ -786,6 +1008,52 @@ func buildTLSConfig(cfg TLSConfig) (*tls.Config, error) {
 	}
 
 	return tlsConfig, nil
+}
+
+// recordConnectionFailure increments the redis connection failure counter.
+// No-op when metricsFactory is nil.
+func (c *Client) recordConnectionFailure(operation string) {
+	if c.metricsFactory == nil {
+		return
+	}
+
+	counter, err := c.metricsFactory.Counter(connectionFailuresMetric)
+	if err != nil {
+		c.logger.Log(context.Background(), log.LevelWarn, "failed to create redis metric counter", log.Err(err))
+		return
+	}
+
+	err = counter.
+		WithLabels(map[string]string{
+			"operation": constant.SanitizeMetricLabel(operation),
+		}).
+		AddOne(context.Background())
+	if err != nil {
+		c.logger.Log(context.Background(), log.LevelWarn, "failed to record redis metric", log.Err(err))
+	}
+}
+
+// recordReconnection increments the redis reconnection counter.
+// No-op when metricsFactory is nil.
+func (c *Client) recordReconnection(result string) {
+	if c.metricsFactory == nil {
+		return
+	}
+
+	counter, err := c.metricsFactory.Counter(reconnectionsMetric)
+	if err != nil {
+		c.logger.Log(context.Background(), log.LevelWarn, "failed to create redis reconnection metric counter", log.Err(err))
+		return
+	}
+
+	err = counter.
+		WithLabels(map[string]string{
+			"result": result,
+		}).
+		AddOne(context.Background())
+	if err != nil {
+		c.logger.Log(context.Background(), log.LevelWarn, "failed to record redis reconnection metric", log.Err(err))
+	}
 }
 
 func configError(msg string) error {
