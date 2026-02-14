@@ -37,12 +37,13 @@ func BuildURI(cfg URIConfig) (string, error) {
 	host := strings.TrimSpace(cfg.Host)
 	port := strings.TrimSpace(cfg.Port)
 	database := strings.TrimSpace(cfg.Database)
+	username := strings.TrimSpace(cfg.Username)
 
-	if err := validateBuildURIInput(scheme, host, port, cfg.Username, cfg.Password); err != nil {
+	if err := validateBuildURIInput(scheme, host, port, username, cfg.Password); err != nil {
 		return "", err
 	}
 
-	uri := buildURL(scheme, host, port, cfg.Username, cfg.Password, database, cfg.Query)
+	uri := buildURL(scheme, host, port, username, cfg.Password, database, cfg.Query)
 
 	return uri.String(), nil
 }
@@ -107,6 +108,9 @@ func buildURL(scheme, host, port, username, password, database string, query url
 	return uri
 }
 
+// buildHost concatenates host and port. The caller is responsible for validating
+// that host contains only legitimate hostname characters. The mongo driver
+// validates the full URI downstream via connstring.Parse.
 func buildHost(host, port string) string {
 	if port == "" {
 		return host

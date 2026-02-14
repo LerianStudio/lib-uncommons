@@ -16,7 +16,7 @@ func ExampleBuildURI() {
 	uri, err := mongo.BuildURI(mongo.URIConfig{
 		Scheme:   "mongodb",
 		Username: "app",
-		Password: "secret",
+		Password: "EXAMPLE_DO_NOT_USE",
 		Host:     "db.internal",
 		Port:     "27017",
 		Database: "ledger",
@@ -28,5 +28,5 @@ func ExampleBuildURI() {
 
 	// Output:
 	// true
-	// mongodb://app:secret@db.internal:27017/ledger?replicaSet=rs0
+	// mongodb://app:EXAMPLE_DO_NOT_USE@db.internal:27017/ledger?replicaSet=rs0
 }

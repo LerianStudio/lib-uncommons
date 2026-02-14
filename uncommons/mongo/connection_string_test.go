@@ -120,4 +120,60 @@ func TestBuildURI_Validation(t *testing.T) {
 		assert.Empty(t, uri)
 		assert.ErrorIs(t, err, ErrPasswordWithoutUser)
 	})
+
+	t.Run("whitespace_only_username_treated_as_empty", func(t *testing.T) {
+		t.Parallel()
+
+		uri, err := BuildURI(URIConfig{Scheme: "mongodb", Host: "localhost", Username: "  ", Password: "secret"})
+		assert.Empty(t, uri)
+		assert.ErrorIs(t, err, ErrPasswordWithoutUser)
+	})
+}
+
+func TestBuildURI_PortBoundaries(t *testing.T) {
+	t.Parallel()
+
+	t.Run("port_zero_is_invalid", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := BuildURI(URIConfig{Scheme: "mongodb", Host: "localhost", Port: "0"})
+		assert.ErrorIs(t, err, ErrInvalidPort)
+	})
+
+	t.Run("port_one_is_valid", func(t *testing.T) {
+		t.Parallel()
+
+		uri, err := BuildURI(URIConfig{Scheme: "mongodb", Host: "localhost", Port: "1"})
+		require.NoError(t, err)
+		assert.Contains(t, uri, ":1/")
+	})
+
+	t.Run("port_65535_is_valid", func(t *testing.T) {
+		t.Parallel()
+
+		uri, err := BuildURI(URIConfig{Scheme: "mongodb", Host: "localhost", Port: "65535"})
+		require.NoError(t, err)
+		assert.Contains(t, uri, ":65535/")
+	})
+
+	t.Run("port_65536_is_invalid", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := BuildURI(URIConfig{Scheme: "mongodb", Host: "localhost", Port: "65536"})
+		assert.ErrorIs(t, err, ErrInvalidPort)
+	})
+
+	t.Run("non_numeric_port", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := BuildURI(URIConfig{Scheme: "mongodb", Host: "localhost", Port: "abc"})
+		assert.ErrorIs(t, err, ErrInvalidPort)
+	})
+
+	t.Run("negative_port", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := BuildURI(URIConfig{Scheme: "mongodb", Host: "localhost", Port: "-1"})
+		assert.ErrorIs(t, err, ErrInvalidPort)
+	})
 }
