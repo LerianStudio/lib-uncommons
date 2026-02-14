@@ -1,388 +1,469 @@
 package transaction
 
 import (
-	"context"
-	"strconv"
+	"fmt"
 	"strings"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons"
-	constant "github.com/LerianStudio/lib-uncommons/uncommons/constants"
-	"github.com/LerianStudio/lib-uncommons/uncommons/opentelemetry"
 	"github.com/shopspring/decimal"
 )
 
-// Deprecated: use ValidateBalancesRules method from Midaz pkg instead.
-// ValidateBalancesRules function with some validates in accounts and DSL operations
-func ValidateBalancesRules(ctx context.Context, transaction Transaction, validate Responses, balances []*Balance) error {
-	logger, tracer, _, _ := uncommons.NewTrackingFromContext(ctx)
+var oneHundred = decimal.NewFromInt(100)
 
-	_, spanValidateBalances := tracer.Start(ctx, "validations.validate_balances_rules")
-	defer spanValidateBalances.End()
-
-	if len(balances) != (len(validate.From) + len(validate.To)) {
-		err := uncommons.ValidateBusinessError(constant.ErrAccountIneligibility, "ValidateAccounts")
-
-		opentelemetry.HandleSpanBusinessErrorEvent(&spanValidateBalances, "validations.validate_balances_rules", err)
-
-		return err
+// BuildIntentPlan validates input allocations and builds a normalized intent plan.
+func BuildIntentPlan(input TransactionIntentInput, status TransactionStatus) (IntentPlan, error) {
+	if strings.TrimSpace(input.Asset) == "" {
+		return IntentPlan{}, NewDomainError(ErrorInvalidInput, "asset", "asset is required")
 	}
 
-	for _, balance := range balances {
-		if err := validateFromBalances(balance, validate.From, validate.Asset, validate.Pending); err != nil {
-			opentelemetry.HandleSpanBusinessErrorEvent(&spanValidateBalances, "validations.validate_from_balances_", err)
-
-			logger.Errorf("validations.validate_from_balances_err: %s", err)
-
-			return err
-		}
-
-		if err := validateToBalances(balance, validate.To, validate.Asset); err != nil {
-			opentelemetry.HandleSpanBusinessErrorEvent(&spanValidateBalances, "validations.validate_to_balances_", err)
-
-			logger.Errorf("validations.validate_to_balances_err: %s", err)
-
-			return err
-		}
+	if !input.Total.IsPositive() {
+		return IntentPlan{}, NewDomainError(ErrorInvalidInput, "total", "total must be greater than zero")
 	}
 
-	return nil
-}
+	if len(input.Sources) == 0 {
+		return IntentPlan{}, NewDomainError(ErrorInvalidInput, "sources", "at least one source is required")
+	}
 
-func validateFromBalances(balance *Balance, from map[string]Amount, asset string, pending bool) error {
-	for key := range from {
-		balanceAliasKey := AliasKey(balance.Alias, balance.Key)
-		if key == balance.ID || SplitAliasWithKey(key) == balanceAliasKey {
-			if balance.AssetCode != asset {
-				return uncommons.ValidateBusinessError(constant.ErrAssetCodeNotFound, "validateFromAccounts")
-			}
+	if len(input.Destinations) == 0 {
+		return IntentPlan{}, NewDomainError(ErrorInvalidInput, "destinations", "at least one destination is required")
+	}
 
-			if !balance.AllowSending {
-				return uncommons.ValidateBusinessError(constant.ErrAccountStatusTransactionRestriction, "validateFromAccounts")
-			}
+	sources, err := buildPostings(input.Asset, input.Total, input.Pending, status, input.Sources, true)
+	if err != nil {
+		return IntentPlan{}, err
+	}
 
-			if pending && balance.AccountType == constant.ExternalAccountType {
-				return uncommons.ValidateBusinessError(constant.ErrOnHoldExternalAccount, "validateBalance", balance.Alias)
-			}
+	destinations, err := buildPostings(input.Asset, input.Total, input.Pending, status, input.Destinations, false)
+	if err != nil {
+		return IntentPlan{}, err
+	}
+
+	sourceTotal := sumPostings(sources)
+
+	destinationTotal := sumPostings(destinations)
+	if !sourceTotal.Equal(input.Total) || !destinationTotal.Equal(input.Total) {
+		return IntentPlan{}, NewDomainError(
+			ErrorTransactionValueMismatch,
+			"total",
+			fmt.Sprintf("source total=%s destination total=%s expected=%s", sourceTotal, destinationTotal, input.Total),
+		)
+	}
+
+	sourceIDs := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		sourceIDs[source.Target.BalanceID] = struct{}{}
+	}
+
+	for _, destination := range destinations {
+		if _, exists := sourceIDs[destination.Target.BalanceID]; exists {
+			return IntentPlan{}, NewDomainError(ErrorTransactionAmbiguous, "destinations", "balance appears as source and destination")
 		}
 	}
 
-	return nil
-}
-
-func validateToBalances(balance *Balance, to map[string]Amount, asset string) error {
-	balanceAliasKey := AliasKey(balance.Alias, balance.Key)
-	for key := range to {
-		if key == balance.ID || SplitAliasWithKey(key) == balanceAliasKey {
-			if balance.AssetCode != asset {
-				return uncommons.ValidateBusinessError(constant.ErrAssetCodeNotFound, "validateToAccounts")
-			}
-
-			if !balance.AllowReceiving {
-				return uncommons.ValidateBusinessError(constant.ErrAccountStatusTransactionRestriction, "validateToAccounts")
-			}
-
-			if balance.Available.IsPositive() && balance.AccountType == constant.ExternalAccountType {
-				return uncommons.ValidateBusinessError(constant.ErrInsufficientFunds, "validateToAccounts", balance.Alias)
-			}
-		}
-	}
-
-	return nil
-}
-
-// Deprecated: use ValidateFromToOperation method from Midaz pkg instead.
-// ValidateFromToOperation func that validate operate balance
-func ValidateFromToOperation(ft FromTo, validate Responses, balance *Balance) (Amount, Balance, error) {
-	if ft.IsFrom {
-		ba, err := OperateBalances(validate.From[ft.AccountAlias], *balance)
-		if err != nil {
-			return Amount{}, Balance{}, err
-		}
-
-		if ba.Available.IsNegative() && balance.AccountType != constant.ExternalAccountType {
-			return Amount{}, Balance{}, uncommons.ValidateBusinessError(constant.ErrInsufficientFunds, "ValidateFromToOperation", balance.Alias)
-		}
-
-		return validate.From[ft.AccountAlias], ba, nil
-	} else {
-		ba, err := OperateBalances(validate.To[ft.AccountAlias], *balance)
-		if err != nil {
-			return Amount{}, Balance{}, err
-		}
-
-		return validate.To[ft.AccountAlias], ba, nil
-	}
-}
-
-// Deprecated: use AliasKey method from Midaz pkg instead.
-// AliasKey function to concatenate alias with balance key
-func AliasKey(alias, balanceKey string) string {
-	if balanceKey == "" {
-		balanceKey = "default"
-	}
-
-	return alias + "#" + balanceKey
-}
-
-// Deprecated: use SplitAlias method from Midaz pkg instead.
-// SplitAlias function to split alias with index
-func SplitAlias(alias string) string {
-	if strings.Contains(alias, "#") {
-		return strings.Split(alias, "#")[1]
-	}
-
-	return alias
-}
-
-// Deprecated: use ConcatAlias method from Midaz pkg instead.
-// ConcatAlias function to concat alias with index
-func ConcatAlias(i int, alias string) string {
-	return strconv.Itoa(i) + "#" + alias
-}
-
-// Deprecated: use OperateBalances method from Midaz pkg instead.
-// OperateBalances Function to sum or sub two balances and Normalize the scale
-func OperateBalances(amount Amount, balance Balance) (Balance, error) {
-	var (
-		total        decimal.Decimal
-		totalOnHold  decimal.Decimal
-		totalVersion int64
-	)
-
-	total = balance.Available
-	totalOnHold = balance.OnHold
-
-	switch {
-	case amount.Operation == constant.ONHOLD && amount.TransactionType == constant.PENDING:
-		total = balance.Available.Sub(amount.Value)
-		totalOnHold = balance.OnHold.Add(amount.Value)
-	case amount.Operation == constant.RELEASE && amount.TransactionType == constant.CANCELED:
-		totalOnHold = balance.OnHold.Sub(amount.Value)
-		total = balance.Available.Add(amount.Value)
-	case amount.Operation == constant.DEBIT && amount.TransactionType == constant.APPROVED:
-		totalOnHold = balance.OnHold.Sub(amount.Value)
-	case amount.Operation == constant.CREDIT && amount.TransactionType == constant.APPROVED:
-		total = balance.Available.Add(amount.Value)
-	case amount.Operation == constant.DEBIT && amount.TransactionType == constant.CREATED:
-		total = balance.Available.Sub(amount.Value)
-	case amount.Operation == constant.CREDIT && amount.TransactionType == constant.CREATED:
-		total = balance.Available.Add(amount.Value)
-	default:
-		// For unknown operations, return the original balance without changing the version.
-		return balance, nil
-	}
-
-	totalVersion = balance.Version + 1
-
-	return Balance{
-		Available: total,
-		OnHold:    totalOnHold,
-		Version:   totalVersion,
+	return IntentPlan{
+		Asset:        input.Asset,
+		Total:        input.Total,
+		Pending:      input.Pending,
+		Sources:      sources,
+		Destinations: destinations,
 	}, nil
 }
 
-// Deprecated: use DetermineOperation method from Midaz pkg instead.
-// DetermineOperation Function to determine the operation
-func DetermineOperation(isPending bool, isFrom bool, transactionType string) string {
-	switch {
-	case isPending && transactionType == constant.PENDING:
-		switch {
-		case isFrom:
-			return constant.ONHOLD
-		default:
-			return constant.CREDIT
+// ValidateBalanceEligibility checks whether balances can participate in a plan.
+func ValidateBalanceEligibility(plan IntentPlan, balances map[string]Balance) error {
+	if len(balances) == 0 {
+		return NewDomainError(ErrorAccountIneligibility, "balances", "balance catalog is empty")
+	}
+
+	for _, posting := range plan.Sources {
+		balance, ok := balances[posting.Target.BalanceID]
+		if !ok {
+			return NewDomainError(ErrorAccountIneligibility, "sources", "source balance not found")
 		}
-	case isPending && isFrom && transactionType == constant.CANCELED:
-		return constant.RELEASE
-	case isPending && transactionType == constant.APPROVED:
-		switch {
-		case isFrom:
-			return constant.DEBIT
-		default:
-			return constant.CREDIT
+
+		if balance.Asset != plan.Asset {
+			return NewDomainError(ErrorAssetCodeNotFound, "sources", "source asset does not match transaction asset")
 		}
-	case !isPending:
-		switch {
-		case isFrom:
-			return constant.DEBIT
-		default:
-			return constant.CREDIT
+
+		if !balance.AllowSending {
+			return NewDomainError(ErrorAccountStatusTransactionRestriction, "sources", "source balance is not allowed to send")
 		}
+
+		if plan.Pending && balance.AccountType == AccountTypeExternal {
+			return NewDomainError(ErrorOnHoldExternalAccount, "sources", "external source cannot be put on hold")
+		}
+	}
+
+	for _, posting := range plan.Destinations {
+		balance, ok := balances[posting.Target.BalanceID]
+		if !ok {
+			return NewDomainError(ErrorAccountIneligibility, "destinations", "destination balance not found")
+		}
+
+		if balance.Asset != plan.Asset {
+			return NewDomainError(ErrorAssetCodeNotFound, "destinations", "destination asset does not match transaction asset")
+		}
+
+		if !balance.AllowReceiving {
+			return NewDomainError(ErrorAccountStatusTransactionRestriction, "destinations", "destination balance is not allowed to receive")
+		}
+
+		if balance.AccountType == AccountTypeExternal {
+			if balance.Available.IsNegative() {
+				return NewDomainError(ErrorDataCorruption, "balance", "external destination account has negative balance, indicating data corruption")
+			}
+
+			if balance.Available.IsPositive() {
+				return NewDomainError(ErrorInsufficientFunds, "destinations", "external destination must have zero available balance")
+			}
+		}
+	}
+
+	return nil
+}
+
+// ApplyPosting applies a posting transition to a balance and returns the new state.
+func ApplyPosting(balance Balance, posting Posting) (Balance, error) {
+	if err := validatePostingAgainstBalance(balance, posting); err != nil {
+		return Balance{}, err
+	}
+
+	result := balance
+
+	updated, err := applyPostingOperation(result, posting)
+	if err != nil {
+		return Balance{}, err
+	}
+
+	if err := validatePostingResult(updated); err != nil {
+		return Balance{}, err
+	}
+
+	updated.Version++
+
+	return updated, nil
+}
+
+func validatePostingAgainstBalance(balance Balance, posting Posting) error {
+	if err := posting.Target.validate("posting.target"); err != nil {
+		return err
+	}
+
+	if balance.ID != posting.Target.BalanceID {
+		return NewDomainError(ErrorAccountIneligibility, "posting.target.balanceId", "posting does not belong to the provided balance")
+	}
+
+	if balance.AccountID != posting.Target.AccountID {
+		return NewDomainError(ErrorAccountIneligibility, "posting.target.accountId", "posting account does not match balance account")
+	}
+
+	if balance.Asset != posting.Asset {
+		return NewDomainError(ErrorAssetCodeNotFound, "posting.asset", "posting asset does not match balance asset")
+	}
+
+	if !posting.Amount.IsPositive() {
+		return NewDomainError(ErrorInvalidInput, "posting.amount", "posting amount must be greater than zero")
+	}
+
+	return nil
+}
+
+func applyPostingOperation(balance Balance, posting Posting) (Balance, error) {
+	result := balance
+
+	switch posting.Operation {
+	case OperationOnHold:
+		return applyOnHold(result, posting)
+	case OperationRelease:
+		return applyRelease(result, posting)
+	case OperationDebit:
+		return applyDebit(result, posting)
+	case OperationCredit:
+		return applyCredit(result, posting)
 	default:
-		return constant.CREDIT
+		return Balance{}, NewDomainError(ErrorInvalidInput, "posting.operation", "unsupported operation")
 	}
 }
 
-// Deprecated: use CalculateTotal method from Midaz pkg instead.
-// CalculateTotal Calculate total for sources/destinations based on shares, amounts and remains
-func CalculateTotal(fromTos []FromTo, transaction Transaction, transactionType string, t chan decimal.Decimal, ft chan map[string]Amount, sd chan []string, or chan map[string]string) {
-	fmto := make(map[string]Amount)
-	scdt := make([]string, 0)
-
-	total := decimal.NewFromInt(0)
-
-	remaining := Amount{
-		Asset:           transaction.Send.Asset,
-		Value:           transaction.Send.Value,
-		TransactionType: transactionType,
+func applyOnHold(balance Balance, posting Posting) (Balance, error) {
+	if posting.Status != StatusPending {
+		return Balance{}, NewDomainError(ErrorInvalidStateTransition, "posting.status", "ON_HOLD requires PENDING status")
 	}
 
-	operationRoute := make(map[string]string)
+	balance.Available = balance.Available.Sub(posting.Amount)
+	balance.OnHold = balance.OnHold.Add(posting.Amount)
 
-	for i := range fromTos {
-		operationRoute[fromTos[i].AccountAlias] = fromTos[i].Route
-
-		operation := DetermineOperation(transaction.Pending, fromTos[i].IsFrom, transactionType)
-
-		if fromTos[i].Share != nil && fromTos[i].Share.Percentage != 0 {
-			oneHundred := decimal.NewFromInt(100)
-
-			percentage := decimal.NewFromInt(fromTos[i].Share.Percentage)
-
-			percentageOfPercentage := decimal.NewFromInt(fromTos[i].Share.PercentageOfPercentage)
-			if percentageOfPercentage.IsZero() {
-				percentageOfPercentage = oneHundred
-			}
-
-			firstPart := percentage.Div(oneHundred)
-			secondPart := percentageOfPercentage.Div(oneHundred)
-			shareValue := transaction.Send.Value.Mul(firstPart).Mul(secondPart)
-
-			fmto[fromTos[i].AccountAlias] = Amount{
-				Asset:           transaction.Send.Asset,
-				Value:           shareValue,
-				Operation:       operation,
-				TransactionType: transactionType,
-			}
-
-			total = total.Add(shareValue)
-			remaining.Value = remaining.Value.Sub(shareValue)
-		}
-
-		if fromTos[i].Amount != nil && fromTos[i].Amount.Value.IsPositive() {
-			amount := Amount{
-				Asset:           fromTos[i].Amount.Asset,
-				Value:           fromTos[i].Amount.Value,
-				Operation:       operation,
-				TransactionType: transactionType,
-			}
-
-			fmto[fromTos[i].AccountAlias] = amount
-			total = total.Add(amount.Value)
-
-			remaining.Value = remaining.Value.Sub(amount.Value)
-		}
-
-		if !uncommons.IsNilOrEmpty(&fromTos[i].Remaining) {
-			total = total.Add(remaining.Value)
-
-			remaining.Operation = operation
-
-			fmto[fromTos[i].AccountAlias] = remaining
-			fromTos[i].Amount = &remaining
-		}
-
-		scdt = append(scdt, AliasKey(fromTos[i].SplitAlias(), fromTos[i].BalanceKey))
-	}
-
-	t <- total
-
-	ft <- fmto
-
-	sd <- scdt
-
-	or <- operationRoute
+	return balance, nil
 }
 
-// Deprecated: use AppendIfNotExist method from Midaz pkg instead.
-// AppendIfNotExist Append if not exist
-func AppendIfNotExist(slice []string, s []string) []string {
-	for _, v := range s {
-		if !uncommons.Contains(slice, v) {
-			slice = append(slice, v)
-		}
+func applyRelease(balance Balance, posting Posting) (Balance, error) {
+	if posting.Status != StatusCanceled {
+		return Balance{}, NewDomainError(ErrorInvalidStateTransition, "posting.status", "RELEASE requires CANCELED status")
 	}
 
-	return slice
+	balance.OnHold = balance.OnHold.Sub(posting.Amount)
+	balance.Available = balance.Available.Add(posting.Amount)
+
+	return balance, nil
 }
 
-// Deprecated: use ValidateSendSourceAndDistribute method from Midaz pkg instead.
-// ValidateSendSourceAndDistribute Validate send and distribute totals
-func ValidateSendSourceAndDistribute(ctx context.Context, transaction Transaction, transactionType string) (*Responses, error) {
-	var (
-		sourcesTotal      decimal.Decimal
-		destinationsTotal decimal.Decimal
-	)
-
-	logger, tracer, _, _ := uncommons.NewTrackingFromContext(ctx)
-
-	_, span := tracer.Start(ctx, "uncommons.transaction.ValidateSendSourceAndDistribute")
-	defer span.End()
-
-	sizeFrom := len(transaction.Send.Source.From)
-	sizeTo := len(transaction.Send.Distribute.To)
-
-	response := &Responses{
-		Total:               transaction.Send.Value,
-		Asset:               transaction.Send.Asset,
-		From:                make(map[string]Amount, sizeFrom),
-		To:                  make(map[string]Amount, sizeTo),
-		Sources:             make([]string, 0, sizeFrom),
-		Destinations:        make([]string, 0, sizeTo),
-		Aliases:             make([]string, 0, sizeFrom+sizeTo),
-		Pending:             transaction.Pending,
-		TransactionRoute:    transaction.Route,
-		OperationRoutesFrom: make(map[string]string, sizeFrom),
-		OperationRoutesTo:   make(map[string]string, sizeTo),
+func applyDebit(balance Balance, posting Posting) (Balance, error) {
+	switch posting.Status {
+	case StatusApproved:
+		balance.OnHold = balance.OnHold.Sub(posting.Amount)
+	case StatusCreated:
+		balance.Available = balance.Available.Sub(posting.Amount)
+	default:
+		return Balance{}, NewDomainError(
+			ErrorInvalidStateTransition,
+			"posting.status",
+			"DEBIT only supports CREATED or APPROVED status",
+		)
 	}
 
-	tFrom := make(chan decimal.Decimal, sizeFrom)
-	ftFrom := make(chan map[string]Amount, sizeFrom)
-	sdFrom := make(chan []string, sizeFrom)
-	orFrom := make(chan map[string]string, sizeFrom)
+	return balance, nil
+}
 
-	go CalculateTotal(transaction.Send.Source.From, transaction, transactionType, tFrom, ftFrom, sdFrom, orFrom)
+func applyCredit(balance Balance, posting Posting) (Balance, error) {
+	switch posting.Status {
+	case StatusCreated, StatusApproved, StatusPending:
+		balance.Available = balance.Available.Add(posting.Amount)
+	default:
+		return Balance{}, NewDomainError(
+			ErrorInvalidStateTransition,
+			"posting.status",
+			"CREDIT only supports CREATED, APPROVED, or PENDING status",
+		)
+	}
 
-	sourcesTotal = <-tFrom
-	response.From = <-ftFrom
-	response.Sources = <-sdFrom
-	response.OperationRoutesFrom = <-orFrom
-	response.Aliases = AppendIfNotExist(response.Aliases, response.Sources)
+	return balance, nil
+}
 
-	tTo := make(chan decimal.Decimal, sizeTo)
-	ftTo := make(chan map[string]Amount, sizeTo)
-	sdTo := make(chan []string, sizeTo)
-	orTo := make(chan map[string]string, sizeTo)
+func validatePostingResult(balance Balance) error {
+	if balance.Available.IsNegative() {
+		return NewDomainError(ErrorInsufficientFunds, "posting.amount", "operation would result in negative available balance")
+	}
 
-	go CalculateTotal(transaction.Send.Distribute.To, transaction, transactionType, tTo, ftTo, sdTo, orTo)
+	if balance.OnHold.IsNegative() {
+		return NewDomainError(ErrorInsufficientFunds, "posting.amount", "operation would result in negative on-hold balance")
+	}
 
-	destinationsTotal = <-tTo
-	response.To = <-ftTo
-	response.Destinations = <-sdTo
-	response.OperationRoutesTo = <-orTo
-	response.Aliases = AppendIfNotExist(response.Aliases, response.Destinations)
+	return nil
+}
 
-	for i, source := range response.Sources {
-		if _, ok := response.To[ConcatAlias(i, source)]; ok {
-			logger.Errorf("ValidateSendSourceAndDistribute: Ambiguous transaction source and destination")
+// ResolveOperation resolves the posting operation from pending/source/status semantics.
+func ResolveOperation(pending bool, isSource bool, status TransactionStatus) (Operation, error) {
+	if pending {
+		switch status {
+		case StatusPending:
+			if isSource {
+				return OperationOnHold, nil
+			}
 
-			return nil, uncommons.ValidateBusinessError(constant.ErrTransactionAmbiguous, "ValidateSendSourceAndDistribute")
+			return OperationCredit, nil
+		case StatusCanceled:
+			if isSource {
+				return OperationRelease, nil
+			}
+
+			return OperationDebit, nil
+		case StatusApproved:
+			if isSource {
+				return OperationDebit, nil
+			}
+
+			return OperationCredit, nil
+		default:
+			return "", NewDomainError(ErrorInvalidStateTransition, "status", "pending transactions only support PENDING, APPROVED, or CANCELED status")
 		}
 	}
 
-	for i, destination := range response.Destinations {
-		if _, ok := response.From[ConcatAlias(i, destination)]; ok {
-			logger.Errorf("ValidateSendSourceAndDistribute: Ambiguous transaction source and destination")
-
-			return nil, uncommons.ValidateBusinessError(constant.ErrTransactionAmbiguous, "ValidateSendSourceAndDistribute")
+	switch status {
+	case StatusCreated:
+		if isSource {
+			return OperationDebit, nil
 		}
+
+		return OperationCredit, nil
+	default:
+		return "", NewDomainError(ErrorInvalidStateTransition, "status", "non-pending transactions only support CREATED status")
+	}
+}
+
+func buildPostings(asset string, total decimal.Decimal, pending bool, status TransactionStatus, allocations []Allocation, isSource bool) ([]Posting, error) {
+	postings := make([]Posting, len(allocations))
+	allocated := decimal.Zero
+	remainderIndex := -1
+
+	for i, allocation := range allocations {
+		field := fmt.Sprintf("allocations[%d]", i)
+
+		posting, amount, usesRemainder, err := buildPostingFromAllocation(
+			asset,
+			total,
+			pending,
+			status,
+			isSource,
+			allocation,
+			field,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		postings[i] = posting
+
+		if usesRemainder {
+			if remainderIndex >= 0 {
+				return nil, NewDomainError(ErrorInvalidInput, field+".remainder", "only one remainder allocation is allowed")
+			}
+
+			remainderIndex = i
+
+			continue
+		}
+
+		allocated = allocated.Add(amount)
 	}
 
-	if !sourcesTotal.Equal(destinationsTotal) || !destinationsTotal.Equal(response.Total) {
-		logger.Errorf("ValidateSendSourceAndDistribute: Transaction value mismatch")
+	if remainderIndex >= 0 {
+		remainder, err := computeRemainderAllocation(total, allocated)
+		if err != nil {
+			return nil, err
+		}
 
-		return nil, uncommons.ValidateBusinessError(constant.ErrTransactionValueMismatch, "ValidateSendSourceAndDistribute")
+		postings[remainderIndex].Amount = remainder
+		allocated = allocated.Add(remainder)
 	}
 
-	return response, nil
+	if err := validateAllocatedTotal(allocated, total); err != nil {
+		return nil, err
+	}
+
+	return postings, nil
+}
+
+func buildPostingFromAllocation(
+	asset string,
+	total decimal.Decimal,
+	pending bool,
+	status TransactionStatus,
+	isSource bool,
+	allocation Allocation,
+	field string,
+) (Posting, decimal.Decimal, bool, error) {
+	if err := allocation.Target.validate(field + ".target"); err != nil {
+		return Posting{}, decimal.Zero, false, err
+	}
+
+	if err := validateAllocationStrategy(allocation, field); err != nil {
+		return Posting{}, decimal.Zero, false, err
+	}
+
+	operation, err := ResolveOperation(pending, isSource, status)
+	if err != nil {
+		return Posting{}, decimal.Zero, false, err
+	}
+
+	posting := Posting{
+		Target:    allocation.Target,
+		Asset:     asset,
+		Operation: operation,
+		Status:    status,
+		Route:     allocation.Route,
+	}
+
+	amount, usesRemainder, err := resolveAllocationAmount(total, allocation, field)
+	if err != nil {
+		return Posting{}, decimal.Zero, false, err
+	}
+
+	if usesRemainder {
+		return posting, decimal.Zero, true, nil
+	}
+
+	posting.Amount = amount
+
+	return posting, amount, false, nil
+}
+
+func validateAllocationStrategy(allocation Allocation, field string) error {
+	strategyCount := 0
+	if allocation.Amount != nil {
+		strategyCount++
+	}
+
+	if allocation.Share != nil {
+		strategyCount++
+	}
+
+	if allocation.Remainder {
+		strategyCount++
+	}
+
+	if strategyCount != 1 {
+		return NewDomainError(ErrorInvalidInput, field, "allocation must define exactly one strategy: amount, share, or remainder")
+	}
+
+	return nil
+}
+
+func resolveAllocationAmount(total decimal.Decimal, allocation Allocation, field string) (decimal.Decimal, bool, error) {
+	if allocation.Amount != nil {
+		if !allocation.Amount.IsPositive() {
+			return decimal.Zero, false, NewDomainError(ErrorInvalidInput, field+".amount", "amount must be greater than zero")
+		}
+
+		return *allocation.Amount, false, nil
+	}
+
+	if allocation.Share != nil {
+		share := *allocation.Share
+		if !share.IsPositive() || share.GreaterThan(oneHundred) {
+			return decimal.Zero, false, NewDomainError(ErrorInvalidInput, field+".share", "share must be greater than 0 and at most 100")
+		}
+
+		amount := total.Mul(share.Div(oneHundred))
+		if !amount.IsPositive() {
+			return decimal.Zero, false, NewDomainError(ErrorInvalidInput, field+".share", "share produces a non-positive amount")
+		}
+
+		return amount, false, nil
+	}
+
+	if allocation.Remainder {
+		return decimal.Zero, true, nil
+	}
+
+	return decimal.Zero, false, NewDomainError(ErrorInvalidInput, field, "allocation must define exactly one strategy: amount, share, or remainder")
+}
+
+func computeRemainderAllocation(total decimal.Decimal, allocated decimal.Decimal) (decimal.Decimal, error) {
+	remainder := total.Sub(allocated)
+	if !remainder.IsPositive() {
+		return decimal.Zero, NewDomainError(ErrorTransactionValueMismatch, "allocations", "remainder is zero or negative")
+	}
+
+	return remainder, nil
+}
+
+func validateAllocatedTotal(allocated decimal.Decimal, total decimal.Decimal) error {
+	if !allocated.Equal(total) {
+		return NewDomainError(
+			ErrorTransactionValueMismatch,
+			"allocations",
+			fmt.Sprintf("allocated=%s expected=%s", allocated, total),
+		)
+	}
+
+	return nil
+}
+
+func sumPostings(postings []Posting) decimal.Decimal {
+	total := decimal.Zero
+
+	for _, posting := range postings {
+		total = total.Add(posting.Amount)
+	}
+
+	return total
 }

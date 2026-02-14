@@ -3,12 +3,14 @@ package runtime
 import (
 	"context"
 	"runtime/debug"
+
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 )
 
 // Logger defines the minimal logging interface required by runtime.
-// This interface is satisfied by github.com/LerianStudio/lib-uncommons/uncommons/log.Logger.
+// This interface is satisfied by github.com/LerianStudio/lib-uncommons/v2/uncommons/log.Logger.
 type Logger interface {
-	Errorf(format string, args ...any)
+	Log(ctx context.Context, level log.Level, msg string, fields ...log.Field)
 }
 
 // RecoverAndLog recovers from a panic, logs it with the stack trace, and
@@ -157,8 +159,12 @@ func logPanicWithStack(logger Logger, name string, panicValue any, stack []byte)
 		return
 	}
 
-	logger.Errorf("panic recovered: source=%s value=%v\nstack_trace:\n%s",
-		name, panicValue, string(stack))
+	logger.Log(context.Background(), log.LevelError,
+		"panic recovered",
+		log.String("source", name),
+		log.Any("value", panicValue),
+		log.String("stack_trace", string(stack)),
+	)
 }
 
 // recordPanicObservability records panic information to all configured observability systems.

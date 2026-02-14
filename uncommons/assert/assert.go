@@ -1,14 +1,3 @@
-// Package assert provides assertion utilities for validating invariants.
-//
-// Assertions return errors instead of panicking. Failed assertions:
-//   - Log a high-severity error message
-//   - Emit telemetry (metrics + trace events)
-//   - Return an AssertionError so callers can stop execution
-//
-// In production mode, stack traces are omitted from logs and telemetry to
-// prevent information disclosure. Production mode is detected via
-// runtime.IsProductionMode() (set explicitly at startup) or by the ENV/GO_ENV
-// environment variables as a fallback.
 package assert
 
 import (
@@ -27,15 +16,16 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/opentelemetry/metrics"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry/metrics"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/runtime"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/runtime"
 )
 
 // Logger defines the minimal logging interface required by assertions.
 // This interface is satisfied by uncommons/log.Logger.
 type Logger interface {
-	Errorf(format string, args ...any)
+	Log(ctx context.Context, level log.Level, msg string, fields ...log.Field)
 }
 
 // Asserter evaluates invariants and emits telemetry on failure.
@@ -317,7 +307,7 @@ func formatLogMessage(msg, details string, stack []byte) string {
 
 func logAssertion(logger Logger, message string) {
 	if logger != nil {
-		logger.Errorf("%s", message)
+		logger.Log(context.Background(), log.LevelError, message)
 		return
 	}
 
@@ -407,13 +397,21 @@ func (am *AssertionMetrics) RecordAssertionFailed(
 		return
 	}
 
-	am.factory.Counter(assertionFailedMetric).
+	counter, err := am.factory.Counter(assertionFailedMetric)
+	if err != nil {
+		return
+	}
+
+	err = counter.
 		WithLabels(map[string]string{
 			"component": sanitizeLabel(component),
 			"operation": sanitizeLabel(operation),
 			"assertion": sanitizeLabel(assertion),
 		}).
 		AddOne(ctx)
+	if err != nil {
+		return
+	}
 }
 
 func sanitizeLabel(value string) string {

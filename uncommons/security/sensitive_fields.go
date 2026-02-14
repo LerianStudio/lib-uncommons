@@ -26,12 +26,58 @@ var defaultSensitiveFields = []string{
 	"accesstoken",
 	"refresh_token",
 	"refreshtoken",
+	"bearer",
+	"jwt",
+	"session_id",
+	"sessionid",
+	"cookie",
 	"private_key",
 	"privatekey",
 	"clientid",
 	"client_id",
 	"clientsecret",
 	"client_secret",
+	"passwd",
+	"passphrase",
+	"card_number",
+	"cardnumber",
+	"cvv",
+	"cvc",
+	"ssn",
+	"social_security",
+	"pin",
+	"otp",
+	"account_number",
+	"accountnumber",
+	"routing_number",
+	"routingnumber",
+	"iban",
+	"swift",
+	"swift_code",
+	"bic",
+	"pan",
+	"expiry",
+	"expiry_date",
+	"expiration_date",
+	"card_expiry",
+	"date_of_birth",
+	"dob",
+	"tax_id",
+	"taxid",
+	"tin",
+	"national_id",
+	"sort_code",
+	"bsb",
+	"security_answer",
+	"security_question",
+	"mother_maiden_name",
+	"mfa_code",
+	"totp",
+	"biometric",
+	"fingerprint",
+	"certificate",
+	"connection_string",
+	"database_url",
 }
 
 var (
@@ -39,15 +85,18 @@ var (
 	sensitiveFieldsMap     map[string]bool
 )
 
+// DefaultSensitiveFields returns a copy of the default sensitive field names.
+// The returned slice is a clone — callers cannot mutate shared state.
 func DefaultSensitiveFields() []string {
-	return defaultSensitiveFields
+	clone := make([]string, len(defaultSensitiveFields))
+	copy(clone, defaultSensitiveFields)
+
+	return clone
 }
 
-// DefaultSensitiveFieldsMap provides a map version of DefaultSensitiveFields
-// for lookup operations. All field names are lowercase for
-// case-insensitive matching. The underlying cache is initialized only once;
-// each call returns a shallow clone so callers cannot mutate shared state.
-func DefaultSensitiveFieldsMap() map[string]bool {
+// ensureSensitiveFieldsMap returns the internal map directly (no clone).
+// For internal use only where we just need read access.
+func ensureSensitiveFieldsMap() map[string]bool {
 	sensitiveFieldsMapOnce.Do(func() {
 		sensitiveFieldsMap = make(map[string]bool, len(defaultSensitiveFields))
 		for _, field := range defaultSensitiveFields {
@@ -55,8 +104,17 @@ func DefaultSensitiveFieldsMap() map[string]bool {
 		}
 	})
 
-	clone := make(map[string]bool, len(sensitiveFieldsMap))
-	maps.Copy(clone, sensitiveFieldsMap)
+	return sensitiveFieldsMap
+}
+
+// DefaultSensitiveFieldsMap provides a map version of DefaultSensitiveFields
+// for lookup operations. All field names are lowercase for
+// case-insensitive matching. The underlying cache is initialized only once;
+// each call returns a shallow clone so callers cannot mutate shared state.
+func DefaultSensitiveFieldsMap() map[string]bool {
+	m := ensureSensitiveFieldsMap()
+	clone := make(map[string]bool, len(m))
+	maps.Copy(clone, m)
 
 	return clone
 }
@@ -66,6 +124,17 @@ func DefaultSensitiveFieldsMap() map[string]bool {
 var shortSensitiveTokens = map[string]bool{
 	"key":  true,
 	"auth": true,
+	"pin":  true,
+	"otp":  true,
+	"cvv":  true,
+	"cvc":  true,
+	"ssn":  true,
+	"pan":  true,
+	"bic":  true,
+	"bsb":  true,
+	"dob":  true,
+	"tin":  true,
+	"jwt":  true,
 }
 
 // tokenSplitRegex splits field names by non-alphanumeric characters.
@@ -108,16 +177,17 @@ func normalizeFieldName(fieldName string) string {
 // Short tokens (like "key", "auth") use exact token matching to avoid false
 // positives, while longer patterns use word-boundary matching.
 func IsSensitiveField(fieldName string) bool {
+	m := ensureSensitiveFieldsMap()
 	lowerField := strings.ToLower(fieldName)
 
 	// Check exact match with lowercase
-	if DefaultSensitiveFieldsMap()[lowerField] {
+	if m[lowerField] {
 		return true
 	}
 
 	// Also check with camelCase normalization (e.g., "sessionToken" -> "session_token")
 	normalized := normalizeFieldName(fieldName)
-	if normalized != lowerField && DefaultSensitiveFieldsMap()[normalized] {
+	if normalized != lowerField && m[normalized] {
 		return true
 	}
 
@@ -148,6 +218,10 @@ func IsSensitiveField(fieldName string) bool {
 // matchesWordBoundary checks if the pattern appears in the field with word boundaries.
 // A word boundary is either the start/end of string or a non-alphanumeric character.
 func matchesWordBoundary(field, pattern string) bool {
+	if len(pattern) == 0 {
+		return false
+	}
+
 	idx := strings.Index(field, pattern)
 	if idx == -1 {
 		return false

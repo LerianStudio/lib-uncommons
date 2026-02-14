@@ -3,16 +3,17 @@ package http
 import (
 	"context"
 	"encoding/json"
+	stdlog "log"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons"
-	cn "github.com/LerianStudio/lib-uncommons/uncommons/constants"
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
-	"github.com/LerianStudio/lib-uncommons/uncommons/security"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons"
+	cn "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/security"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
@@ -27,6 +28,12 @@ const maxObfuscationDepth = 32
 // logObfuscationDisabled caches the LOG_OBFUSCATION_DISABLED env var at init time
 // to avoid repeated syscalls on every request.
 var logObfuscationDisabled = os.Getenv("LOG_OBFUSCATION_DISABLED") == "true"
+
+func init() {
+	if logObfuscationDisabled {
+		stdlog.Println("[WARN] LOG_OBFUSCATION_DISABLED is set to true. Sensitive data may appear in logs. Ensure this is not enabled in production.")
+	}
+}
 
 // RequestInfo is a struct design to store http access log data.
 type RequestInfo struct {
@@ -136,7 +143,9 @@ type LogMiddlewareOption func(l *logMiddleware)
 // WithCustomLogger is a functional option for logMiddleware.
 func WithCustomLogger(logger log.Logger) LogMiddlewareOption {
 	return func(l *logMiddleware) {
-		l.Logger = logger
+		if logger != nil {
+			l.Logger = logger
+		}
 	}
 }
 
@@ -173,9 +182,9 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 		headerID := c.Get(cn.HeaderID)
 
 		mid := buildOpts(opts...)
-		logger := mid.Logger.WithFields(
-			cn.HeaderID, info.TraceID,
-		).WithDefaultMessageTemplate(headerID + cn.LoggerDefaultSeparator)
+		logger := mid.Logger.
+			With(log.String(cn.HeaderID, info.TraceID)).
+			With(log.String("message_prefix", headerID+cn.LoggerDefaultSeparator))
 
 		ctx := uncommons.ContextWithLogger(c.UserContext(), logger)
 		c.SetUserContext(ctx)
@@ -191,7 +200,7 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 
 		info.FinishRequestInfo(&rw)
 
-		logger.Info(info.CLFString())
+		logger.Log(c.UserContext(), log.LevelInfo, info.CLFString())
 
 		return err
 	}
@@ -210,7 +219,10 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 			// Emit a debug log if overriding a different metadata id
 			if prev := getMetadataID(ctx); prev != "" && prev != rid {
 				mid := buildOpts(opts...)
-				mid.Logger.Debugf("Overriding correlation id from metadata (%s) with body request_id (%s)", prev, rid)
+				mid.Logger.Log(ctx, log.LevelDebug, "Overriding correlation id from metadata with body request_id",
+					log.String("metadata_id", prev),
+					log.String("body_request_id", rid),
+				)
 			}
 			// Override correlation id to match the body-provided, validated UUID request_id
 			ctx = uncommons.ContextWithHeaderID(ctx, rid)
@@ -225,8 +237,8 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 
 		mid := buildOpts(opts...)
 		logger := mid.Logger.
-			WithFields(cn.HeaderID, reqId).
-			WithDefaultMessageTemplate(reqId + cn.LoggerDefaultSeparator)
+			With(log.String(cn.HeaderID, reqId)).
+			With(log.String("message_prefix", reqId+cn.LoggerDefaultSeparator))
 
 		ctx = uncommons.ContextWithLogger(ctx, logger)
 
@@ -234,7 +246,15 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 		resp, err := handler(ctx, req)
 		duration := time.Since(start)
 
-		logger.Infof("gRPC method: %s, Duration: %s, Error: %v", info.FullMethod, duration, err)
+		fields := []log.Field{
+			log.String("method", info.FullMethod),
+			log.String("duration", duration.String()),
+		}
+		if err != nil {
+			fields = append(fields, log.Err(err))
+		}
+
+		logger.Log(ctx, log.LevelInfo, "gRPC request finished", fields...)
 
 		return resp, err
 	}

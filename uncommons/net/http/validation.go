@@ -1,4 +1,3 @@
-// Package http provides HTTP utilities for handlers.
 package http
 
 import (

@@ -1,5 +1,3 @@
-// Package backoff provides exponential backoff utilities with jitter support
-// for retry mechanisms and rate limiting scenarios.
 package backoff
 
 import (

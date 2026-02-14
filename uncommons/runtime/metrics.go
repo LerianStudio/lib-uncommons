@@ -2,9 +2,10 @@ package runtime
 
 import (
 	"context"
+	stdlog "log"
 	"sync"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/opentelemetry/metrics"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry/metrics"
 )
 
 const (
@@ -47,7 +48,11 @@ var (
 //
 // Example:
 //
-//	tl := opentelemetry.InitializeTelemetry(cfg)
+//	tl, err := opentelemetry.NewTelemetry(cfg)
+//	if err != nil {
+//	    log.Fatalf("failed to init telemetry: %v", err)
+//	}
+//	tl.ApplyGlobals()
 //	runtime.InitPanicMetrics(tl.MetricsFactory)
 func InitPanicMetrics(factory *metrics.MetricsFactory) {
 	panicMetricsMu.Lock()
@@ -97,12 +102,22 @@ func (pm *PanicMetrics) RecordPanicRecovered(ctx context.Context, component, gor
 		return
 	}
 
-	pm.factory.Counter(panicRecoveredMetric).
+	counter, err := pm.factory.Counter(panicRecoveredMetric)
+	if err != nil {
+		stdlog.Printf("[WARN] runtime: failed to create panic metric counter: %v", err)
+		return
+	}
+
+	err = counter.
 		WithLabels(map[string]string{
 			"component":      sanitizeLabel(component),
 			"goroutine_name": sanitizeLabel(goroutineName),
 		}).
 		AddOne(ctx)
+	if err != nil {
+		stdlog.Printf("[WARN] runtime: failed to record panic metric: %v", err)
+		return
+	}
 }
 
 // recordPanicMetric is a package-level helper that records a panic metric if metrics are initialized.

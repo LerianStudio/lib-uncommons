@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"golang.org/x/text/runes"
-	"golang.org/x/text/transform"
-	"golang.org/x/text/unicode/norm"
 	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
+
+	"golang.org/x/text/runes"
+	"golang.org/x/text/transform"
+	"golang.org/x/text/unicode/norm"
 )
 
 // RemoveAccents removes accents of a given word and returns it
@@ -131,26 +132,28 @@ func RegexIgnoreAccents(regex string) string {
 		"C": "C",
 		"Ç": "C",
 	}
-	s := ""
+
+	var b strings.Builder
+	b.Grow(len(regex) * 2) // Pre-allocate: rough estimate, builder will grow if needed
 
 	for _, ch := range regex {
 		c := string(ch)
 		if v1, found := m2[c]; found {
 			if v2, found2 := m1[v1]; found2 {
-				s += v2
+				b.WriteString(v2)
 				continue
 			}
 		}
 
-		s += string(ch)
+		b.WriteRune(ch)
 	}
 
-	return s
+	return b.String()
 }
 
 // RemoveChars from a string
 func RemoveChars(str string, chars map[string]bool) string {
-	s := ""
+	var b strings.Builder
 
 	for _, ch := range str {
 		c := string(ch)
@@ -158,10 +161,10 @@ func RemoveChars(str string, chars map[string]bool) string {
 			continue
 		}
 
-		s += string(ch)
+		b.WriteRune(ch)
 	}
 
-	return s
+	return b.String()
 }
 
 // ReplaceUUIDWithPlaceholder replaces UUIDs with a placeholder in a given path string.

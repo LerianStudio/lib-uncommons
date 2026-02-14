@@ -1,9 +1,12 @@
 package license
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
 )
 
 var (
@@ -17,9 +20,10 @@ var (
 type Handler func(reason string)
 
 // DefaultHandler is the default termination behavior
-// It triggers a panic which will be caught by the graceful shutdown handler
+// It records an assertion failure without panicking.
 func DefaultHandler(reason string) {
-	panic("LICENSE VALIDATION FAILED: " + reason)
+	asserter := assert.New(context.Background(), nil, "license", "DefaultHandler")
+	_ = asserter.Never(context.Background(), "LICENSE VALIDATION FAILED", "reason", reason)
 }
 
 // DefaultHandlerWithError returns an error instead of panicking.
@@ -57,15 +61,21 @@ func (m *ManagerShutdown) SetHandler(handler Handler) {
 // Terminate invokes the termination handler.
 // This will trigger the application to gracefully shut down.
 //
-// Note: This method panics if the manager was not initialized with New().
-// Use TerminateSafe() if you need to handle the uninitialized case gracefully.
+// Note: This method no longer panics if the manager was not initialized with New().
+// In that case it records an assertion failure and returns.
 func (m *ManagerShutdown) Terminate(reason string) {
 	m.mu.RLock()
 	handler := m.handler
 	m.mu.RUnlock()
 
 	if handler == nil {
-		panic(ErrManagerNotInitialized)
+		asserter := assert.New(context.Background(), nil, "license", "Terminate")
+		_ = asserter.NoError(context.Background(), ErrManagerNotInitialized,
+			"license terminate called without initialization",
+			"reason", reason,
+		)
+
+		return
 	}
 
 	handler(reason)
@@ -85,10 +95,10 @@ func (m *ManagerShutdown) TerminateWithError(reason string) error {
 
 // TerminateSafe invokes the termination handler and returns an error if the manager
 // was not properly initialized. This is the safe alternative to Terminate that
-// returns an error instead of panicking when the handler is nil.
+// returns an explicit error when the handler is nil.
 //
 // Use this method when you need to handle the uninitialized manager case gracefully.
-// For normal shutdown behavior where panic on uninitialized manager is acceptable,
+// For normal shutdown behavior where assertion-based handling is acceptable,
 // use Terminate() instead.
 func (m *ManagerShutdown) TerminateSafe(reason string) error {
 	m.mu.RLock()

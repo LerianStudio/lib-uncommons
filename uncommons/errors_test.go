@@ -1,10 +1,12 @@
+//go:build unit
+
 package uncommons
 
 import (
 	"errors"
 	"testing"
 
-	constant "github.com/LerianStudio/lib-uncommons/uncommons/constants"
+	constant "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -152,10 +154,11 @@ func TestValidateBusinessError(t *testing.T) {
 }
 
 func TestValidateBusinessError_WithArgs(t *testing.T) {
-	// Test that ValidateBusinessError accepts variadic args (even if not used currently)
-	result := ValidateBusinessError(constant.ErrAccountIneligibility, "account", "arg1", "arg2")
+	result := ValidateBusinessError(constant.ErrAccountIneligibility, "account", "alias=@account1", "balance=default")
 
 	response, ok := result.(Response)
 	assert.True(t, ok)
 	assert.Equal(t, "account", response.EntityType)
+	assert.Contains(t, response.Message, "alias=@account1")
+	assert.Contains(t, response.Message, "balance=default")
 }

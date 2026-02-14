@@ -5,15 +5,14 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"log"
+
+	libLog "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 )
 
 // simpleLogger is a minimal logger for examples.
 type simpleLogger struct{}
 
-func (l *simpleLogger) Errorf(format string, args ...any) {
-	log.Printf("[ERROR] "+format, args...)
-}
+func (l *simpleLogger) Log(_ context.Context, _ libLog.Level, _ string, _ ...libLog.Field) {}
 
 func ExampleSafeGoWithContext() {
 	ctx := context.Background()
@@ -89,7 +88,6 @@ func ExampleSetErrorReporter() {
 
 type customReporter struct{}
 
-func (r *customReporter) CaptureException(ctx context.Context, err error, tags map[string]string) {
+func (r *customReporter) CaptureException(_ context.Context, _ error, _ map[string]string) {
 	// In a real implementation, this would send to Sentry or similar
-	log.Printf("Captured exception: %v, tags: %v", err, tags)
 }

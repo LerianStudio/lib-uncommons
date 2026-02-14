@@ -5,10 +5,10 @@ package assert
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math"
 	"testing"
 
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
 )
@@ -23,8 +23,8 @@ type testLogger struct {
 	messages []string
 }
 
-func (l *testLogger) Errorf(format string, args ...any) {
-	l.messages = append(l.messages, fmt.Sprintf(format, args...))
+func (l *testLogger) Log(_ context.Context, _ log.Level, msg string, _ ...log.Field) {
+	l.messages = append(l.messages, msg)
 }
 
 func newTestAsserter(logger Logger) *Asserter {

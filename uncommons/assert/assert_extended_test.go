@@ -7,20 +7,24 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/runtime"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/runtime"
 
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/sdk/trace"
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
 
-	libLog "github.com/LerianStudio/lib-uncommons/uncommons/log"
-	"github.com/LerianStudio/lib-uncommons/uncommons/opentelemetry/metrics"
+	libLog "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry/metrics"
 )
 
 func newTestMetricsFactory() *metrics.MetricsFactory {
 	meter := noop.NewMeterProvider().Meter("test")
-	return metrics.NewMetricsFactory(meter, &libLog.NoneLogger{})
+	factory, err := metrics.NewMetricsFactory(meter, &libLog.NopLogger{})
+	if err != nil {
+		panic("newTestMetricsFactory: " + err.Error())
+	}
+	return factory
 }
 
 // --- AssertionError Tests ---

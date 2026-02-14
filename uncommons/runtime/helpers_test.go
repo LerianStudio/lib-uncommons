@@ -3,9 +3,12 @@
 package runtime
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 )
 
 // testLogger is a test logger that captures log calls.
@@ -24,16 +27,12 @@ func newTestLogger() *testLogger {
 	}
 }
 
-func (logger *testLogger) Errorf(format string, args ...any) {
+func (logger *testLogger) Log(_ context.Context, _ log.Level, msg string, _ ...log.Field) {
 	logger.mu.Lock()
 	defer logger.mu.Unlock()
 
-	logger.errorCalls = append(logger.errorCalls, format)
-
-	if len(args) > 0 {
-		logger.lastMessage = format
-	}
-
+	logger.errorCalls = append(logger.errorCalls, msg)
+	logger.lastMessage = msg
 	logger.panicLogged.Store(true)
 
 	// Signal that logging occurred (non-blocking)

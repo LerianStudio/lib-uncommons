@@ -226,3 +226,14 @@ func TestNext_ExhaustionReturnsError(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNoMatch)
 	assert.True(t, next.IsZero(), "expected zero time on exhaustion")
 }
+
+func TestNext_NilScheduleReturnsError(t *testing.T) {
+	t.Parallel()
+
+	var sched *schedule
+
+	next, err := sched.Next(time.Now())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNilSchedule)
+	assert.True(t, next.IsZero())
+}

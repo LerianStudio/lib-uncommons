@@ -1,6 +1,3 @@
-// Package errgroup provides a Group type for managing a collection of goroutines
-// working on subtasks of a common task, with coordinated cancellation and
-// first-error propagation.
 package errgroup
 
 import (
@@ -9,7 +6,8 @@ import (
 	"fmt"
 	"sync"
 
-	libLog "github.com/LerianStudio/lib-uncommons/uncommons/log"
+	libLog "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/runtime"
 )
 
 // ErrPanicRecovered is returned when a goroutine in the group panics.
@@ -19,6 +17,7 @@ var ErrPanicRecovered = errors.New("errgroup: panic recovered")
 // The first error returned by any goroutine cancels the group's context
 // and is returned by Wait. Subsequent errors are discarded.
 type Group struct {
+	ctx     context.Context
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 	errOnce sync.Once
@@ -33,12 +32,22 @@ func (grp *Group) SetLogger(logger libLog.Logger) {
 	grp.logger = logger
 }
 
+// effectiveCtx returns the group's context, falling back to context.Background()
+// for zero-value Groups not created via WithContext.
+func (grp *Group) effectiveCtx() context.Context {
+	if grp.ctx != nil {
+		return grp.ctx
+	}
+
+	return context.Background()
+}
+
 // WithContext returns a new Group and a derived context.Context.
 // The derived context is canceled when the first goroutine in the Group
 // returns a non-nil error or when Wait returns, whichever occurs first.
 func WithContext(ctx context.Context) (*Group, context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
-	return &Group{cancel: cancel}, ctx
+	return &Group{ctx: ctx, cancel: cancel}, ctx
 }
 
 // Go starts a new goroutine in the Group. The first non-nil error returned
@@ -51,9 +60,7 @@ func (grp *Group) Go(fn func() error) {
 		defer grp.wg.Done()
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				if grp.logger != nil {
-					grp.logger.Errorf("errgroup: panic recovered in goroutine: %v", recovered)
-				}
+				runtime.HandlePanicValue(grp.effectiveCtx(), grp.logger, recovered, "errgroup", "group.Go")
 
 				grp.errOnce.Do(func() {
 					grp.err = fmt.Errorf("%w: %v", ErrPanicRecovered, recovered)

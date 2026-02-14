@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -11,15 +12,24 @@ import (
 	"errors"
 	"io"
 
-	libLog "github.com/LerianStudio/lib-uncommons/uncommons/log"
-	"go.uber.org/zap"
+	libLog "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 )
 
+// Crypto groups hashing and symmetric encryption helpers.
 type Crypto struct {
 	HashSecretKey    string
 	EncryptSecretKey string
 	Logger           libLog.Logger
 	Cipher           cipher.AEAD
+}
+
+// logger returns the configured Logger, falling back to a NopLogger if nil.
+func (c *Crypto) logger() libLog.Logger {
+	if c.Logger != nil {
+		return c.Logger
+	}
+
+	return libLog.NewNop()
 }
 
 // GenerateHash using HMAC-SHA256
@@ -39,25 +49,25 @@ func (c *Crypto) GenerateHash(plaintext *string) string {
 // InitializeCipher loads an AES-GCM block cipher for encryption/decryption
 func (c *Crypto) InitializeCipher() error {
 	if c.Cipher != nil {
-		c.Logger.Info("Cipher already initialized")
+		c.logger().Log(context.Background(), libLog.LevelInfo, "Cipher already initialized")
 		return nil
 	}
 
 	decodedKey, err := hex.DecodeString(c.EncryptSecretKey)
 	if err != nil {
-		c.Logger.Error("Failed to decode hex private key", zap.Error(err))
+		c.logger().Log(context.Background(), libLog.LevelError, "Failed to decode hex private key", libLog.Err(err))
 		return err
 	}
 
 	blockCipher, err := aes.NewCipher(decodedKey)
 	if err != nil {
-		c.Logger.Error("Error creating AES block cipher with the private key", zap.Error(err))
+		c.logger().Log(context.Background(), libLog.LevelError, "Error creating AES block cipher with the private key", libLog.Err(err))
 		return err
 	}
 
 	aesGcm, err := cipher.NewGCM(blockCipher)
 	if err != nil {
-		c.Logger.Error("Error creating GCM cipher", zap.Error(err))
+		c.logger().Log(context.Background(), libLog.LevelError, "Error creating GCM cipher", libLog.Err(err))
 		return err
 	}
 
@@ -80,7 +90,7 @@ func (c *Crypto) Encrypt(plainText *string) (*string, error) {
 	// Generates random nonce with a size of 12 bytes
 	nonce := make([]byte, c.Cipher.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		c.Logger.Error("Failed to generate nonce", zap.Error(err))
+		c.logger().Log(context.Background(), libLog.LevelError, "Failed to generate nonce", libLog.Err(err))
 		return nil, err
 	}
 
@@ -105,14 +115,14 @@ func (c *Crypto) Decrypt(encryptedText *string) (*string, error) {
 
 	decodedEncryptedText, err := base64.StdEncoding.DecodeString(*encryptedText)
 	if err != nil {
-		c.Logger.Error("Failed to decode encrypted text", zap.Error(err))
+		c.logger().Log(context.Background(), libLog.LevelError, "Failed to decode encrypted text", libLog.Err(err))
 		return nil, err
 	}
 
 	nonceSize := c.Cipher.NonceSize()
 	if len(decodedEncryptedText) < nonceSize {
 		err := errors.New("ciphertext too short")
-		c.Logger.Error("Failed to decrypt ciphertext", zap.Error(err))
+		c.logger().Log(context.Background(), libLog.LevelError, "Failed to decrypt ciphertext", libLog.Err(err))
 
 		return nil, err
 	}
@@ -124,7 +134,7 @@ func (c *Crypto) Decrypt(encryptedText *string) (*string, error) {
 	// False positive described at https://github.com/securego/gosec/issues/1209
 	plainText, err := c.Cipher.Open(nil, nonce, cipherText, nil)
 	if err != nil {
-		c.Logger.Error("Failed to decrypt ciphertext", zap.Error(err))
+		c.logger().Log(context.Background(), libLog.LevelError, "Failed to decrypt ciphertext", libLog.Err(err))
 		return nil, err
 	}
 

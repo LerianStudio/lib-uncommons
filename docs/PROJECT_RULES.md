@@ -77,7 +77,7 @@ import (
     "go.uber.org/zap"
 
     // Internal packages
-    "github.com/LerianStudio/lib-uncommons/uncommons/log"
+    "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 )
 ```
 

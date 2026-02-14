@@ -1,6 +1,3 @@
-// Package cron provides a minimal cron expression parser and scheduler.
-// It supports standard 5-field expressions (minute, hour, day-of-month, month, day-of-week)
-// with wildcards, ranges, steps, and comma-separated lists.
 package cron
 
 import (
@@ -19,6 +16,9 @@ var ErrInvalidExpression = errors.New("invalid cron expression")
 // ErrNoMatch is returned when Next exhausts its iteration limit without
 // finding a time that satisfies all cron fields.
 var ErrNoMatch = errors.New("cron: no matching time found within iteration limit")
+
+// ErrNilSchedule is returned when Next is called on a nil schedule receiver.
+var ErrNilSchedule = errors.New("cron schedule is nil")
 
 // Cron field boundary constants.
 const (
@@ -103,7 +103,7 @@ func Parse(expr string) (Schedule, error) {
 // ErrNoMatch if no match is found within maxIterations.
 func (sched *schedule) Next(from time.Time) (time.Time, error) {
 	if sched == nil {
-		return time.Time{}, nil
+		return time.Time{}, ErrNilSchedule
 	}
 
 	from = from.UTC()

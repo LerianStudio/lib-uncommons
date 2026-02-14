@@ -1,3 +1,5 @@
+//go:build unit
+
 package http
 
 import (
@@ -9,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons"
-	"github.com/LerianStudio/lib-uncommons/uncommons/opentelemetry"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry"
 	"github.com/gofiber/fiber/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,10 +31,10 @@ func setupTestTracer() (*sdktrace.TracerProvider, *tracetest.SpanRecorder) {
 	tracerProvider := sdktrace.NewTracerProvider(
 		sdktrace.WithSpanProcessor(spanRecorder),
 	)
-	
+
 	// Set the global propagator to TraceContext
 	otel.SetTextMapPropagator(propagation.TraceContext{})
-	
+
 	return tracerProvider, spanRecorder
 }
 
@@ -105,18 +107,18 @@ func TestWithTelemetry(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			
+
 			// Setup test tracer
 			tp, spanRecorder := setupTestTracer()
 			defer func() {
 				_ = tp.Shutdown(ctx)
 			}()
-			
+
 			// Replace the global tracer provider for this test
 			oldTracerProvider := otel.GetTracerProvider()
 			otel.SetTracerProvider(tp)
 			defer otel.SetTracerProvider(oldTracerProvider)
-			
+
 			// Setup telemetry
 			var telemetry *opentelemetry.Telemetry
 			if !tt.nilTelemetry {
@@ -171,20 +173,20 @@ func TestWithTelemetry(t *testing.T) {
 
 			// Check status code
 			assert.Equal(t, tt.expectedStatusCode, resp.StatusCode)
-			
+
 			// Check spans
 			spans := spanRecorder.Ended()
-			
+
 			if tt.expectSpan && !tt.nilTelemetry && !tt.swaggerPath {
 				// Should have created a span
 				require.GreaterOrEqual(t, len(spans), 1, "Expected at least one span to be created")
-				
+
 				// Check span name
 				expectedPath := tt.path
 				if strings.Contains(tt.path, "123e4567-e89b-12d3-a456-426614174000") {
 					expectedPath = uncommons.ReplaceUUIDWithPlaceholder(tt.path)
 				}
-				
+
 				spanFound := false
 				for _, span := range spans {
 					if span.Name() == tt.method+" "+expectedPath {
@@ -252,18 +254,18 @@ func TestWithTelemetryExcludedRoutes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			
+
 			// Setup test tracer
 			tp, spanRecorder := setupTestTracer()
 			defer func() {
 				_ = tp.Shutdown(ctx)
 			}()
-			
+
 			// Replace the global tracer provider for this test
 			oldTracerProvider := otel.GetTracerProvider()
 			otel.SetTracerProvider(tp)
 			defer otel.SetTracerProvider(oldTracerProvider)
-			
+
 			// Setup telemetry
 			telemetry := &opentelemetry.Telemetry{
 				TelemetryConfig: opentelemetry.TelemetryConfig{
@@ -298,14 +300,14 @@ func TestWithTelemetryExcludedRoutes(t *testing.T) {
 
 			// Check status code
 			assert.Equal(t, http.StatusOK, resp.StatusCode)
-			
+
 			// Check spans
 			spans := spanRecorder.Ended()
-			
+
 			if tt.expectSpan {
 				// Should have created a span
 				require.GreaterOrEqual(t, len(spans), 1, "Expected at least one span to be created")
-				
+
 				// Check span name
 				expectedSpanName := tt.method + " " + uncommons.ReplaceUUIDWithPlaceholder(tt.path)
 				spanFound := false
@@ -518,7 +520,7 @@ func TestExtractHTTPContext(t *testing.T) {
 	// Add test route
 	app.Get("/test", func(c *fiber.Ctx) error {
 		// Extract context
-		ctx := opentelemetry.ExtractHTTPContext(c)
+		ctx := opentelemetry.ExtractHTTPContext(c.UserContext(), c)
 
 		// Check if span info was extracted
 		spanCtx := trace.SpanContextFromContext(ctx)
@@ -558,11 +560,11 @@ func TestExtractHTTPContext(t *testing.T) {
 // TestWithTelemetryConditionalTracePropagation tests the conditional trace propagation based on UserAgent
 func TestWithTelemetryConditionalTracePropagation(t *testing.T) {
 	tests := []struct {
-		name               string
-		userAgent          string
-		traceparent        string
+		name                 string
+		userAgent            string
+		traceparent          string
 		shouldPropagateTrace bool
-		description        string
+		description          string
 	}{
 		{
 			name:                 "Internal Lerian service - should propagate trace",
@@ -691,10 +693,10 @@ func TestWithTelemetryConditionalTracePropagation(t *testing.T) {
 // TestGetGRPCUserAgent tests the getGRPCUserAgent helper function
 func TestGetGRPCUserAgent(t *testing.T) {
 	tests := []struct {
-		name           string
-		setupMetadata  func() context.Context
-		expectedUA     string
-		description    string
+		name          string
+		setupMetadata func() context.Context
+		expectedUA    string
+		description   string
 	}{
 		{
 			name: "Valid user-agent in metadata",

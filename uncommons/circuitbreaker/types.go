@@ -2,15 +2,26 @@ package circuitbreaker
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sony/gobreaker"
 )
 
+var (
+	// ErrInvalidConfig is returned when a Config has invalid or insufficient values.
+	ErrInvalidConfig = errors.New("circuitbreaker: invalid config")
+
+	// ErrNilLogger is returned when a nil logger is passed to NewManager.
+	ErrNilLogger = errors.New("circuitbreaker: logger must not be nil")
+)
+
 // Manager manages circuit breakers for external services
 type Manager interface {
-	// GetOrCreate returns existing circuit breaker or creates a new one
-	GetOrCreate(serviceName string, config Config) CircuitBreaker
+	// GetOrCreate returns existing circuit breaker or creates a new one.
+	// Returns an error if the config is invalid.
+	GetOrCreate(serviceName string, config Config) (CircuitBreaker, error)
 
 	// Execute runs a function through the circuit breaker
 	Execute(serviceName string, fn func() (any, error)) (any, error)
@@ -41,11 +52,29 @@ type CircuitBreaker interface {
 // Config holds circuit breaker configuration
 type Config struct {
 	MaxRequests         uint32        // Max requests in half-open state
-	Interval            time.Duration // Wait time before half-open retry
-	Timeout             time.Duration // Execution timeout
+	Interval            time.Duration // Cyclic period of the closed state to clear internal counts
+	Timeout             time.Duration // Period of the open state before becoming half-open
 	ConsecutiveFailures uint32        // Consecutive failures to trigger open state
 	FailureRatio        float64       // Failure ratio to trigger open (e.g., 0.5 for 50%)
 	MinRequests         uint32        // Min requests before checking ratio
+}
+
+// Validate checks that the Config has valid values.
+// At least one trip condition (ConsecutiveFailures or MinRequests+FailureRatio) must be enabled.
+func (c Config) Validate() error {
+	if c.ConsecutiveFailures == 0 && c.MinRequests == 0 {
+		return fmt.Errorf("%w: at least one trip condition must be set (ConsecutiveFailures > 0 or MinRequests > 0)", ErrInvalidConfig)
+	}
+
+	if c.FailureRatio < 0 || c.FailureRatio > 1 {
+		return fmt.Errorf("%w: FailureRatio must be between 0 and 1, got %f", ErrInvalidConfig, c.FailureRatio)
+	}
+
+	if c.MinRequests > 0 && c.FailureRatio <= 0 {
+		return fmt.Errorf("%w: FailureRatio must be > 0 when MinRequests > 0 (ratio-based trip is ineffective with FailureRatio=0)", ErrInvalidConfig)
+	}
+
+	return nil
 }
 
 // State represents circuit breaker state
@@ -72,24 +101,17 @@ type circuitBreaker struct {
 	breaker *gobreaker.CircuitBreaker
 }
 
+// Execute runs fn through the underlying circuit breaker.
 func (cb *circuitBreaker) Execute(fn func() (any, error)) (any, error) {
 	return cb.breaker.Execute(fn)
 }
 
+// State returns the current circuit breaker state.
 func (cb *circuitBreaker) State() State {
-	state := cb.breaker.State()
-	switch state {
-	case gobreaker.StateClosed:
-		return StateClosed
-	case gobreaker.StateOpen:
-		return StateOpen
-	case gobreaker.StateHalfOpen:
-		return StateHalfOpen
-	default:
-		return StateUnknown
-	}
+	return convertGobreakerState(cb.breaker.State())
 }
 
+// Counts returns the current breaker counters.
 func (cb *circuitBreaker) Counts() Counts {
 	counts := cb.breaker.Counts()
 
@@ -127,4 +149,18 @@ type HealthCheckFunc func(ctx context.Context) error
 type StateChangeListener interface {
 	// OnStateChange is called when a circuit breaker changes state
 	OnStateChange(serviceName string, from State, to State)
+}
+
+// convertGobreakerState converts gobreaker.State to our State type.
+func convertGobreakerState(state gobreaker.State) State {
+	switch state {
+	case gobreaker.StateClosed:
+		return StateClosed
+	case gobreaker.StateOpen:
+		return StateOpen
+	case gobreaker.StateHalfOpen:
+		return StateHalfOpen
+	default:
+		return StateUnknown
+	}
 }

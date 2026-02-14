@@ -1,13 +1,15 @@
 package http
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log"
-	"net/http"
 	"strings"
 	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons"
+	libLog "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 	"github.com/gofiber/fiber/v2"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -23,7 +25,7 @@ func Ping(c *fiber.Ctx) error {
 
 // Version returns HTTP Status 200 with given version.
 func Version(c *fiber.Ctx) error {
-	return OK(c, fiber.Map{
+	return Respond(c, fiber.StatusOK, fiber.Map{
 		"version":     uncommons.GetenvOrDefault("VERSION", "0.0.0"),
 		"requestDate": time.Now().UTC(),
 	})
@@ -41,7 +43,7 @@ func Welcome(service string, description string) fiber.Handler {
 
 // NotImplementedEndpoint returns HTTP 501 with not implemented message.
 func NotImplementedEndpoint(c *fiber.Ctx) error {
-	return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{"error": "Not implemented yet"})
+	return RespondError(c, fiber.StatusNotImplemented, "not_implemented", "Not implemented yet")
 }
 
 // File servers a specific file.
@@ -73,33 +75,35 @@ func ExtractTokenFromHeader(c *fiber.Ctx) string {
 	return ""
 }
 
-// HandleFiberError handles errors for Fiber, properly unwrapping errors to check for fiber.Error
-func HandleFiberError(c *fiber.Ctx, err error) error {
+// FiberErrorHandler is the canonical Fiber error handler.
+// It uses the structured logger from the request context so that error
+// details pass through the sanitization pipeline instead of going to
+// plain stdlib log.Printf.
+func FiberErrorHandler(c *fiber.Ctx, err error) error {
 	// Safely end spans if user context exists
 	ctx := c.UserContext()
 	if ctx != nil {
-		// End the span immediately instead of in a goroutine to ensure prompt completion
 		trace.SpanFromContext(ctx).End()
 	}
 
-	// Default error handling
-	code := fiber.StatusInternalServerError
-
-	var e *fiber.Error
-	if errors.As(err, &e) {
-		code = e.Code
-	}
-
-	if code == fiber.StatusInternalServerError {
-		// Log the actual error for debugging purposes.
-		log.Printf("handler error on %s %s: %v", c.Method(), c.Path(), err)
-
-		return c.Status(code).JSON(fiber.Map{
-			"error": http.StatusText(code),
+	var fe *fiber.Error
+	if errors.As(err, &fe) {
+		return RenderError(c, ErrorResponse{
+			Code:    fe.Code,
+			Title:   "request_failed",
+			Message: fe.Message,
 		})
 	}
 
-	return c.Status(code).JSON(fiber.Map{
-		"error": err.Error(),
-	})
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	logger := uncommons.NewLoggerFromContext(ctx)
+	logger.Log(ctx, libLog.LevelError,
+		fmt.Sprintf("handler error on %s %s", c.Method(), c.Path()),
+		libLog.Err(err),
+	)
+
+	return RenderError(c, err)
 }

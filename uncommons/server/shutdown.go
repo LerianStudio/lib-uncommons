@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -8,10 +9,12 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
-	"github.com/LerianStudio/lib-uncommons/uncommons/license"
-	"github.com/LerianStudio/lib-uncommons/uncommons/log"
-	"github.com/LerianStudio/lib-uncommons/uncommons/opentelemetry"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/license"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/runtime"
 	"github.com/gofiber/fiber/v2"
 	"google.golang.org/grpc"
 )
@@ -22,29 +25,40 @@ var ErrNoServersConfigured = errors.New("no servers configured: use WithHTTPServ
 // ServerManager handles the graceful shutdown of multiple server types.
 // It can manage HTTP servers, gRPC servers, or both simultaneously.
 type ServerManager struct {
-	httpServer     *fiber.App
-	grpcServer     *grpc.Server
-	licenseClient  *license.ManagerShutdown
-	telemetry      *opentelemetry.Telemetry
-	logger         log.Logger
+	httpServer         *fiber.App
+	grpcServer         *grpc.Server
+	licenseClient      *license.ManagerShutdown
+	telemetry          *opentelemetry.Telemetry
+	logger             log.Logger
 	httpAddress        string
 	grpcAddress        string
 	serversStarted     chan struct{}
 	serversStartedOnce sync.Once
 	shutdownChan       <-chan struct{}
+	shutdownOnce       sync.Once
+	shutdownTimeout    time.Duration
+	startupErrors      chan error
 }
 
 // NewServerManager creates a new instance of ServerManager.
+// If logger is nil, a no-op logger is used to ensure nil-safe operation
+// throughout the server lifecycle.
 func NewServerManager(
 	licenseClient *license.ManagerShutdown,
 	telemetry *opentelemetry.Telemetry,
 	logger log.Logger,
 ) *ServerManager {
+	if logger == nil {
+		logger = log.NewNop()
+	}
+
 	return &ServerManager{
-		licenseClient:  licenseClient,
-		telemetry:      telemetry,
-		logger:         logger,
-		serversStarted: make(chan struct{}),
+		licenseClient:   licenseClient,
+		telemetry:       telemetry,
+		logger:          logger,
+		serversStarted:  make(chan struct{}),
+		shutdownTimeout: 30 * time.Second,
+		startupErrors:   make(chan error, 2),
 	}
 }
 
@@ -68,6 +82,14 @@ func (sm *ServerManager) WithGRPCServer(server *grpc.Server, address string) *Se
 // This allows tests to trigger shutdown deterministically instead of relying on OS signals.
 func (sm *ServerManager) WithShutdownChannel(ch <-chan struct{}) *ServerManager {
 	sm.shutdownChan = ch
+
+	return sm
+}
+
+// WithShutdownTimeout configures the maximum duration to wait for gRPC GracefulStop
+// before forcing a hard stop. Defaults to 30 seconds.
+func (sm *ServerManager) WithShutdownTimeout(d time.Duration) *ServerManager {
+	sm.shutdownTimeout = d
 
 	return sm
 }
@@ -129,11 +151,7 @@ func (sm *ServerManager) StartWithGracefulShutdown() {
 	// Run everything in a recover block
 	defer func() {
 		if r := recover(); r != nil {
-			if sm.logger != nil {
-				sm.logger.Errorf("Fatal error (panic): %v", r)
-			} else {
-				fmt.Printf("Fatal error (panic): %v\n", r)
-			}
+			runtime.HandlePanicValue(context.Background(), sm.logger, r, "server", "StartWithGracefulShutdown")
 
 			sm.executeShutdown()
 
@@ -153,32 +171,62 @@ func (sm *ServerManager) startServers() {
 
 	// Start HTTP server if configured
 	if sm.httpServer != nil {
-		go func() {
-			sm.logInfof("Starting HTTP server on %s", sm.httpAddress)
+		runtime.SafeGoWithContextAndComponent(
+			context.Background(),
+			sm.logger,
+			"server",
+			"start_http_server",
+			runtime.KeepRunning,
+			func(_ context.Context) {
+				sm.logInfof("Starting HTTP server on %s", sm.httpAddress)
 
-			if err := sm.httpServer.Listen(sm.httpAddress); err != nil {
-				sm.logErrorf("HTTP server error: %v", err)
-			}
-		}()
+				if err := sm.httpServer.Listen(sm.httpAddress); err != nil {
+					sm.logErrorf("HTTP server error: %v", err)
+
+					select {
+					case sm.startupErrors <- fmt.Errorf("HTTP server: %w", err):
+					default:
+					}
+				}
+			},
+		)
 
 		started++
 	}
 
 	// Start gRPC server if configured
 	if sm.grpcServer != nil {
-		go func() {
-			sm.logInfof("Starting gRPC server on %s", sm.grpcAddress)
+		runtime.SafeGoWithContextAndComponent(
+			context.Background(),
+			sm.logger,
+			"server",
+			"start_grpc_server",
+			runtime.KeepRunning,
+			func(_ context.Context) {
+				sm.logInfof("Starting gRPC server on %s", sm.grpcAddress)
 
-			listener, err := net.Listen("tcp", sm.grpcAddress)
-			if err != nil {
-				sm.logErrorf("Failed to listen on gRPC address: %v", err)
-				return
-			}
+				listener, err := net.Listen("tcp", sm.grpcAddress)
+				if err != nil {
+					sm.logErrorf("Failed to listen on gRPC address: %v", err)
 
-			if err := sm.grpcServer.Serve(listener); err != nil {
-				sm.logErrorf("gRPC server error: %v", err)
-			}
-		}()
+					select {
+					case sm.startupErrors <- fmt.Errorf("gRPC listen: %w", err):
+					default:
+					}
+
+					return
+				}
+
+				if err := sm.grpcServer.Serve(listener); err != nil {
+					sm.logErrorf("gRPC server error: %v", err)
+
+					select {
+					case sm.startupErrors <- fmt.Errorf("gRPC serve: %w", err):
+					default:
+					}
+				}
+			},
+		)
 
 		started++
 	}
@@ -194,21 +242,21 @@ func (sm *ServerManager) startServers() {
 // logInfo safely logs an info message if logger is available
 func (sm *ServerManager) logInfo(msg string) {
 	if sm.logger != nil {
-		sm.logger.Info(msg)
+		sm.logger.Log(context.Background(), log.LevelInfo, msg)
 	}
 }
 
 // logInfof safely logs a formatted info message if logger is available
 func (sm *ServerManager) logInfof(format string, args ...any) {
 	if sm.logger != nil {
-		sm.logger.Infof(format, args...)
+		sm.logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf(format, args...))
 	}
 }
 
 // logErrorf safely logs an error message if logger is available
 func (sm *ServerManager) logErrorf(format string, args ...any) {
 	if sm.logger != nil {
-		sm.logger.Errorf(format, args...)
+		sm.logger.Log(context.Background(), log.LevelError, fmt.Sprintf(format, args...))
 	}
 }
 
@@ -217,7 +265,7 @@ func (sm *ServerManager) logErrorf(format string, args ...any) {
 // that may or may not call os.Exit(1) in their Fatal method.
 func (sm *ServerManager) logFatal(msg string) {
 	if sm.logger != nil {
-		sm.logger.Error(msg)
+		sm.logger.Log(context.Background(), log.LevelError, msg)
 	} else {
 		fmt.Println(msg)
 	}
@@ -226,14 +274,25 @@ func (sm *ServerManager) logFatal(msg string) {
 }
 
 // handleShutdown sets up signal handling and executes the shutdown sequence
-// when a termination signal is received or when the shutdown channel is closed.
+// when a termination signal is received, when the shutdown channel is closed,
+// or when a server startup error is detected.
 func (sm *ServerManager) handleShutdown() {
 	if sm.shutdownChan != nil {
-		<-sm.shutdownChan
+		select {
+		case <-sm.shutdownChan:
+		case err := <-sm.startupErrors:
+			sm.logErrorf("Server startup failed: %v", err)
+		}
 	} else {
 		c := make(chan os.Signal, 1)
 		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-		<-c
+
+		select {
+		case <-c:
+			signal.Stop(c)
+		case err := <-sm.startupErrors:
+			sm.logErrorf("Server startup failed: %v", err)
+		}
 	}
 
 	sm.logInfo("Gracefully shutting down all servers...")
@@ -242,145 +301,69 @@ func (sm *ServerManager) handleShutdown() {
 }
 
 // executeShutdown performs the actual shutdown operations in the correct order for ServerManager.
+// It is idempotent: multiple calls are safe, but only the first invocation executes the shutdown sequence.
 func (sm *ServerManager) executeShutdown() {
-	// Use a non-blocking read to check if servers have started.
-	// This prevents a deadlock if a panic occurs before startServers() completes.
-	select {
-	case <-sm.serversStarted:
-		// Servers started, proceed with normal shutdown.
-	default:
-		// Servers did not start (or start was interrupted).
-		sm.logInfo("Shutdown initiated before servers were fully started.")
-	}
-
-	// Shutdown the HTTP server if available
-	if sm.httpServer != nil {
-		sm.logInfo("Shutting down HTTP server...")
-
-		if err := sm.httpServer.Shutdown(); err != nil {
-			sm.logErrorf("Error during HTTP server shutdown: %v", err)
+	sm.shutdownOnce.Do(func() {
+		// Use a non-blocking read to check if servers have started.
+		// This prevents a deadlock if a panic occurs before startServers() completes.
+		select {
+		case <-sm.serversStarted:
+			// Servers started, proceed with normal shutdown.
+		default:
+			// Servers did not start (or start was interrupted).
+			sm.logInfo("Shutdown initiated before servers were fully started.")
 		}
-	}
 
-	// Shutdown telemetry BEFORE gRPC server to allow metrics export
-	if sm.telemetry != nil {
-		sm.logInfo("Shutting down telemetry...")
-		sm.telemetry.ShutdownTelemetry()
-	}
+		// Shutdown the HTTP server if available
+		if sm.httpServer != nil {
+			sm.logInfo("Shutting down HTTP server...")
 
-	// Shutdown the gRPC server if available
-	if sm.grpcServer != nil {
-		sm.logInfo("Shutting down gRPC server...")
-
-		// Use GracefulStop which waits for all RPCs to finish
-		sm.grpcServer.GracefulStop()
-		sm.logInfo("gRPC server stopped gracefully")
-	}
-
-	// Sync logger if available
-	if sm.logger != nil {
-		sm.logInfo("Syncing logger...")
-
-		if err := sm.logger.Sync(); err != nil {
-			sm.logErrorf("Failed to sync logger: %v", err)
+			if err := sm.httpServer.Shutdown(); err != nil {
+				sm.logErrorf("Error during HTTP server shutdown: %v", err)
+			}
 		}
-	}
 
-	// Shutdown license background refresh if available
-	if sm.licenseClient != nil {
-		sm.logInfo("Shutting down license background refresh...")
-		sm.licenseClient.Terminate("shutdown")
-	}
-
-	sm.logInfo("Graceful shutdown completed")
-}
-
-// GracefulShutdown handles the graceful shutdown of application components.
-// It's designed to be reusable across different services.
-// Deprecated: Use ServerManager instead for better coordination.
-type GracefulShutdown struct {
-	app           *fiber.App
-	grpcServer    *grpc.Server
-	licenseClient *license.ManagerShutdown
-	telemetry     *opentelemetry.Telemetry
-	logger        log.Logger
-}
-
-// NewGracefulShutdown creates a new instance of GracefulShutdown.
-// Deprecated: Use NewServerManager instead for better coordination.
-func NewGracefulShutdown(
-	app *fiber.App,
-	grpcServer *grpc.Server,
-	licenseClient *license.ManagerShutdown,
-	telemetry *opentelemetry.Telemetry,
-	logger log.Logger,
-) *GracefulShutdown {
-	return &GracefulShutdown{
-		app:           app,
-		grpcServer:    grpcServer,
-		licenseClient: licenseClient,
-		telemetry:     telemetry,
-		logger:        logger,
-	}
-}
-
-// HandleShutdown sets up signal handling and executes the shutdown sequence
-// when a termination signal is received.
-// Deprecated: Use ServerManager.StartWithGracefulShutdown() instead.
-func (gs *GracefulShutdown) HandleShutdown() {
-	// Create channel for shutdown signals
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-
-	// Block until we receive a signal
-	<-c
-	gs.logger.Info("Gracefully shutting down...")
-
-	// Execute shutdown sequence
-	gs.executeShutdown()
-}
-
-// executeShutdown performs the actual shutdown operations in the correct order.
-// Deprecated: Use ServerManager.executeShutdown() for better coordination.
-func (gs *GracefulShutdown) executeShutdown() {
-	// Shutdown the HTTP server if available
-	if gs.app != nil {
-		gs.logger.Info("Shutting down HTTP server...")
-
-		if err := gs.app.Shutdown(); err != nil {
-			gs.logger.Errorf("Error during HTTP server shutdown: %v", err)
+		// Shutdown telemetry BEFORE gRPC server to allow metrics export
+		if sm.telemetry != nil {
+			sm.logInfo("Shutting down telemetry...")
+			sm.telemetry.ShutdownTelemetry()
 		}
-	}
 
-	// Shutdown the gRPC server if available
-	if gs.grpcServer != nil {
-		gs.logger.Info("Shutting down gRPC server...")
+		// Shutdown the gRPC server if available with a timeout
+		if sm.grpcServer != nil {
+			sm.logInfo("Shutting down gRPC server...")
 
-		// Use GracefulStop which waits for all RPCs to finish
-		gs.grpcServer.GracefulStop()
-		gs.logger.Info("gRPC server stopped gracefully")
-	}
+			done := make(chan struct{})
 
-	// Shutdown telemetry if available
-	if gs.telemetry != nil {
-		gs.logger.Info("Shutting down telemetry...")
-		gs.telemetry.ShutdownTelemetry()
-	}
+			go func() {
+				sm.grpcServer.GracefulStop()
+				close(done)
+			}()
 
-	// Sync logger if available
-	if gs.logger != nil {
-		gs.logger.Info("Syncing logger...")
-
-		if err := gs.logger.Sync(); err != nil {
-			gs.logger.Errorf("Failed to sync logger: %v", err)
+			select {
+			case <-done:
+				sm.logInfo("gRPC server stopped gracefully")
+			case <-time.After(sm.shutdownTimeout):
+				sm.logInfo("gRPC graceful stop timed out, forcing stop...")
+				sm.grpcServer.Stop()
+			}
 		}
-	}
 
-	// Shutdown license background refresh if available
-	if gs.licenseClient != nil {
-		gs.logger.Info("Shutting down license background refresh...")
-		gs.licenseClient.Terminate("shutdown")
-	}
+		// Sync logger if available
+		if sm.logger != nil {
+			sm.logInfo("Syncing logger...")
 
-	gs.logger.Info("Graceful shutdown completed")
+			if err := sm.logger.Sync(context.Background()); err != nil {
+				sm.logErrorf("Failed to sync logger: %v", err)
+			}
+		}
+
+		// Shutdown license background refresh if available
+		if sm.licenseClient != nil {
+			sm.logInfo("Shutting down license background refresh...")
+			sm.licenseClient.Terminate("shutdown")
+		}
+
+		sm.logInfo("Graceful shutdown completed")
+	})
 }
