@@ -33,6 +33,17 @@ const (
 	BasicAuth = "Basic Auth"
 	// WWWAuthenticate is the HTTP WWW-Authenticate header key.
 	WWWAuthenticate = "WWW-Authenticate"
+	// Bearer is the HTTP Bearer auth scheme token.
+	Bearer = "Bearer"
+
+	// HeaderReferer is the HTTP Referer header key.
+	HeaderReferer = "Referer"
+	// HeaderContentType is the HTTP Content-Type header key.
+	HeaderContentType = "Content-Type"
+	// HeaderTraceparentPascal is the PascalCase variant of the Traceparent header for gRPC metadata.
+	HeaderTraceparentPascal = "Traceparent"
+	// HeaderTracestatePascal is the PascalCase variant of the Tracestate header for gRPC metadata.
+	HeaderTracestatePascal = "Tracestate"
 
 	// RateLimitLimit is the header containing the configured request quota.
 	RateLimitLimit = "X-RateLimit-Limit"

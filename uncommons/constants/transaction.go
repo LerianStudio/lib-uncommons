@@ -23,4 +23,6 @@ const (
 	PENDING = "PENDING"
 	// CANCELED identifies transaction intents canceled or rolled back.
 	CANCELED = "CANCELED"
+	// NOTED identifies transaction intents that have been noted/acknowledged.
+	NOTED = "NOTED"
 )
