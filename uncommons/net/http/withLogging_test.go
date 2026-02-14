@@ -28,7 +28,7 @@ func TestNewRequestInfo_Basic(t *testing.T) {
 	var info *RequestInfo
 
 	app.Get("/api/test", func(c *fiber.Ctx) error {
-		info = NewRequestInfo(c)
+		info = NewRequestInfo(c, false)
 		return c.SendStatus(http.StatusOK)
 	})
 
@@ -57,7 +57,7 @@ func TestNewRequestInfo_WithReferer(t *testing.T) {
 	var info *RequestInfo
 
 	app.Get("/", func(c *fiber.Ctx) error {
-		info = NewRequestInfo(c)
+		info = NewRequestInfo(c, false)
 		return c.SendStatus(http.StatusOK)
 	})
 
@@ -297,6 +297,243 @@ func TestWithHTTPLogging_PostWithJSONBody(t *testing.T) {
 	defer func() { require.NoError(t, resp.Body.Close()) }()
 
 	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+}
+
+// ---------------------------------------------------------------------------
+// handleJSONBody: array support
+// ---------------------------------------------------------------------------
+
+func TestHandleJSONBody_ArrayTopLevel(t *testing.T) {
+	t.Parallel()
+
+	input := `[{"name":"alice","password":"secret"},{"name":"bob","api_key":"key123"}]`
+	result := handleJSONBody([]byte(input))
+
+	assert.NotContains(t, result, "secret")
+	assert.NotContains(t, result, "key123")
+	assert.Contains(t, result, "alice")
+	assert.Contains(t, result, "bob")
+	assert.Contains(t, result, cn.ObfuscatedValue)
+}
+
+func TestHandleJSONBody_ArrayOfPrimitives(t *testing.T) {
+	t.Parallel()
+
+	input := `[1, 2, 3]`
+	result := handleJSONBody([]byte(input))
+	assert.Equal(t, `[1,2,3]`, result)
+}
+
+func TestHandleJSONBody_EmptyArray(t *testing.T) {
+	t.Parallel()
+
+	input := `[]`
+	result := handleJSONBody([]byte(input))
+	assert.Equal(t, `[]`, result)
+}
+
+// ---------------------------------------------------------------------------
+// Obfuscation depth limit
+// ---------------------------------------------------------------------------
+
+func nestedMapWithPassword(levels int, password string) map[string]any {
+	node := map[string]any{"password": password}
+
+	for i := 0; i < levels; i++ {
+		node = map[string]any{"level": node}
+	}
+
+	return node
+}
+
+func nestedMapPassword(data map[string]any, levels int) string {
+	current := data
+	for i := 0; i < levels; i++ {
+		next, ok := current["level"].(map[string]any)
+		if !ok {
+			return ""
+		}
+
+		current = next
+	}
+
+	password, _ := current["password"].(string)
+
+	return password
+}
+
+func nestedSliceWithPassword(wrappers int, password string) []any {
+	var node any = map[string]any{"password": password}
+
+	for i := 0; i < wrappers; i++ {
+		node = []any{node}
+	}
+
+	data, _ := node.([]any)
+
+	return data
+}
+
+func nestedSlicePassword(data []any, wrappers int) string {
+	var current any = data
+	for i := 0; i < wrappers; i++ {
+		next, ok := current.([]any)
+		if !ok || len(next) == 0 {
+			return ""
+		}
+
+		current = next[0]
+	}
+
+	node, ok := current.(map[string]any)
+	if !ok {
+		return ""
+	}
+
+	password, _ := node["password"].(string)
+
+	return password
+}
+
+func TestObfuscateMapRecursively_DepthLimit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("obfuscates before boundary", func(t *testing.T) {
+		t.Parallel()
+
+		levels := maxObfuscationDepth - 1 // password at depth 31 when max is 32
+		data := nestedMapWithPassword(levels, "deep-secret")
+
+		obfuscateMapRecursively(data, 0)
+		assert.Equal(t, cn.ObfuscatedValue, nestedMapPassword(data, levels))
+	})
+
+	t.Run("does not obfuscate at boundary", func(t *testing.T) {
+		t.Parallel()
+
+		levels := maxObfuscationDepth // password at depth 32 when max is 32
+		data := nestedMapWithPassword(levels, "deep-secret")
+
+		obfuscateMapRecursively(data, 0)
+		assert.Equal(t, "deep-secret", nestedMapPassword(data, levels))
+	})
+}
+
+func TestObfuscateSliceRecursively_DepthLimit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("obfuscates before boundary", func(t *testing.T) {
+		t.Parallel()
+
+		wrappers := maxObfuscationDepth - 1 // map processed at depth 31
+		data := nestedSliceWithPassword(wrappers, "deep-secret")
+
+		obfuscateSliceRecursively(data, 0)
+		assert.Equal(t, cn.ObfuscatedValue, nestedSlicePassword(data, wrappers))
+	})
+
+	t.Run("does not obfuscate at boundary", func(t *testing.T) {
+		t.Parallel()
+
+		wrappers := maxObfuscationDepth // map reached at depth 32
+		data := nestedSliceWithPassword(wrappers, "deep-secret")
+
+		obfuscateSliceRecursively(data, 0)
+		assert.Equal(t, "deep-secret", nestedSlicePassword(data, wrappers))
+	})
+}
+
+// ---------------------------------------------------------------------------
+// handleMultipartBody
+// ---------------------------------------------------------------------------
+
+func TestHandleMultipartBody_ViaMiddleware(t *testing.T) {
+	t.Parallel()
+
+	// We test multipart by going through the middleware stack.
+	// The handleMultipartBody function requires a fiber.Ctx with a parsed multipart form.
+	boundary := "testboundary"
+	body := "--" + boundary + "\r\n" +
+		"Content-Disposition: form-data; name=\"username\"\r\n\r\n" +
+		"admin\r\n" +
+		"--" + boundary + "\r\n" +
+		"Content-Disposition: form-data; name=\"password\"\r\n\r\n" +
+		"my-secret\r\n" +
+		"--" + boundary + "--\r\n"
+
+	app := fiber.New()
+
+	var capturedBody string
+
+	app.Post("/test", func(c *fiber.Ctx) error {
+		capturedBody = handleMultipartBody(c)
+		return c.SendStatus(200)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/test", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	assert.NotContains(t, capturedBody, "my-secret")
+	assert.Contains(t, capturedBody, "username=admin")
+}
+
+// ---------------------------------------------------------------------------
+// NewRequestInfo and FinishRequestInfo nil guards
+// ---------------------------------------------------------------------------
+
+func TestNewRequestInfo_NilContext(t *testing.T) {
+	t.Parallel()
+
+	info := NewRequestInfo(nil, false)
+	require.NotNil(t, info)
+	assert.False(t, info.Date.IsZero(), "should set Date even with nil context")
+}
+
+func TestFinishRequestInfo_NilWrapper(t *testing.T) {
+	t.Parallel()
+
+	info := &RequestInfo{Date: time.Now().Add(-50 * time.Millisecond)}
+
+	// Should not panic
+	info.FinishRequestInfo(nil)
+
+	// Status and Size should remain zero
+	assert.Equal(t, 0, info.Status)
+	assert.Equal(t, 0, info.Size)
+}
+
+// ---------------------------------------------------------------------------
+// WithObfuscationDisabled option
+// ---------------------------------------------------------------------------
+
+func TestWithObfuscationDisabled_True(t *testing.T) {
+	t.Parallel()
+
+	mid := buildOpts(WithObfuscationDisabled(true))
+	assert.True(t, mid.ObfuscationDisabled)
+}
+
+func TestWithObfuscationDisabled_False(t *testing.T) {
+	t.Parallel()
+
+	mid := buildOpts(WithObfuscationDisabled(false))
+	assert.False(t, mid.ObfuscationDisabled)
+}
+
+func TestWithObfuscationDisabled_OverridesEnvDefault(t *testing.T) {
+	t.Parallel()
+
+	// Default value comes from env var (logObfuscationDisabled).
+	// WithObfuscationDisabled should override it.
+	mid := buildOpts(WithObfuscationDisabled(true))
+	assert.True(t, mid.ObfuscationDisabled)
+
+	mid2 := buildOpts(WithObfuscationDisabled(false))
+	assert.False(t, mid2.ObfuscationDisabled)
 }
 
 // ---------------------------------------------------------------------------
