@@ -51,13 +51,34 @@ func NewLoggerFromContext(ctx context.Context) log.Logger {
 	return &log.NopLogger{}
 }
 
-// ContextWithLogger returns a context within a Logger in "logger" value.
-func ContextWithLogger(ctx context.Context, logger log.Logger) context.Context {
-	values, _ := ctx.Value(CustomContextKey).(*CustomContextKeyValue)
-	if values == nil {
-		values = &CustomContextKeyValue{}
+// cloneContextValues returns a shallow copy of the CustomContextKeyValue from ctx.
+// This prevents concurrent mutation of a shared struct when multiple goroutines
+// derive child contexts from the same parent.
+// The AttrBag slice is deep-copied to avoid aliasing the underlying array.
+func cloneContextValues(ctx context.Context) *CustomContextKeyValue {
+	existing, _ := ctx.Value(CustomContextKey).(*CustomContextKeyValue)
+
+	clone := &CustomContextKeyValue{}
+	if existing != nil {
+		*clone = *existing
+
+		// Deep-copy the slice to avoid aliasing the backing array.
+		if len(existing.AttrBag) > 0 {
+			clone.AttrBag = make([]attribute.KeyValue, len(existing.AttrBag))
+			copy(clone.AttrBag, existing.AttrBag)
+		}
 	}
 
+	return clone
+}
+
+// ContextWithLogger returns a context within a Logger in "logger" value.
+func ContextWithLogger(ctx context.Context, logger log.Logger) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	values := cloneContextValues(ctx)
 	values.Logger = logger
 
 	return context.WithValue(ctx, CustomContextKey, values)
@@ -67,11 +88,11 @@ func ContextWithLogger(ctx context.Context, logger log.Logger) context.Context {
 
 // ContextWithTracer returns a context within a trace.Tracer in "tracer" value.
 func ContextWithTracer(ctx context.Context, tracer trace.Tracer) context.Context {
-	values, _ := ctx.Value(CustomContextKey).(*CustomContextKeyValue)
-	if values == nil {
-		values = &CustomContextKeyValue{}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
+	values := cloneContextValues(ctx)
 	values.Tracer = tracer
 
 	return context.WithValue(ctx, CustomContextKey, values)
@@ -81,11 +102,11 @@ func ContextWithTracer(ctx context.Context, tracer trace.Tracer) context.Context
 
 // ContextWithMetricFactory returns a context within a MetricsFactory in "metricFactory" value.
 func ContextWithMetricFactory(ctx context.Context, metricFactory *metrics.MetricsFactory) context.Context {
-	values, _ := ctx.Value(CustomContextKey).(*CustomContextKeyValue)
-	if values == nil {
-		values = &CustomContextKeyValue{}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
+	values := cloneContextValues(ctx)
 	values.MetricFactory = metricFactory
 
 	return context.WithValue(ctx, CustomContextKey, values)
@@ -95,11 +116,11 @@ func ContextWithMetricFactory(ctx context.Context, metricFactory *metrics.Metric
 
 // ContextWithHeaderID returns a context within a HeaderID in "headerID" value.
 func ContextWithHeaderID(ctx context.Context, headerID string) context.Context {
-	values, _ := ctx.Value(CustomContextKey).(*CustomContextKeyValue)
-	if values == nil {
-		values = &CustomContextKeyValue{}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
+	values := cloneContextValues(ctx)
 	values.HeaderID = headerID
 
 	return context.WithValue(ctx, CustomContextKey, values)
@@ -121,7 +142,12 @@ type TrackingComponents struct {
 //
 //nolint:ireturn
 func NewTrackingFromContext(ctx context.Context) (log.Logger, trace.Tracer, string, *metrics.MetricsFactory) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	components := extractTrackingComponents(ctx)
+
 	return components.Logger, components.Tracer, components.HeaderID, components.MetricFactory
 }
 
@@ -223,11 +249,12 @@ func ContextWithSpanAttributes(ctx context.Context, kv ...attribute.KeyValue) co
 		return ctx
 	}
 
-	values, _ := ctx.Value(CustomContextKey).(*CustomContextKeyValue)
-	if values == nil {
-		values = &CustomContextKeyValue{}
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	// Append (preserve order; low-cost).
+
+	values := cloneContextValues(ctx)
+	// Append to the cloned (independent) slice.
 	values.AttrBag = append(values.AttrBag, kv...)
 
 	return context.WithValue(ctx, CustomContextKey, values)
@@ -235,6 +262,10 @@ func ContextWithSpanAttributes(ctx context.Context, kv ...attribute.KeyValue) co
 
 // AttributesFromContext returns a shallow copy of the AttrBag slice, safe to reuse by processors.
 func AttributesFromContext(ctx context.Context) []attribute.KeyValue {
+	if ctx == nil {
+		return nil
+	}
+
 	if values, ok := ctx.Value(CustomContextKey).(*CustomContextKeyValue); ok && values != nil && len(values.AttrBag) > 0 {
 		out := make([]attribute.KeyValue, len(values.AttrBag))
 		copy(out, values.AttrBag)
@@ -247,12 +278,14 @@ func AttributesFromContext(ctx context.Context) []attribute.KeyValue {
 
 // ReplaceAttributes resets the current AttrBag with a new set (rarely needed; provided for completeness).
 func ReplaceAttributes(ctx context.Context, kv ...attribute.KeyValue) context.Context {
-	values, _ := ctx.Value(CustomContextKey).(*CustomContextKeyValue)
-	if values == nil {
-		values = &CustomContextKeyValue{}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
-	values.AttrBag = append(values.AttrBag[:0], kv...)
+	values := cloneContextValues(ctx)
+	// Replace with a fresh slice -- the clone already has an independent copy.
+	values.AttrBag = make([]attribute.KeyValue, len(kv))
+	copy(values.AttrBag, kv)
 
 	return context.WithValue(ctx, CustomContextKey, values)
 }
