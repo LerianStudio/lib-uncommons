@@ -117,6 +117,10 @@ func bootstrap() error {
 - `make sec` - run security checks using gosec
 - `make tools` - install test tools (gotestsum)
 
+## Project Rules
+
+For coding standards, architecture patterns, testing requirements, and development guidelines, see [`docs/PROJECT_RULES.md`](docs/PROJECT_RULES.md).
+
 ## License
 
 This project is licensed under the terms in `LICENSE`.

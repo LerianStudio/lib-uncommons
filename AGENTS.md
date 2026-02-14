@@ -101,6 +101,10 @@ Domain and support:
 - If a task touches renamed/removed v1 symbols, update `MIGRATION_MAP.md`.
 - If a task changes package-level behavior or API expectations, update `README.md`.
 
+## Project rules
+
+- Full coding standards, architecture patterns, and development guidelines are in [`docs/PROJECT_RULES.md`](docs/PROJECT_RULES.md).
+
 ## Documentation policy
 
 - Keep docs factual and code-backed.

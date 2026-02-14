@@ -640,7 +640,11 @@ func normalizeConnectionOptionsDefaults(options *ConnectionOptions) {
 }
 
 func normalizeTLSDefaults(tlsCfg *TLSConfig) {
-	if tlsCfg != nil && tlsCfg.MinVersion == 0 {
+	if tlsCfg == nil {
+		return
+	}
+
+	if tlsCfg.MinVersion < tls.VersionTLS12 {
 		tlsCfg.MinVersion = tls.VersionTLS12
 	}
 }
@@ -764,10 +768,16 @@ func buildTLSConfig(cfg TLSConfig) (*tls.Config, error) {
 		return nil, errors.New("adding CA cert failed")
 	}
 
-	return &tls.Config{
+	tlsConfig := &tls.Config{
 		RootCAs:    caCertPool,
-		MinVersion: cfg.MinVersion,
-	}, nil
+		MinVersion: tls.VersionTLS12,
+	}
+
+	if cfg.MinVersion == tls.VersionTLS13 {
+		tlsConfig.MinVersion = tls.VersionTLS13
+	}
+
+	return tlsConfig, nil
 }
 
 func configError(msg string) error {

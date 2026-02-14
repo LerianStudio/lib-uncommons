@@ -164,6 +164,22 @@ func TestBuildTLSConfig(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 	assert.Equal(t, uint16(tls.VersionTLS12), cfg.MinVersion)
+
+	cfg, err = buildTLSConfig(TLSConfig{
+		CACertBase64: base64.StdEncoding.EncodeToString(generateTestCertificatePEM(t)),
+		MinVersion:   tls.VersionTLS13,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, uint16(tls.VersionTLS13), cfg.MinVersion)
+
+	cfg, err = buildTLSConfig(TLSConfig{
+		CACertBase64: base64.StdEncoding.EncodeToString(generateTestCertificatePEM(t)),
+		MinVersion:   tls.VersionTLS10,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, uint16(tls.VersionTLS12), cfg.MinVersion)
 }
 
 func TestClient_NilReceiverGuards(t *testing.T) {
@@ -548,8 +564,8 @@ func TestValidateTopology_Cluster(t *testing.T) {
 			}},
 		},
 		{
-			name: "cluster missing addresses",
-			topo: Topology{Cluster: &ClusterTopology{}},
+			name:    "cluster missing addresses",
+			topo:    Topology{Cluster: &ClusterTopology{}},
 			errText: "cluster addresses are required",
 		},
 		{
@@ -761,6 +777,12 @@ func TestNormalizeTLSDefaults(t *testing.T) {
 		cfg := &TLSConfig{MinVersion: tls.VersionTLS13}
 		normalizeTLSDefaults(cfg)
 		assert.Equal(t, uint16(tls.VersionTLS13), cfg.MinVersion)
+	})
+
+	t.Run("clamps insecure min version", func(t *testing.T) {
+		cfg := &TLSConfig{MinVersion: tls.VersionTLS10}
+		normalizeTLSDefaults(cfg)
+		assert.Equal(t, uint16(tls.VersionTLS12), cfg.MinVersion)
 	})
 }
 
