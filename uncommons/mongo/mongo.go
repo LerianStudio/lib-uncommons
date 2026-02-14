@@ -22,17 +22,28 @@ const (
 )
 
 var (
-	ErrNilContext          = errors.New("context cannot be nil")
-	ErrEmptyURI            = errors.New("mongo uri cannot be empty")
-	ErrEmptyDatabaseName   = errors.New("database name cannot be empty")
-	ErrClientClosed        = errors.New("mongo client is closed")
+	// ErrNilContext is returned when a required context is nil.
+	ErrNilContext = errors.New("context cannot be nil")
+	// ErrEmptyURI is returned when Mongo URI is empty.
+	ErrEmptyURI = errors.New("mongo uri cannot be empty")
+	// ErrEmptyDatabaseName is returned when database name is empty.
+	ErrEmptyDatabaseName = errors.New("database name cannot be empty")
+	// ErrClientClosed is returned when the client is nil or not connected.
+	ErrClientClosed = errors.New("mongo client is closed")
+	// ErrEmptyCollectionName is returned when collection name is empty.
 	ErrEmptyCollectionName = errors.New("collection name cannot be empty")
-	ErrEmptyIndexes        = errors.New("at least one index must be provided")
-	ErrConnect             = errors.New("mongo connect failed")
-	ErrPing                = errors.New("mongo ping failed")
-	ErrDisconnect          = errors.New("mongo disconnect failed")
-	ErrCreateIndex         = errors.New("mongo create index failed")
-	ErrNilMongoClient      = errors.New("mongo driver returned nil client")
+	// ErrEmptyIndexes is returned when no index model is provided.
+	ErrEmptyIndexes = errors.New("at least one index must be provided")
+	// ErrConnect wraps connection establishment failures.
+	ErrConnect = errors.New("mongo connect failed")
+	// ErrPing wraps connectivity probe failures.
+	ErrPing = errors.New("mongo ping failed")
+	// ErrDisconnect wraps disconnection failures.
+	ErrDisconnect = errors.New("mongo disconnect failed")
+	// ErrCreateIndex wraps index creation failures.
+	ErrCreateIndex = errors.New("mongo create index failed")
+	// ErrNilMongoClient is returned when mongo driver returns a nil client.
+	ErrNilMongoClient = errors.New("mongo driver returned nil client")
 )
 
 // Config defines MongoDB connection and pool behavior.

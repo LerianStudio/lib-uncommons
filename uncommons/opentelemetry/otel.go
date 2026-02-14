@@ -44,10 +44,14 @@ const (
 )
 
 var (
+	// ErrNilTelemetryLogger is returned when telemetry config has no logger.
 	ErrNilTelemetryLogger = errors.New("telemetry config logger cannot be nil")
-	ErrEmptyEndpoint      = errors.New("collector exporter endpoint cannot be empty when telemetry is enabled")
-	ErrNilTelemetry       = errors.New("telemetry instance is nil")
-	ErrNilShutdown        = errors.New("telemetry shutdown function is nil")
+	// ErrEmptyEndpoint is returned when telemetry is enabled without exporter endpoint.
+	ErrEmptyEndpoint = errors.New("collector exporter endpoint cannot be empty when telemetry is enabled")
+	// ErrNilTelemetry is returned when a telemetry method receives a nil receiver.
+	ErrNilTelemetry = errors.New("telemetry instance is nil")
+	// ErrNilShutdown is returned when telemetry shutdown handlers are unavailable.
+	ErrNilShutdown = errors.New("telemetry shutdown function is nil")
 )
 
 // TelemetryConfig configures tracing, metrics, logging, and propagation behavior.

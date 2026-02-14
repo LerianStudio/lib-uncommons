@@ -12,9 +12,13 @@ import (
 type Operation string
 
 const (
-	OperationDebit   Operation = "DEBIT"
-	OperationCredit  Operation = "CREDIT"
-	OperationOnHold  Operation = "ON_HOLD"
+	// OperationDebit decreases available balance from a source.
+	OperationDebit Operation = "DEBIT"
+	// OperationCredit increases available balance on a destination.
+	OperationCredit Operation = "CREDIT"
+	// OperationOnHold moves value from available to on-hold.
+	OperationOnHold Operation = "ON_HOLD"
+	// OperationRelease moves value from on-hold back to available.
 	OperationRelease Operation = "RELEASE"
 )
 
@@ -34,9 +38,13 @@ const (
 type TransactionStatus string
 
 const (
-	StatusCreated  TransactionStatus = "CREATED"
+	// StatusCreated marks an intent as recorded but not yet approved.
+	StatusCreated TransactionStatus = "CREATED"
+	// StatusApproved marks an intent as approved for processing.
 	StatusApproved TransactionStatus = "APPROVED"
-	StatusPending  TransactionStatus = "PENDING"
+	// StatusPending marks an intent as currently being processed.
+	StatusPending TransactionStatus = "PENDING"
+	// StatusCanceled marks an intent as rejected or rolled back.
 	StatusCanceled TransactionStatus = "CANCELED"
 )
 
@@ -44,7 +52,9 @@ const (
 type AccountType string
 
 const (
+	// AccountTypeInternal identifies balances owned within the platform.
 	AccountTypeInternal AccountType = "internal"
+	// AccountTypeExternal identifies balances owned outside the platform.
 	AccountTypeExternal AccountType = "external"
 )
 
@@ -52,16 +62,26 @@ const (
 type ErrorCode string
 
 const (
-	ErrorInsufficientFunds                   ErrorCode = "0018"
-	ErrorAccountIneligibility                ErrorCode = "0019"
+	// ErrorInsufficientFunds indicates the source balance cannot cover the amount.
+	ErrorInsufficientFunds ErrorCode = "0018"
+	// ErrorAccountIneligibility indicates the account cannot participate in the transaction.
+	ErrorAccountIneligibility ErrorCode = "0019"
+	// ErrorAccountStatusTransactionRestriction indicates account status blocks this transaction.
 	ErrorAccountStatusTransactionRestriction ErrorCode = "0024"
-	ErrorAssetCodeNotFound                   ErrorCode = "0034"
-	ErrorTransactionValueMismatch            ErrorCode = "0073"
-	ErrorTransactionAmbiguous                ErrorCode = "0090"
-	ErrorOnHoldExternalAccount               ErrorCode = "0098"
-	ErrorDataCorruption                      ErrorCode = "0099"
-	ErrorInvalidInput                        ErrorCode = "1001"
-	ErrorInvalidStateTransition              ErrorCode = "1002"
+	// ErrorAssetCodeNotFound indicates the requested asset was not found.
+	ErrorAssetCodeNotFound ErrorCode = "0034"
+	// ErrorTransactionValueMismatch indicates allocations do not match transaction total.
+	ErrorTransactionValueMismatch ErrorCode = "0073"
+	// ErrorTransactionAmbiguous indicates transaction routing cannot be determined uniquely.
+	ErrorTransactionAmbiguous ErrorCode = "0090"
+	// ErrorOnHoldExternalAccount indicates on-hold operations are not allowed for external accounts.
+	ErrorOnHoldExternalAccount ErrorCode = "0098"
+	// ErrorDataCorruption indicates persisted transaction data is inconsistent.
+	ErrorDataCorruption ErrorCode = "0099"
+	// ErrorInvalidInput indicates request payload validation failed.
+	ErrorInvalidInput ErrorCode = "1001"
+	// ErrorInvalidStateTransition indicates an invalid transaction state transition was requested.
+	ErrorInvalidStateTransition ErrorCode = "1002"
 )
 
 // DomainError represents a structured transaction domain validation error.

@@ -16,9 +16,13 @@ import (
 var ErrLoggerNil = errors.New("logger is nil")
 
 var (
-	ErrNilLauncher  = errors.New("launcher is nil")
-	ErrEmptyApp     = errors.New("app name is empty")
-	ErrNilApp       = errors.New("app is nil")
+	// ErrNilLauncher is returned when a launcher method is called on a nil receiver.
+	ErrNilLauncher = errors.New("launcher is nil")
+	// ErrEmptyApp is returned when an app name is empty or whitespace.
+	ErrEmptyApp = errors.New("app name is empty")
+	// ErrNilApp is returned when a nil app instance is provided.
+	ErrNilApp = errors.New("app is nil")
+	// ErrConfigFailed is returned when launcher option application collected errors.
 	ErrConfigFailed = errors.New("launcher configuration failed")
 )
 

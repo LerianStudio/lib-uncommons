@@ -30,6 +30,7 @@ var ErrOffsetMustBePositive = errors.New("offset must be non-negative")
 // ErrInvalidCursor is returned when the cursor cannot be decoded.
 var ErrInvalidCursor = errors.New("invalid cursor format")
 
+// sortColumnPattern validates sort column names to prevent SQL injection.
 var sortColumnPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // ParsePagination parses limit/offset query params with defaults.

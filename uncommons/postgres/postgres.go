@@ -33,12 +33,18 @@ const (
 )
 
 var (
-	ErrNilClient           = errors.New("postgres client is nil")
-	ErrNilContext          = errors.New("context is nil")
-	ErrInvalidConfig       = errors.New("invalid postgres config")
-	ErrNotConnected        = errors.New("postgres client is not connected")
+	// ErrNilClient is returned when a postgres client receiver is nil.
+	ErrNilClient = errors.New("postgres client is nil")
+	// ErrNilContext is returned when a required context is nil.
+	ErrNilContext = errors.New("context is nil")
+	// ErrInvalidConfig indicates invalid postgres or migration configuration.
+	ErrInvalidConfig = errors.New("invalid postgres config")
+	// ErrNotConnected indicates operations requiring an active connection were called before connect.
+	ErrNotConnected = errors.New("postgres client is not connected")
+	// ErrInvalidDatabaseName indicates an invalid database identifier.
 	ErrInvalidDatabaseName = errors.New("invalid database name")
-	ErrMigrationDirty      = errors.New("postgres migration dirty")
+	// ErrMigrationDirty indicates migrations stopped at a dirty version.
+	ErrMigrationDirty = errors.New("postgres migration dirty")
 
 	dbOpenFn = sql.Open
 

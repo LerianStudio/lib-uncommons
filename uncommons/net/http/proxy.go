@@ -12,12 +12,18 @@ import (
 )
 
 var (
-	ErrInvalidProxyTarget     = errors.New("invalid proxy target")
-	ErrUntrustedProxyScheme   = errors.New("untrusted proxy scheme")
-	ErrUntrustedProxyHost     = errors.New("untrusted proxy host")
+	// ErrInvalidProxyTarget indicates the proxy target URL is malformed or empty.
+	ErrInvalidProxyTarget = errors.New("invalid proxy target")
+	// ErrUntrustedProxyScheme indicates the proxy target uses a disallowed URL scheme.
+	ErrUntrustedProxyScheme = errors.New("untrusted proxy scheme")
+	// ErrUntrustedProxyHost indicates the proxy target hostname is not in the allowed list.
+	ErrUntrustedProxyHost = errors.New("untrusted proxy host")
+	// ErrUnsafeProxyDestination indicates the proxy target resolves to a private or loopback address.
 	ErrUnsafeProxyDestination = errors.New("unsafe proxy destination")
-	ErrNilProxyRequest        = errors.New("proxy request cannot be nil")
-	ErrNilProxyResponse       = errors.New("proxy response writer cannot be nil")
+	// ErrNilProxyRequest indicates a nil HTTP request was passed to the reverse proxy.
+	ErrNilProxyRequest = errors.New("proxy request cannot be nil")
+	// ErrNilProxyResponse indicates a nil HTTP response writer was passed to the reverse proxy.
+	ErrNilProxyResponse = errors.New("proxy response writer cannot be nil")
 )
 
 // ReverseProxyPolicy defines strict trust boundaries for reverse proxy targets.
@@ -72,6 +78,7 @@ func ServeReverseProxy(target string, policy ReverseProxyPolicy, res http.Respon
 	return nil
 }
 
+// validateProxyTarget checks a parsed URL against the reverse proxy policy.
 func validateProxyTarget(targetURL *url.URL, policy ReverseProxyPolicy) error {
 	if targetURL == nil || targetURL.Scheme == "" || targetURL.Host == "" {
 		return ErrInvalidProxyTarget
@@ -101,6 +108,7 @@ func validateProxyTarget(targetURL *url.URL, policy ReverseProxyPolicy) error {
 	return nil
 }
 
+// isAllowedScheme reports whether scheme is in the allowed list (case-insensitive).
 func isAllowedScheme(scheme string, allowed []string) bool {
 	if len(allowed) == 0 {
 		return false
@@ -115,6 +123,7 @@ func isAllowedScheme(scheme string, allowed []string) bool {
 	return false
 }
 
+// isAllowedHost reports whether host is in the allowed list (case-insensitive).
 func isAllowedHost(host string, allowedHosts []string) bool {
 	if len(allowedHosts) == 0 {
 		return false
@@ -129,6 +138,7 @@ func isAllowedHost(host string, allowedHosts []string) bool {
 	return false
 }
 
+// isUnsafeIP reports whether ip is a loopback, private, or otherwise non-routable address.
 func isUnsafeIP(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalMulticast() || ip.IsLinkLocalUnicast()
 }

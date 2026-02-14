@@ -10,11 +10,16 @@ import (
 )
 
 const (
-	defaultAccessControlAllowOrigin   = "*"
-	defaultAccessControlAllowMethods  = "POST, GET, OPTIONS, PUT, DELETE, PATCH"
-	defaultAccessControlAllowHeaders  = "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization"
+	// defaultAccessControlAllowOrigin is the default value for the Access-Control-Allow-Origin header.
+	defaultAccessControlAllowOrigin = "*"
+	// defaultAccessControlAllowMethods is the default value for the Access-Control-Allow-Methods header.
+	defaultAccessControlAllowMethods = "POST, GET, OPTIONS, PUT, DELETE, PATCH"
+	// defaultAccessControlAllowHeaders is the default value for the Access-Control-Allow-Headers header.
+	defaultAccessControlAllowHeaders = "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization"
+	// defaultAccessControlExposeHeaders is the default value for the Access-Control-Expose-Headers header.
 	defaultAccessControlExposeHeaders = ""
-	defaultAllowCredentials           = false
+	// defaultAllowCredentials is the default value for the Access-Control-Allow-Credentials header.
+	defaultAllowCredentials = false
 )
 
 // WithCORS is a middleware that enables CORS.

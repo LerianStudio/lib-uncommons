@@ -26,6 +26,7 @@ import (
 // Can be overridden via METRICS_COLLECTION_INTERVAL environment variable.
 const DefaultMetricsCollectionInterval = 5 * time.Second
 
+// Metrics collector singleton state.
 var (
 	metricsCollectorOnce     = &sync.Once{}
 	metricsCollectorShutdown chan struct{}
@@ -34,6 +35,7 @@ var (
 	metricsCollectorInitErr  error
 )
 
+// telemetryRuntimeLogger returns the runtime logger from the telemetry middleware, or nil.
 func telemetryRuntimeLogger(tm *TelemetryMiddleware) runtime.Logger {
 	if tm == nil || tm.Telemetry == nil {
 		return nil
@@ -202,6 +204,7 @@ func (tm *TelemetryMiddleware) EndTracingSpansInterceptor() grpc.UnaryServerInte
 	}
 }
 
+// collectMetrics ensures the background metrics collector goroutine is running.
 func (tm *TelemetryMiddleware) collectMetrics(_ context.Context) error {
 	return tm.ensureMetricsCollector()
 }
@@ -220,6 +223,7 @@ func getMetricsCollectionInterval() time.Duration {
 	return DefaultMetricsCollectionInterval
 }
 
+// ensureMetricsCollector lazily starts the background metrics collector singleton.
 func (tm *TelemetryMiddleware) ensureMetricsCollector() error {
 	if tm == nil || tm.Telemetry == nil {
 		return nil
@@ -308,6 +312,7 @@ func StopMetricsCollector() {
 	}
 }
 
+// isRouteExcluded reports whether the request path matches any excluded route prefix.
 func (tm *TelemetryMiddleware) isRouteExcluded(c *fiber.Ctx, excludedRoutes []string) bool {
 	for _, route := range excludedRoutes {
 		if strings.HasPrefix(c.Path(), route) {

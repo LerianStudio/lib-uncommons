@@ -16,11 +16,16 @@ const callerSkipFrames = 1
 type Environment string
 
 const (
-	EnvironmentProduction  Environment = "production"
-	EnvironmentStaging     Environment = "staging"
-	EnvironmentUAT         Environment = "uat"
+	// EnvironmentProduction enables production-safe logging defaults.
+	EnvironmentProduction Environment = "production"
+	// EnvironmentStaging enables staging-safe logging defaults.
+	EnvironmentStaging Environment = "staging"
+	// EnvironmentUAT enables UAT-safe logging defaults.
+	EnvironmentUAT Environment = "uat"
+	// EnvironmentDevelopment enables verbose development logging defaults.
 	EnvironmentDevelopment Environment = "development"
-	EnvironmentLocal       Environment = "local"
+	// EnvironmentLocal enables verbose local-development logging defaults.
+	EnvironmentLocal Environment = "local"
 )
 
 // Config contains all required logger initialization inputs.

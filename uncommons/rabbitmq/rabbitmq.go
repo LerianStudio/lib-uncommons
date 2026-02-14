@@ -58,6 +58,7 @@ const defaultRabbitMQHealthCheckTimeout = 5 * time.Second
 // without explicitly acknowledging the risk via AllowInsecureTLS.
 var ErrInsecureTLS = errors.New("rabbitmq health check HTTP client has TLS verification disabled — set AllowInsecureTLS to acknowledge this risk")
 
+// ErrNilConnection is returned when a method is called on a nil RabbitMQConnection.
 var ErrNilConnection = errors.New("rabbitmq connection is nil")
 
 // Connect keeps a singleton connection with rabbitmq.

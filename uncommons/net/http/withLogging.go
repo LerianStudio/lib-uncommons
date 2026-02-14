@@ -133,6 +133,7 @@ func (r *RequestInfo) FinishRequestInfo(rw *ResponseMetricsWrapper) {
 	r.Size = rw.Size
 }
 
+// logMiddleware holds the logger used by HTTP and gRPC logging middleware.
 type logMiddleware struct {
 	Logger log.Logger
 }
@@ -260,6 +261,7 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 	}
 }
 
+// setRequestHeaderID ensures the Fiber request carries a unique correlation ID header.
 func setRequestHeaderID(c *fiber.Ctx) {
 	headerID := c.Get(cn.HeaderID)
 
@@ -274,6 +276,7 @@ func setRequestHeaderID(c *fiber.Ctx) {
 	c.SetUserContext(ctx)
 }
 
+// setGRPCRequestHeaderID extracts or generates a correlation ID from gRPC metadata.
 func setGRPCRequestHeaderID(ctx context.Context) context.Context {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if ok {
@@ -287,6 +290,7 @@ func setGRPCRequestHeaderID(ctx context.Context) context.Context {
 	return uncommons.ContextWithHeaderID(ctx, uuid.New().String())
 }
 
+// getBodyObfuscatedString returns the request body with sensitive fields obfuscated.
 func getBodyObfuscatedString(c *fiber.Ctx, bodyBytes []byte) string {
 	contentType := c.Get("Content-Type")
 
@@ -305,6 +309,7 @@ func getBodyObfuscatedString(c *fiber.Ctx, bodyBytes []byte) string {
 	return obfuscatedBody
 }
 
+// handleJSONBody obfuscates sensitive fields in a JSON request body.
 func handleJSONBody(bodyBytes []byte) string {
 	var bodyData map[string]any
 	if err := json.Unmarshal(bodyBytes, &bodyData); err != nil {
@@ -321,6 +326,7 @@ func handleJSONBody(bodyBytes []byte) string {
 	return string(updatedBody)
 }
 
+// obfuscateMapRecursively replaces sensitive map values up to maxObfuscationDepth levels.
 func obfuscateMapRecursively(data map[string]any, depth int) {
 	if depth >= maxObfuscationDepth {
 		return
@@ -341,6 +347,7 @@ func obfuscateMapRecursively(data map[string]any, depth int) {
 	}
 }
 
+// obfuscateSliceRecursively walks slice elements and obfuscates nested sensitive fields.
 func obfuscateSliceRecursively(data []any, depth int) {
 	if depth >= maxObfuscationDepth {
 		return
@@ -356,6 +363,7 @@ func obfuscateSliceRecursively(data []any, depth int) {
 	}
 }
 
+// handleURLEncodedBody obfuscates sensitive fields in a URL-encoded request body.
 func handleURLEncodedBody(bodyBytes []byte) string {
 	formData, err := url.ParseQuery(string(bodyBytes))
 	if err != nil {
@@ -379,6 +387,7 @@ func handleURLEncodedBody(bodyBytes []byte) string {
 	return updatedBody.Encode()
 }
 
+// handleMultipartBody obfuscates sensitive fields in a multipart/form-data request body.
 func handleMultipartBody(c *fiber.Ctx) string {
 	form, err := c.MultipartForm()
 	if err != nil {

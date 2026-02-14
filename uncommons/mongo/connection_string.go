@@ -8,11 +8,16 @@ import (
 )
 
 var (
-	ErrInvalidScheme        = errors.New("invalid mongo uri scheme")
-	ErrEmptyHost            = errors.New("mongo uri host cannot be empty")
-	ErrInvalidPort          = errors.New("mongo uri port is invalid")
+	// ErrInvalidScheme is returned when URI scheme is not mongodb or mongodb+srv.
+	ErrInvalidScheme = errors.New("invalid mongo uri scheme")
+	// ErrEmptyHost is returned when URI host is empty.
+	ErrEmptyHost = errors.New("mongo uri host cannot be empty")
+	// ErrInvalidPort is returned when URI port is outside the valid TCP range.
+	ErrInvalidPort = errors.New("mongo uri port is invalid")
+	// ErrPortNotAllowedForSRV is returned when a port is provided for mongodb+srv.
 	ErrPortNotAllowedForSRV = errors.New("port cannot be set for mongodb+srv")
-	ErrPasswordWithoutUser  = errors.New("password requires username")
+	// ErrPasswordWithoutUser is returned when password is set without username.
+	ErrPasswordWithoutUser = errors.New("password requires username")
 )
 
 // URIConfig contains the components used to build a MongoDB URI.

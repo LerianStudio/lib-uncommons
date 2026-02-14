@@ -17,6 +17,7 @@ const (
 	scanBatchSize = 100
 )
 
+// ErrStorageUnavailable is returned when Redis storage is nil or not initialized.
 var ErrStorageUnavailable = errors.New("ratelimit redis storage is unavailable")
 
 func unavailableStorageError(operation string) error {

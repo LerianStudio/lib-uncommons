@@ -81,10 +81,14 @@ func (c Config) Validate() error {
 type State string
 
 const (
-	StateClosed   State = "closed"
-	StateOpen     State = "open"
+	// StateClosed allows requests to pass through normally.
+	StateClosed State = "closed"
+	// StateOpen rejects requests until the timeout elapses.
+	StateOpen State = "open"
+	// StateHalfOpen allows limited trial requests after an open period.
 	StateHalfOpen State = "half-open"
-	StateUnknown  State = "unknown"
+	// StateUnknown is returned when the underlying state cannot be mapped.
+	StateUnknown State = "unknown"
 )
 
 // Counts represents circuit breaker statistics

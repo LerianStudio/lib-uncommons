@@ -18,7 +18,9 @@ type TenantExtractor func(ctx context.Context) string
 type IDLocation string
 
 const (
+	// IDLocationParam extracts the ID from a URL path parameter.
 	IDLocationParam IDLocation = "param"
+	// IDLocationQuery extracts the ID from a query string parameter.
 	IDLocationQuery IDLocation = "query"
 )
 
@@ -42,7 +44,6 @@ var (
 // ErrVerifierNotConfigured indicates that no ownership verifier was provided.
 var ErrVerifierNotConfigured = errors.New("ownership verifier is not configured")
 
-// Sentinel errors for general resource ownership verification.
 // ErrLookupFailed indicates an ownership lookup failed unexpectedly.
 var ErrLookupFailed = errors.New("resource lookup failed")
 
@@ -146,6 +147,8 @@ func ParseAndVerifyResourceScopedID(
 	return resourceID, tenantID, nil
 }
 
+// parseTenantAndResourceID extracts and validates both tenant and resource UUIDs
+// from the Fiber request context, returning them along with the Go context.
 func parseTenantAndResourceID(
 	fiberCtx *fiber.Ctx,
 	idName string,
@@ -187,6 +190,8 @@ func parseTenantAndResourceID(
 	return resourceID, ctx, tenantID, nil
 }
 
+// getIDValue retrieves the raw ID string from the Fiber context using the
+// specified location (path parameter or query string).
 func getIDValue(fiberCtx *fiber.Ctx, idName string, location IDLocation) (string, error) {
 	if fiberCtx == nil {
 		return "", ErrContextNotFound
@@ -202,6 +207,8 @@ func getIDValue(fiberCtx *fiber.Ctx, idName string, location IDLocation) (string
 	}
 }
 
+// classifyOwnershipError maps a verifier error to the appropriate sentinel,
+// substituting accessErr when a custom access-denied error is provided.
 func classifyOwnershipError(err, accessErr error) error {
 	switch {
 	case errors.Is(err, ErrContextNotFound):
@@ -225,6 +232,8 @@ func classifyOwnershipError(err, accessErr error) error {
 	}
 }
 
+// classifyResourceOwnershipError maps a resource-scoped verifier error to the
+// appropriate sentinel, prefixing fallback errors with the given label.
 func classifyResourceOwnershipError(label string, err, accessErr error) error {
 	switch {
 	case errors.Is(err, ErrExceptionNotFound),

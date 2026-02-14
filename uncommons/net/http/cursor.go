@@ -10,7 +10,9 @@ import (
 )
 
 const (
+	// CursorDirectionNext is the cursor direction for forward navigation.
 	CursorDirectionNext = "next"
+	// CursorDirectionPrev is the cursor direction for backward navigation.
 	CursorDirectionPrev = "prev"
 )
 

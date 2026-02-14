@@ -18,8 +18,11 @@ import (
 type RedactionAction string
 
 const (
+	// RedactionMask replaces a sensitive value with the configured mask.
 	RedactionMask RedactionAction = "mask"
+	// RedactionHash replaces a sensitive value with an HMAC-SHA256 hash.
 	RedactionHash RedactionAction = "hash"
+	// RedactionDrop removes a sensitive field from the output.
 	RedactionDrop RedactionAction = "drop"
 )
 

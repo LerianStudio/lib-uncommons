@@ -33,7 +33,9 @@ const (
 )
 
 var (
-	ErrNilClient     = errors.New("redis client is nil")
+	// ErrNilClient is returned when a redis client receiver is nil.
+	ErrNilClient = errors.New("redis client is nil")
+	// ErrInvalidConfig indicates the provided redis configuration is invalid.
 	ErrInvalidConfig = errors.New("invalid redis config")
 )
 
