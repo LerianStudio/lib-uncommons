@@ -4,6 +4,16 @@
 
 The current major API surface is **v2**. If you are migrating from older code, see `MIGRATION_MAP.md`.
 
+---
+
+**Migrating from `lib-commons`?**  
+Read the migration guide for a full comparison of improvements, new packages, and breaking changes:
+
+- [Coming from lib-commons (English)](COMING_FROM_COMMONS_en.md)
+- [Vindo da lib-commons (Português)](COMING_FROM_COMMONS_pt.md)
+
+---
+
 ## Requirements
 
 - Go `1.25.7` or newer
