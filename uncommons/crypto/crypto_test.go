@@ -253,11 +253,11 @@ func TestDecrypt(t *testing.T) {
 			errContains: "cipher not initialized",
 		},
 		{
-			name:        "invalid base64 input",
-			initCipher:  true,
-			input:       ptr("!!!not-base64!!!"),
-			expectNil:   true,
-			expectErr:   true,
+			name:       "invalid base64 input",
+			initCipher: true,
+			input:      ptr("!!!not-base64!!!"),
+			expectNil:  true,
+			expectErr:  true,
 		},
 		{
 			name:        "ciphertext too short",

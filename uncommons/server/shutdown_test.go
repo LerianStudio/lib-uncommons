@@ -34,10 +34,10 @@ func (l *recordingLogger) Log(_ context.Context, _ log.Level, msg string, _ ...l
 	l.messages = append(l.messages, msg)
 }
 
-func (l *recordingLogger) With(_ ...log.Field) log.Logger   { return l }
-func (l *recordingLogger) WithGroup(_ string) log.Logger    { return l }
-func (l *recordingLogger) Enabled(_ log.Level) bool         { return true }
-func (l *recordingLogger) Sync(_ context.Context) error     { return l.syncErr }
+func (l *recordingLogger) With(_ ...log.Field) log.Logger { return l }
+func (l *recordingLogger) WithGroup(_ string) log.Logger  { return l }
+func (l *recordingLogger) Enabled(_ log.Level) bool       { return true }
+func (l *recordingLogger) Sync(_ context.Context) error   { return l.syncErr }
 func (l *recordingLogger) getMessages() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()

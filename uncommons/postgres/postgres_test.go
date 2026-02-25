@@ -763,8 +763,8 @@ func TestMigratorUpResolvesPathFromComponent(t *testing.T) {
 
 	m, err := NewMigrator(MigrationConfig{
 		PrimaryDSN:   "postgres://localhost/db",
-		DatabaseName:  "ledger",
-		Component:     "ledger",
+		DatabaseName: "ledger",
+		Component:    "ledger",
 	})
 	require.NoError(t, err)
 

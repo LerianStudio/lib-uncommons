@@ -26,10 +26,10 @@ func (m *mockCBManager) GetOrCreate(string, circuitbreaker.Config) (circuitbreak
 }
 
 func (m *mockCBManager) Execute(string, func() (any, error)) (any, error) { return nil, nil }
-func (m *mockCBManager) GetState(string) circuitbreaker.State               { return m.state }
-func (m *mockCBManager) GetCounts(string) circuitbreaker.Counts             { return m.counts }
-func (m *mockCBManager) IsHealthy(string) bool                              { return m.healthy }
-func (m *mockCBManager) Reset(string)                                       {}
+func (m *mockCBManager) GetState(string) circuitbreaker.State             { return m.state }
+func (m *mockCBManager) GetCounts(string) circuitbreaker.Counts           { return m.counts }
+func (m *mockCBManager) IsHealthy(string) bool                            { return m.healthy }
+func (m *mockCBManager) Reset(string)                                     {}
 func (m *mockCBManager) RegisterStateChangeListener(circuitbreaker.StateChangeListener) {
 }
 
@@ -83,8 +83,10 @@ func TestHealthWithDependencies_MixedHealthy(t *testing.T) {
 	t.Parallel()
 
 	healthyMgr := &mockCBManager{state: circuitbreaker.StateClosed, healthy: true}
-	unhealthyMgr := &mockCBManager{state: circuitbreaker.StateOpen, healthy: false,
-		counts: circuitbreaker.Counts{TotalFailures: 5, ConsecutiveFailures: 3}}
+	unhealthyMgr := &mockCBManager{
+		state: circuitbreaker.StateOpen, healthy: false,
+		counts: circuitbreaker.Counts{TotalFailures: 5, ConsecutiveFailures: 3},
+	}
 
 	app := fiber.New()
 	app.Get("/health", HealthWithDependencies(
