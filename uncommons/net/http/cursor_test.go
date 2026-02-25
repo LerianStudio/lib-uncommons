@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	cn "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -194,41 +195,41 @@ func TestCursorDirectionRules_AllCombinations(t *testing.T) {
 	}{
 		{
 			name:             "ASC + next",
-			requestedSort:    SortDirASC,
+			requestedSort:    cn.SortDirASC,
 			cursorDir:        CursorDirectionNext,
 			expectedOperator: ">",
-			expectedOrder:    SortDirASC,
+			expectedOrder:    cn.SortDirASC,
 		},
 		{
 			name:             "ASC + prev",
-			requestedSort:    SortDirASC,
+			requestedSort:    cn.SortDirASC,
 			cursorDir:        CursorDirectionPrev,
 			expectedOperator: "<",
-			expectedOrder:    SortDirDESC,
+			expectedOrder:    cn.SortDirDESC,
 		},
 		{
 			name:             "DESC + next",
-			requestedSort:    SortDirDESC,
+			requestedSort:    cn.SortDirDESC,
 			cursorDir:        CursorDirectionNext,
 			expectedOperator: "<",
-			expectedOrder:    SortDirDESC,
+			expectedOrder:    cn.SortDirDESC,
 		},
 		{
 			name:             "DESC + prev",
-			requestedSort:    SortDirDESC,
+			requestedSort:    cn.SortDirDESC,
 			cursorDir:        CursorDirectionPrev,
 			expectedOperator: ">",
-			expectedOrder:    SortDirASC,
+			expectedOrder:    cn.SortDirASC,
 		},
 		{
 			name:          "invalid cursor direction",
-			requestedSort: SortDirASC,
+			requestedSort: cn.SortDirASC,
 			cursorDir:     "invalid",
 			expectErr:     true,
 		},
 		{
 			name:          "empty cursor direction",
-			requestedSort: SortDirASC,
+			requestedSort: cn.SortDirASC,
 			cursorDir:     "",
 			expectErr:     true,
 		},
@@ -237,21 +238,21 @@ func TestCursorDirectionRules_AllCombinations(t *testing.T) {
 			requestedSort:    "asc",
 			cursorDir:        CursorDirectionNext,
 			expectedOperator: ">",
-			expectedOrder:    SortDirASC,
+			expectedOrder:    cn.SortDirASC,
 		},
 		{
 			name:             "lowercase desc + next",
 			requestedSort:    "desc",
 			cursorDir:        CursorDirectionNext,
 			expectedOperator: "<",
-			expectedOrder:    SortDirDESC,
+			expectedOrder:    cn.SortDirDESC,
 		},
 		{
 			name:             "garbage sort direction defaults to ASC + next",
 			requestedSort:    "GARBAGE",
 			cursorDir:        CursorDirectionNext,
 			expectedOperator: ">",
-			expectedOrder:    SortDirASC,
+			expectedOrder:    cn.SortDirASC,
 		},
 	}
 

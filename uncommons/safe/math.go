@@ -108,3 +108,33 @@ func PercentageOrZero(numerator, denominator decimal.Decimal) decimal.Decimal {
 
 	return numerator.Div(denominator).Mul(hundredDecimal)
 }
+
+// DivideFloat64 performs float64 division with zero check.
+// Returns ErrDivisionByZero if denominator is zero.
+//
+// Example:
+//
+//	ratio, err := safe.DivideFloat64(failures, total)
+//	if err != nil {
+//	    return fmt.Errorf("calculate failure ratio: %w", err)
+//	}
+func DivideFloat64(numerator, denominator float64) (float64, error) {
+	if denominator == 0 {
+		return 0, ErrDivisionByZero
+	}
+
+	return numerator / denominator, nil
+}
+
+// DivideFloat64OrZero performs float64 division, returning zero if denominator is zero.
+//
+// Example:
+//
+//	ratio := safe.DivideFloat64OrZero(failures, total)
+func DivideFloat64OrZero(numerator, denominator float64) float64 {
+	if denominator == 0 {
+		return 0
+	}
+
+	return numerator / denominator
+}

@@ -7,10 +7,13 @@ import (
 	"fmt"
 
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons"
+	cn "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 )
 
 const (
+	// CursorDirectionNext is the cursor direction for forward navigation.
 	CursorDirectionNext = "next"
+	// CursorDirectionPrev is the cursor direction for backward navigation.
 	CursorDirectionPrev = "prev"
 )
 
@@ -76,17 +79,17 @@ func CursorDirectionRules(requestedSortDirection, cursorDirection string) (opera
 
 	switch cursorDirection {
 	case CursorDirectionNext:
-		if order == SortDirASC {
-			return ">", SortDirASC, nil
+		if order == cn.SortDirASC {
+			return ">", cn.SortDirASC, nil
 		}
 
-		return "<", SortDirDESC, nil
+		return "<", cn.SortDirDESC, nil
 	case CursorDirectionPrev:
-		if order == SortDirASC {
-			return "<", SortDirDESC, nil
+		if order == cn.SortDirASC {
+			return "<", cn.SortDirDESC, nil
 		}
 
-		return ">", SortDirASC, nil
+		return ">", cn.SortDirASC, nil
 	default:
 		return "", "", ErrInvalidCursorDirection
 	}

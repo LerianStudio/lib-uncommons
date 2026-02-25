@@ -16,13 +16,19 @@ import (
 	// File system migration source. We need to import it to be able to use it as source in migrate.NewWithSourceInstance
 
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/backoff"
+	constant "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	libOpentelemetry "github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry/metrics"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/runtime"
 	"github.com/bxcodec/dbresolver/v2"
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -33,20 +39,32 @@ const (
 )
 
 var (
-	ErrNilClient           = errors.New("postgres client is nil")
-	ErrNilContext          = errors.New("context is nil")
-	ErrInvalidConfig       = errors.New("invalid postgres config")
-	ErrNotConnected        = errors.New("postgres client is not connected")
+	// ErrNilClient is returned when a postgres client receiver is nil.
+	ErrNilClient = errors.New("postgres client is nil")
+	// ErrNilContext is returned when a required context is nil.
+	ErrNilContext = errors.New("context is nil")
+	// ErrInvalidConfig indicates invalid postgres or migration configuration.
+	ErrInvalidConfig = errors.New("invalid postgres config")
+	// ErrNotConnected indicates operations requiring an active connection were called before connect.
+	ErrNotConnected = errors.New("postgres client is not connected")
+	// ErrInvalidDatabaseName indicates an invalid database identifier.
 	ErrInvalidDatabaseName = errors.New("invalid database name")
-	ErrMigrationDirty      = errors.New("postgres migration dirty")
+	// ErrMigrationDirty indicates migrations stopped at a dirty version.
+	ErrMigrationDirty = errors.New("postgres migration dirty")
+	// ErrNilMigrator is returned when a migrator receiver is nil.
+	ErrNilMigrator = errors.New("postgres migrator is nil")
 
 	dbOpenFn = sql.Open
 
-	createResolverFn = func(primaryDB, replicaDB *sql.DB) (_ dbresolver.DB, err error) {
+	createResolverFn = func(primaryDB, replicaDB *sql.DB, logger log.Logger) (_ dbresolver.DB, err error) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				runtime.HandlePanicValue(context.Background(), log.NewNop(), recovered, "postgres", "create_resolver")
-				err = fmt.Errorf("failed to create resolver: %v", recovered)
+				if logger == nil {
+					logger = log.NewNop()
+				}
+
+				runtime.HandlePanicValue(context.Background(), logger, recovered, "postgres", "create_resolver")
+				err = fmt.Errorf("failed to create resolver: %w", fmt.Errorf("recovered panic: %v", recovered))
 			}
 		}()
 
@@ -66,17 +84,43 @@ var (
 	runMigrationsFn = runMigrations
 
 	connectionStringCredentialsPattern = regexp.MustCompile(`://[^@\s]+@`)
-	connectionStringPasswordPattern    = regexp.MustCompile(`(?i)(password=)([^\s&]+)`)
+	connectionStringPasswordPattern    = regexp.MustCompile(`(?i)(password=)(\S+)`)
+	sslPathPattern                     = regexp.MustCompile(`(?i)(sslkey|sslcert|sslrootcert|sslpassword)=(\S+)`)
 	dbNamePattern                      = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]{0,62}$`)
 )
+
+// nilClientAssert fires a telemetry assertion for nil-receiver calls and returns ErrNilClient.
+// The logger is intentionally nil here because this function is called on a nil *Client receiver,
+// so there is no struct instance from which to extract a logger. The assert package handles
+// nil loggers gracefully by falling back to stderr.
+func nilClientAssert(operation string) error {
+	asserter := assert.New(context.Background(), nil, "postgres", operation)
+	_ = asserter.Never(context.Background(), "postgres client receiver is nil")
+
+	return fmt.Errorf("postgres %s: %w", operation, ErrNilClient)
+}
+
+// nilMigratorAssert fires a telemetry assertion for nil-receiver calls and returns ErrNilMigrator.
+// The logger is intentionally nil here because this function is called on a nil *Migrator receiver,
+// so there is no struct instance from which to extract a logger. The assert package handles
+// nil loggers gracefully by falling back to stderr.
+func nilMigratorAssert(operation string) error {
+	asserter := assert.New(context.Background(), nil, "postgres", operation)
+	_ = asserter.Never(context.Background(), "postgres migrator receiver is nil")
+
+	return fmt.Errorf("postgres %s: %w", operation, ErrNilMigrator)
+}
 
 // Config stores immutable connection options for a postgres client.
 type Config struct {
 	PrimaryDSN         string
 	ReplicaDSN         string
 	Logger             log.Logger
+	MetricsFactory     *metrics.MetricsFactory
 	MaxOpenConnections int
 	MaxIdleConnections int
+	ConnMaxLifetime    time.Duration
+	ConnMaxIdleTime    time.Duration
 }
 
 func (c Config) withDefaults() Config {
@@ -92,6 +136,14 @@ func (c Config) withDefaults() Config {
 		c.MaxIdleConnections = defaultMaxIdleConns
 	}
 
+	if c.ConnMaxLifetime <= 0 {
+		c.ConnMaxLifetime = defaultConnMaxLifetime
+	}
+
+	if c.ConnMaxIdleTime <= 0 {
+		c.ConnMaxIdleTime = defaultConnMaxIdleTime
+	}
+
 	return c
 }
 
@@ -100,20 +152,72 @@ func (c Config) validate() error {
 		return fmt.Errorf("%w: primary dsn cannot be empty", ErrInvalidConfig)
 	}
 
+	if err := validateDSN(c.PrimaryDSN); err != nil {
+		return fmt.Errorf("%w: primary dsn: %w", ErrInvalidConfig, err)
+	}
+
 	if strings.TrimSpace(c.ReplicaDSN) == "" {
 		return fmt.Errorf("%w: replica dsn cannot be empty", ErrInvalidConfig)
+	}
+
+	if err := validateDSN(c.ReplicaDSN); err != nil {
+		return fmt.Errorf("%w: replica dsn: %w", ErrInvalidConfig, err)
 	}
 
 	return nil
 }
 
+// validateDSN checks structural validity of URL-format DSNs.
+// Key-value format DSNs (without postgres:// prefix) are accepted without structural checks.
+func validateDSN(dsn string) error {
+	lower := strings.ToLower(strings.TrimSpace(dsn))
+	if strings.HasPrefix(lower, "postgres://") || strings.HasPrefix(lower, "postgresql://") {
+		if _, err := url.Parse(dsn); err != nil {
+			return fmt.Errorf("malformed URL: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// warnInsecureDSN logs a warning if the DSN explicitly disables TLS.
+// This is advisory -- development environments commonly use sslmode=disable.
+func warnInsecureDSN(ctx context.Context, logger log.Logger, dsn, label string) {
+	if logger == nil || !logger.Enabled(log.LevelWarn) {
+		return
+	}
+
+	if strings.Contains(strings.ToLower(dsn), "sslmode=disable") {
+		logger.Log(ctx, log.LevelWarn,
+			"TLS disabled in database connection; production deployments should use sslmode=require or stronger",
+			log.String("dsn_label", label),
+		)
+	}
+}
+
+// connectBackoffCap is the maximum delay between lazy-connect retries.
+const connectBackoffCap = 30 * time.Second
+
+// connectionFailuresMetric defines the counter for postgres connection failures.
+var connectionFailuresMetric = metrics.Metric{
+	Name:        "postgres_connection_failures_total",
+	Unit:        "1",
+	Description: "Total number of postgres connection failures",
+}
+
 // Client is the v2 postgres connection manager.
 type Client struct {
-	mu       sync.RWMutex
-	cfg      Config
-	resolver dbresolver.DB
-	primary  *sql.DB
-	replica  *sql.DB
+	mu             sync.RWMutex
+	cfg            Config
+	metricsFactory *metrics.MetricsFactory
+	resolver       dbresolver.DB
+	primary        *sql.DB
+	replica        *sql.DB
+
+	// Lazy-connect rate-limiting: prevents thundering-herd reconnect storms
+	// when the database is down by enforcing exponential backoff between attempts.
+	lastConnectAttempt time.Time
+	connectAttempts    int
 }
 
 // New creates a postgres client with immutable configuration.
@@ -124,31 +228,51 @@ func New(cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("postgres new: %w", err)
 	}
 
-	return &Client{cfg: cfg}, nil
+	return &Client{cfg: cfg, metricsFactory: cfg.MetricsFactory}, nil
 }
 
-func (c *Client) logger() log.Logger {
+// logAtLevel emits a structured log entry at the specified level.
+func (c *Client) logAtLevel(ctx context.Context, level log.Level, msg string, fields ...log.Field) {
 	if c == nil || c.cfg.Logger == nil {
-		return log.NewNop()
+		return
 	}
 
-	return c.cfg.Logger
+	if !c.cfg.Logger.Enabled(level) {
+		return
+	}
+
+	c.cfg.Logger.Log(ctx, level, msg, fields...)
 }
 
 // Connect establishes a new primary/replica resolver and swaps it atomically.
 func (c *Client) Connect(ctx context.Context) error {
 	if c == nil {
-		return fmt.Errorf("postgres connect: %w", ErrNilClient)
+		return nilClientAssert("connect")
 	}
 
 	if ctx == nil {
 		return fmt.Errorf("postgres connect: %w", ErrNilContext)
 	}
 
+	tracer := otel.Tracer("postgres")
+
+	ctx, span := tracer.Start(ctx, "postgres.connect")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemPostgreSQL))
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	return c.connectLocked(ctx)
+	if err := c.connectLocked(ctx); err != nil {
+		c.recordConnectionFailure(ctx, "connect")
+
+		libOpentelemetry.HandleSpanError(span, "Failed to connect to postgres", err)
+
+		return err
+	}
+
+	return nil
 }
 
 // connectLocked performs the actual connection logic.
@@ -169,40 +293,48 @@ func (c *Client) connectLocked(ctx context.Context) error {
 
 	if oldResolver != nil {
 		if err := oldResolver.Close(); err != nil {
-			logf(c.logger(), log.LevelWarn, "failed to close previous resolver after swap: %v", err)
+			c.logAtLevel(ctx, log.LevelWarn, "failed to close previous resolver after swap", log.Err(err))
 		}
 	}
 
 	// Always close old primary/replica explicitly to prevent leaks.
 	// The resolver may not own the underlying sql.DB connections.
-	_ = closeDB(oldPrimary)
-	_ = closeDB(oldReplica)
+	if err := closeDB(oldPrimary); err != nil {
+		c.logAtLevel(ctx, log.LevelWarn, "failed to close old primary during swap", log.Err(err))
+	}
 
-	logf(c.logger(), log.LevelInfo, "Connected to postgres")
+	if err := closeDB(oldReplica); err != nil {
+		c.logAtLevel(ctx, log.LevelWarn, "failed to close old replica during swap", log.Err(err))
+	}
+
+	c.logAtLevel(ctx, log.LevelInfo, "connected to postgres")
 
 	return nil
 }
 
 func (c *Client) buildConnection(ctx context.Context) (*sql.DB, *sql.DB, dbresolver.DB, error) {
-	logf(c.logger(), log.LevelInfo, "Connecting to primary and replica databases...")
+	c.logAtLevel(ctx, log.LevelInfo, "connecting to primary and replica databases")
 
-	primary, err := c.newSQLDB(c.cfg.PrimaryDSN)
+	warnInsecureDSN(ctx, c.cfg.Logger, c.cfg.PrimaryDSN, "primary")
+	warnInsecureDSN(ctx, c.cfg.Logger, c.cfg.ReplicaDSN, "replica")
+
+	primary, err := c.newSQLDB(ctx, c.cfg.PrimaryDSN)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("postgres connect: %w", err)
 	}
 
-	replica, err := c.newSQLDB(c.cfg.ReplicaDSN)
+	replica, err := c.newSQLDB(ctx, c.cfg.ReplicaDSN)
 	if err != nil {
 		_ = closeDB(primary)
 		return nil, nil, nil, fmt.Errorf("postgres connect: %w", err)
 	}
 
-	resolver, err := createResolverFn(primary, replica)
+	resolver, err := createResolverFn(primary, replica, c.cfg.Logger)
 	if err != nil {
 		_ = closeDB(primary)
 		_ = closeDB(replica)
 
-		logf(c.logger(), log.LevelError, "failed to create resolver: %v", err)
+		c.logAtLevel(ctx, log.LevelError, "failed to create resolver", log.Err(err))
 
 		return nil, nil, nil, fmt.Errorf("postgres connect: failed to create resolver: %w", err)
 	}
@@ -212,7 +344,7 @@ func (c *Client) buildConnection(ctx context.Context) (*sql.DB, *sql.DB, dbresol
 		_ = closeDB(primary)
 		_ = closeDB(replica)
 
-		logf(c.logger(), log.LevelError, "failed to ping database: %v", err)
+		c.logAtLevel(ctx, log.LevelError, "failed to ping database", log.Err(err))
 
 		return nil, nil, nil, fmt.Errorf("postgres connect: failed to ping database: %w", err)
 	}
@@ -220,19 +352,19 @@ func (c *Client) buildConnection(ctx context.Context) (*sql.DB, *sql.DB, dbresol
 	return primary, replica, resolver, nil
 }
 
-func (c *Client) newSQLDB(dsn string) (*sql.DB, error) {
+func (c *Client) newSQLDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	db, err := dbOpenFn("pgx", dsn)
 	if err != nil {
-		sanitizedErr := sanitizeSensitiveError(err)
-		logf(c.logger(), log.LevelError, "failed to open database: %s", sanitizedErr)
+		sanitized := newSanitizedError(err, "failed to open database")
+		c.logAtLevel(ctx, log.LevelError, "failed to open database", log.Err(sanitized))
 
-		return nil, fmt.Errorf("failed to open database: %s", sanitizedErr)
+		return nil, sanitized
 	}
 
 	db.SetMaxOpenConns(c.cfg.MaxOpenConnections)
 	db.SetMaxIdleConns(c.cfg.MaxIdleConnections)
-	db.SetConnMaxLifetime(defaultConnMaxLifetime)
-	db.SetConnMaxIdleTime(defaultConnMaxIdleTime)
+	db.SetConnMaxLifetime(c.cfg.ConnMaxLifetime)
+	db.SetConnMaxIdleTime(c.cfg.ConnMaxIdleTime)
 
 	return db, nil
 }
@@ -243,7 +375,7 @@ func (c *Client) newSQLDB(dsn string) (*sql.DB, error) {
 // subsequent calls will retry the connection.
 func (c *Client) Resolver(ctx context.Context) (dbresolver.DB, error) {
 	if c == nil {
-		return nil, fmt.Errorf("postgres resolver: %w", ErrNilClient)
+		return nil, nilClientAssert("resolver")
 	}
 
 	if ctx == nil {
@@ -267,12 +399,44 @@ func (c *Client) Resolver(ctx context.Context) (dbresolver.DB, error) {
 		return c.resolver, nil
 	}
 
+	// Rate-limit lazy-connect retries: if previous attempts failed recently,
+	// enforce a minimum delay before the next attempt to prevent reconnect storms.
+	if c.connectAttempts > 0 {
+		delay := backoff.ExponentialWithJitter(1*time.Second, c.connectAttempts)
+		if delay > connectBackoffCap {
+			delay = connectBackoffCap
+		}
+
+		if elapsed := time.Since(c.lastConnectAttempt); elapsed < delay {
+			return nil, fmt.Errorf("postgres resolver: rate-limited (next attempt in %s)", delay-elapsed)
+		}
+	}
+
+	c.lastConnectAttempt = time.Now()
+
+	tracer := otel.Tracer("postgres")
+
+	ctx, span := tracer.Start(ctx, "postgres.resolve")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemPostgreSQL))
+
 	if err := c.connectLocked(ctx); err != nil {
+		c.connectAttempts++
+		c.recordConnectionFailure(ctx, "resolve")
+
+		libOpentelemetry.HandleSpanError(span, "Failed to resolve postgres connection", err)
+
 		return nil, err
 	}
 
+	c.connectAttempts = 0
+
 	if c.resolver == nil {
-		return nil, fmt.Errorf("postgres resolver: %w", ErrNotConnected)
+		err := fmt.Errorf("postgres resolver: %w", ErrNotConnected)
+		libOpentelemetry.HandleSpanError(span, "Postgres resolver not connected after connect", err)
+
+		return nil, err
 	}
 
 	return c.resolver, nil
@@ -281,7 +445,7 @@ func (c *Client) Resolver(ctx context.Context) (dbresolver.DB, error) {
 // Primary returns the current primary sql.DB, useful for admin operations.
 func (c *Client) Primary() (*sql.DB, error) {
 	if c == nil {
-		return nil, fmt.Errorf("postgres primary: %w", ErrNilClient)
+		return nil, nilClientAssert("primary")
 	}
 
 	c.mu.RLock()
@@ -295,10 +459,19 @@ func (c *Client) Primary() (*sql.DB, error) {
 }
 
 // Close releases database resources.
+// All three handles (resolver, primary, replica) are always explicitly closed
+// to prevent leaks -- the resolver may not own the underlying sql.DB connections.
 func (c *Client) Close() error {
 	if c == nil {
-		return fmt.Errorf("postgres close: %w", ErrNilClient)
+		return nilClientAssert("close")
 	}
+
+	tracer := otel.Tracer("postgres")
+
+	_, span := tracer.Start(context.Background(), "postgres.close")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemPostgreSQL))
 
 	c.mu.Lock()
 	resolver := c.resolver
@@ -310,20 +483,29 @@ func (c *Client) Close() error {
 	c.replica = nil
 	c.mu.Unlock()
 
+	var errs []error
+
 	if resolver != nil {
 		if err := resolver.Close(); err != nil {
-			return fmt.Errorf("postgres close: %w", err)
+			errs = append(errs, err)
 		}
-
-		return nil
 	}
 
+	// Always close primary/replica explicitly to prevent leaks.
+	// The resolver may not own the underlying sql.DB connections.
 	if err := closeDB(primary); err != nil {
-		return fmt.Errorf("postgres close: %w", err)
+		errs = append(errs, err)
 	}
 
 	if err := closeDB(replica); err != nil {
-		return fmt.Errorf("postgres close: %w", err)
+		errs = append(errs, err)
+	}
+
+	if len(errs) > 0 {
+		closeErr := fmt.Errorf("postgres close: %w", errors.Join(errs...))
+		libOpentelemetry.HandleSpanError(span, "Failed to close postgres", closeErr)
+
+		return closeErr
 	}
 
 	return nil
@@ -332,10 +514,7 @@ func (c *Client) Close() error {
 // IsConnected reports whether the resolver is currently initialized.
 func (c *Client) IsConnected() (bool, error) {
 	if c == nil {
-		asserter := assert.New(context.Background(), nil, "postgres", "IsConnected")
-		_ = asserter.Never(context.Background(), "postgres client receiver is nil")
-
-		return false, ErrNilClient
+		return false, nilClientAssert("is_connected")
 	}
 
 	c.mu.RLock()
@@ -352,20 +531,15 @@ func closeDB(db *sql.DB) error {
 	return db.Close()
 }
 
-func logf(logger log.Logger, level log.Level, format string, args ...any) {
-	if logger == nil {
-		logger = log.NewNop()
-	}
-
-	logger.Log(context.Background(), level, fmt.Sprintf(format, args...))
-}
-
 // MigrationConfig stores migration-only settings.
 type MigrationConfig struct {
-	PrimaryDSN           string
-	DatabaseName         string
-	MigrationsPath       string
-	Component            string
+	PrimaryDSN     string
+	DatabaseName   string
+	MigrationsPath string
+	Component      string
+	// AllowMultiStatements enables multi-statement execution in migrations.
+	// SECURITY: Only enable when migration files are from trusted, version-controlled sources.
+	// Multi-statement mode increases the blast radius of compromised migration files.
 	AllowMultiStatements bool
 	Logger               log.Logger
 }
@@ -384,7 +558,7 @@ func (c MigrationConfig) validate() error {
 	}
 
 	if err := validateDBName(c.DatabaseName); err != nil {
-		return err
+		return fmt.Errorf("migration config: %w", err)
 	}
 
 	if strings.TrimSpace(c.MigrationsPath) == "" && strings.TrimSpace(c.Component) == "" {
@@ -410,32 +584,72 @@ func NewMigrator(cfg MigrationConfig) (*Migrator, error) {
 	return &Migrator{cfg: cfg}, nil
 }
 
+func (m *Migrator) logAtLevel(ctx context.Context, level log.Level, msg string, fields ...log.Field) {
+	if m == nil || m.cfg.Logger == nil {
+		return
+	}
+
+	if !m.cfg.Logger.Enabled(level) {
+		return
+	}
+
+	m.cfg.Logger.Log(ctx, level, msg, fields...)
+}
+
 // Up runs all up migrations.
+//
+// Note: golang-migrate's m.Up() does not accept a context, so cancellation
+// cannot stop a migration in progress. This method checks context state
+// before starting but cannot interrupt a running migration.
 func (m *Migrator) Up(ctx context.Context) error {
 	if m == nil {
-		return fmt.Errorf("postgres migrate_up: %w", ErrNilClient)
+		return nilMigratorAssert("migrate_up")
 	}
 
 	if ctx == nil {
 		return fmt.Errorf("postgres migrate_up: %w", ErrNilContext)
 	}
 
+	tracer := otel.Tracer("postgres")
+
+	ctx, span := tracer.Start(ctx, "postgres.migrate_up")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String(constant.AttrDBSystem, constant.DBSystemPostgreSQL),
+		attribute.String(constant.AttrDBName, m.cfg.DatabaseName),
+	)
+
+	// Fail fast if the context is already cancelled or expired.
+	if err := ctx.Err(); err != nil {
+		libOpentelemetry.HandleSpanError(span, "Context already done before migration", err)
+
+		return fmt.Errorf("postgres migrate_up: context already done: %w", err)
+	}
+
 	db, err := dbOpenFn("pgx", m.cfg.PrimaryDSN)
 	if err != nil {
-		sanitizedErr := sanitizeSensitiveError(err)
-		logf(m.cfg.Logger, log.LevelError, "failed to open migration database: %s", sanitizedErr)
+		sanitized := newSanitizedError(err, "failed to open migration database")
+		m.logAtLevel(ctx, log.LevelError, "failed to open migration database", log.Err(sanitized))
 
-		return fmt.Errorf("postgres migrate_up: failed to open migration database: %s", sanitizedErr)
+		libOpentelemetry.HandleSpanError(span, "Failed to open migration database", sanitized)
+
+		return fmt.Errorf("postgres migrate_up: %w", sanitized)
 	}
 	defer db.Close()
 
 	migrationsPath, err := resolveMigrationsPath(m.cfg.MigrationsPath, m.cfg.Component)
 	if err != nil {
-		logf(m.cfg.Logger, log.LevelError, "failed to resolve migration path: %v", err)
+		m.logAtLevel(ctx, log.LevelError, "failed to resolve migration path", log.Err(err))
+
+		libOpentelemetry.HandleSpanError(span, "Failed to resolve migration path", err)
+
 		return fmt.Errorf("postgres migrate_up: %w", err)
 	}
 
-	if err := runMigrationsFn(db, migrationsPath, m.cfg.DatabaseName, m.cfg.AllowMultiStatements, m.cfg.Logger); err != nil {
+	if err := runMigrationsFn(ctx, db, migrationsPath, m.cfg.DatabaseName, m.cfg.AllowMultiStatements, m.cfg.Logger); err != nil {
+		libOpentelemetry.HandleSpanError(span, "Migration up failed", err)
+
 		return fmt.Errorf("postgres migrate_up: %w", err)
 	}
 
@@ -461,15 +675,44 @@ func resolveMigrationsPath(migrationsPath, component string) (string, error) {
 	return calculatedPath, nil
 }
 
-func sanitizeSensitiveError(err error) string {
+// SanitizedError wraps a database error with a credential-free message.
+// Error() returns only the sanitized text.
+//
+// Unwrap deliberately returns nil so the original error chain is never exposed,
+// preventing database credentials from leaking through error inspection.
+// Note: errors.Is will NOT match sentinels via chain traversal (since Unwrap
+// returns nil). Match on the sanitized Message or use typed assertions instead.
+type SanitizedError struct {
+	// Message is the credential-free error description.
+	Message string
+}
+
+func (e *SanitizedError) Error() string { return e.Message }
+
+// Unwrap deliberately returns nil to prevent error chain traversal from
+// leaking the original error which may contain database credentials.
+// errors.Is will not traverse into the original cause.
+func (e *SanitizedError) Unwrap() error { return nil }
+
+// newSanitizedError wraps err with a credential-free message.
+// The original error is not retained to avoid credential leakage.
+func newSanitizedError(err error, prefix string) *SanitizedError {
 	if err == nil {
-		return ""
+		return nil
 	}
 
-	sanitized := connectionStringCredentialsPattern.ReplaceAllString(err.Error(), "://***@")
-	sanitized = connectionStringPasswordPattern.ReplaceAllString(sanitized, "${1}***")
+	return &SanitizedError{
+		Message: fmt.Sprintf("%s: %s", prefix, sanitizeSensitiveString(err.Error())),
+	}
+}
 
-	return sanitized
+// sanitizeSensitiveString removes credentials and sensitive paths from a string.
+func sanitizeSensitiveString(s string) string {
+	s = connectionStringCredentialsPattern.ReplaceAllString(s, "://***@")
+	s = connectionStringPasswordPattern.ReplaceAllString(s, "${1}***")
+	s = sslPathPattern.ReplaceAllString(s, "${1}=***")
+
+	return s
 }
 
 func sanitizePath(path string) (string, error) {
@@ -498,15 +741,91 @@ func validateDBName(name string) error {
 	return nil
 }
 
-func runMigrations(dbPrimary *sql.DB, migrationsPath, primaryDBName string, allowMultiStatements bool, logger log.Logger) error {
+// migrationOutcome describes the result of classifying a migration error.
+type migrationOutcome struct {
+	err     error
+	level   log.Level
+	message string
+	fields  []log.Field
+}
+
+// classifyMigrationError converts a golang-migrate error into a typed outcome.
+// Returns a zero-value outcome (err == nil) on success or benign cases (ErrNoChange, ErrNotExist).
+func classifyMigrationError(err error) migrationOutcome {
+	if err == nil {
+		return migrationOutcome{}
+	}
+
+	if errors.Is(err, migrate.ErrNoChange) {
+		return migrationOutcome{
+			level:   log.LevelInfo,
+			message: "no new migrations found, skipping",
+		}
+	}
+
+	if errors.Is(err, os.ErrNotExist) {
+		return migrationOutcome{
+			level:   log.LevelWarn,
+			message: "no migration files found, skipping migration step",
+		}
+	}
+
+	var dirtyErr migrate.ErrDirty
+	if errors.As(err, &dirtyErr) {
+		return migrationOutcome{
+			err:     fmt.Errorf("%w: database version %d", ErrMigrationDirty, dirtyErr.Version),
+			level:   log.LevelError,
+			message: "migration failed with dirty version",
+			fields:  []log.Field{log.Int("dirty_version", dirtyErr.Version)},
+		}
+	}
+
+	return migrationOutcome{
+		err:     fmt.Errorf("migration failed: %w", err),
+		level:   log.LevelError,
+		message: "migration failed",
+		fields:  []log.Field{log.Err(err)},
+	}
+}
+
+// recordConnectionFailure increments the postgres connection failure counter.
+// No-op when metricsFactory is nil. ctx is used for metric recording and tracing.
+func (c *Client) recordConnectionFailure(ctx context.Context, operation string) {
+	if c == nil || c.metricsFactory == nil {
+		return
+	}
+
+	counter, err := c.metricsFactory.Counter(connectionFailuresMetric)
+	if err != nil {
+		c.logAtLevel(ctx, log.LevelWarn, "failed to create postgres metric counter", log.Err(err))
+		return
+	}
+
+	err = counter.
+		WithLabels(map[string]string{
+			"operation": constant.SanitizeMetricLabel(operation),
+		}).
+		AddOne(ctx)
+	if err != nil {
+		c.logAtLevel(ctx, log.LevelWarn, "failed to record postgres metric", log.Err(err))
+	}
+}
+
+func runMigrations(ctx context.Context, dbPrimary *sql.DB, migrationsPath, primaryDBName string, allowMultiStatements bool, logger log.Logger) error {
 	if err := validateDBName(primaryDBName); err != nil {
-		logf(logger, log.LevelError, "invalid primary database name: %v", err)
-		return err
+		if logger != nil && logger.Enabled(log.LevelError) {
+			logger.Log(ctx, log.LevelError, "invalid primary database name", log.Err(err))
+		}
+
+		return fmt.Errorf("migrations: %w", err)
 	}
 
 	primaryURL, err := url.Parse(filepath.ToSlash(migrationsPath))
 	if err != nil {
-		logf(logger, log.LevelError, "failed to parse migrations url: %v", err)
+		if logger != nil && logger.Enabled(log.LevelError) {
+			logger.Log(ctx, log.LevelError, "failed to parse migrations url", log.Err(err))
+		}
+
 		return fmt.Errorf("failed to parse migrations url: %w", err)
 	}
 
@@ -518,36 +837,30 @@ func runMigrations(dbPrimary *sql.DB, migrationsPath, primaryDBName string, allo
 		SchemaName:            "public",
 	})
 	if err != nil {
-		logf(logger, log.LevelError, "failed to create postgres driver instance: %v", err)
+		if logger != nil && logger.Enabled(log.LevelError) {
+			logger.Log(ctx, log.LevelError, "failed to create postgres driver instance", log.Err(err))
+		}
+
 		return fmt.Errorf("failed to create postgres driver instance: %w", err)
 	}
 
 	m, err := migrate.NewWithDatabaseInstance(primaryURL.String(), primaryDBName, primaryDriver)
 	if err != nil {
-		logf(logger, log.LevelError, "failed to get migrations: %v", err)
+		if logger != nil && logger.Enabled(log.LevelError) {
+			logger.Log(ctx, log.LevelError, "failed to create migration instance", log.Err(err))
+		}
+
 		return fmt.Errorf("failed to create migration instance: %w", err)
 	}
 
 	if err := m.Up(); err != nil {
-		if errors.Is(err, migrate.ErrNoChange) {
-			logf(logger, log.LevelInfo, "No new migrations found. Skipping...")
-			return nil
+		outcome := classifyMigrationError(err)
+
+		if logger != nil && logger.Enabled(outcome.level) {
+			logger.Log(ctx, outcome.level, outcome.message, outcome.fields...)
 		}
 
-		if errors.Is(err, os.ErrNotExist) {
-			logf(logger, log.LevelWarn, "No migration files found. Skipping migration step...")
-			return nil
-		}
-
-		var dirtyErr migrate.ErrDirty
-		if errors.As(err, &dirtyErr) {
-			logf(logger, log.LevelError, "Migration failed with dirty version %d", dirtyErr.Version)
-			return fmt.Errorf("%w: database version %d", ErrMigrationDirty, dirtyErr.Version)
-		}
-
-		logf(logger, log.LevelError, "Migration failed: %v", err)
-
-		return fmt.Errorf("migration failed: %w", err)
+		return outcome.err
 	}
 
 	return nil

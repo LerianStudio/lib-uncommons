@@ -3,6 +3,7 @@ package zap
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"go.opentelemetry.io/contrib/bridges/otelzap"
@@ -16,11 +17,16 @@ const callerSkipFrames = 1
 type Environment string
 
 const (
-	EnvironmentProduction  Environment = "production"
-	EnvironmentStaging     Environment = "staging"
-	EnvironmentUAT         Environment = "uat"
+	// EnvironmentProduction enables production-safe logging defaults.
+	EnvironmentProduction Environment = "production"
+	// EnvironmentStaging enables staging-safe logging defaults.
+	EnvironmentStaging Environment = "staging"
+	// EnvironmentUAT enables UAT-safe logging defaults.
+	EnvironmentUAT Environment = "uat"
+	// EnvironmentDevelopment enables verbose development logging defaults.
 	EnvironmentDevelopment Environment = "development"
-	EnvironmentLocal       Environment = "local"
+	// EnvironmentLocal enables verbose local-development logging defaults.
+	EnvironmentLocal Environment = "local"
 )
 
 // Config contains all required logger initialization inputs.
@@ -78,10 +84,15 @@ func New(cfg Config) (*Logger, error) {
 }
 
 func resolveLevel(cfg Config) (zap.AtomicLevel, error) {
-	if strings.TrimSpace(cfg.Level) != "" {
+	levelStr := cfg.Level
+	if strings.TrimSpace(levelStr) == "" {
+		levelStr = strings.TrimSpace(os.Getenv("LOG_LEVEL"))
+	}
+
+	if levelStr != "" {
 		var parsed zapcore.Level
-		if err := parsed.Set(cfg.Level); err != nil {
-			return zap.AtomicLevel{}, fmt.Errorf("invalid level %q: %w", cfg.Level, err)
+		if err := parsed.Set(levelStr); err != nil {
+			return zap.AtomicLevel{}, fmt.Errorf("invalid level %q: %w", levelStr, err)
 		}
 
 		return zap.NewAtomicLevelAt(parsed), nil
@@ -95,17 +106,37 @@ func resolveLevel(cfg Config) (zap.AtomicLevel, error) {
 }
 
 func buildConfigByEnvironment(environment Environment) zap.Config {
+	encoding := resolveEncoding(environment)
+
 	if environment == EnvironmentDevelopment || environment == EnvironmentLocal {
 		cfg := zap.NewDevelopmentConfig()
-		cfg.Encoding = "json"
+		cfg.Encoding = encoding
 		cfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
+
+		if encoding == "console" {
+			cfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+		}
 
 		return cfg
 	}
 
 	cfg := zap.NewProductionConfig()
-	cfg.Encoding = "json"
+	cfg.Encoding = encoding
 	cfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 
 	return cfg
+}
+
+func resolveEncoding(environment Environment) string {
+	if enc := strings.TrimSpace(os.Getenv("LOG_ENCODING")); enc != "" {
+		if enc == "json" || enc == "console" {
+			return enc
+		}
+	}
+
+	if environment == EnvironmentDevelopment || environment == EnvironmentLocal {
+		return "console"
+	}
+
+	return "json"
 }

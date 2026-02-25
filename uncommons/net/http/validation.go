@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	cn "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 	"github.com/shopspring/decimal"
@@ -223,6 +224,10 @@ func toSnakeCase(s string) string {
 // Returns a bad request error if parsing or validation fails.
 // Rejects requests with non-JSON Content-Type headers to provide clear error messages.
 func ParseBodyAndValidate(fiberCtx *fiber.Ctx, payload any) error {
+	if fiberCtx == nil {
+		return ErrContextNotFound
+	}
+
 	ct := fiberCtx.Get(fiber.HeaderContentType)
 	if ct != "" && !strings.HasPrefix(ct, fiber.MIMEApplicationJSON) {
 		return ErrUnsupportedContentType
@@ -240,11 +245,11 @@ func ParseBodyAndValidate(fiberCtx *fiber.Ctx, payload any) error {
 // Returns "ASC" as the safe default for any invalid input.
 func ValidateSortDirection(dir string) string {
 	upper := strings.ToUpper(strings.TrimSpace(dir))
-	if upper == SortDirDESC {
-		return SortDirDESC
+	if upper == cn.SortDirDESC {
+		return cn.SortDirDESC
 	}
 
-	return SortDirASC
+	return cn.SortDirASC
 }
 
 // ValidateLimit validates and normalizes a pagination limit.
@@ -261,12 +266,6 @@ func ValidateLimit(limit, defaultLimit, maxLimit int) int {
 
 	return limit
 }
-
-// SortDirASC is the ascending sort direction constant.
-const SortDirASC = "ASC"
-
-// SortDirDESC is the descending sort direction constant.
-const SortDirDESC = "DESC"
 
 // MaxQueryParamLengthShort is the maximum length for short query parameters (action, entity_type, status).
 const MaxQueryParamLengthShort = 50

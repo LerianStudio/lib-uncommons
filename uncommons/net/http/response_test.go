@@ -98,6 +98,26 @@ func TestRespondStatus_Status600ClampedTo500(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 }
 
+// ---------------------------------------------------------------------------
+// Nil guard tests
+// ---------------------------------------------------------------------------
+
+func TestRespond_NilContext(t *testing.T) {
+	t.Parallel()
+
+	err := Respond(nil, 200, fiber.Map{"ok": true})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrContextNotFound)
+}
+
+func TestRespondStatus_NilContext(t *testing.T) {
+	t.Parallel()
+
+	err := RespondStatus(nil, 200)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrContextNotFound)
+}
+
 func TestRespondStatus_NoContent(t *testing.T) {
 	t.Parallel()
 

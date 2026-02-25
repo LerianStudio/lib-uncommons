@@ -756,6 +756,72 @@ func TestGetGRPCUserAgent(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// sanitizeURL tests
+// ---------------------------------------------------------------------------
+
+func TestSanitizeURL_NoQueryParams(t *testing.T) {
+	t.Parallel()
+
+	result := sanitizeURL("https://example.com/api/v1/users")
+	assert.Equal(t, "https://example.com/api/v1/users", result)
+}
+
+func TestSanitizeURL_NoSensitiveParams(t *testing.T) {
+	t.Parallel()
+
+	result := sanitizeURL("https://example.com/api?page=1&limit=20")
+	assert.Equal(t, "https://example.com/api?page=1&limit=20", result)
+}
+
+func TestSanitizeURL_SensitiveTokenParam(t *testing.T) {
+	t.Parallel()
+
+	result := sanitizeURL("https://example.com/callback?token=secret123&state=abc")
+	assert.NotContains(t, result, "secret123")
+	assert.Contains(t, result, "state=abc")
+}
+
+func TestSanitizeURL_SensitivePasswordParam(t *testing.T) {
+	t.Parallel()
+
+	result := sanitizeURL("https://example.com/auth?password=hunter2&username=admin")
+	assert.NotContains(t, result, "hunter2")
+	assert.Contains(t, result, "username=admin")
+}
+
+func TestSanitizeURL_SensitiveAPIKeyParam(t *testing.T) {
+	t.Parallel()
+
+	result := sanitizeURL("https://example.com/api?api_key=my-secret-key&format=json")
+	assert.NotContains(t, result, "my-secret-key")
+	assert.Contains(t, result, "format=json")
+}
+
+func TestSanitizeURL_InvalidURL_ReturnedAsIs(t *testing.T) {
+	t.Parallel()
+
+	// A URL that cannot be parsed should be returned as-is
+	invalidURL := "://missing-scheme"
+	result := sanitizeURL(invalidURL)
+	assert.Equal(t, invalidURL, result)
+}
+
+func TestSanitizeURL_EmptyQueryReturnsOriginal(t *testing.T) {
+	t.Parallel()
+
+	original := "https://example.com/path"
+	result := sanitizeURL(original)
+	assert.Equal(t, original, result)
+}
+
+func TestSanitizeURL_RelativePath(t *testing.T) {
+	t.Parallel()
+
+	result := sanitizeURL("/api/v1/users?token=abc123")
+	assert.NotContains(t, result, "abc123")
+}
+
 // TestWithTelemetryInterceptorConditionalTracePropagation tests conditional trace propagation in gRPC interceptor
 func TestWithTelemetryInterceptorConditionalTracePropagation(t *testing.T) {
 	tests := []struct {

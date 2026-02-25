@@ -3,7 +3,6 @@ package uncommons
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"os/exec"
@@ -13,11 +12,12 @@ import (
 	"strconv"
 	"time"
 
+	cn "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry/metrics"
 	"github.com/google/uuid"
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/mem"
-	"go.opentelemetry.io/otel/metric"
 )
 
 var internalServicePattern = regexp.MustCompile(`^[\w-]+/[\d.]+\s+LerianStudio$`)
@@ -31,7 +31,7 @@ func Contains[T comparable](slice []T, item T) bool {
 func CheckMetadataKeyAndValueLength(limit int, metadata map[string]any) error {
 	for k, v := range metadata {
 		if len(k) > limit {
-			return errors.New("0050")
+			return cn.ErrMetadataKeyLengthExceeded
 		}
 
 		var value string
@@ -52,7 +52,7 @@ func CheckMetadataKeyAndValueLength(limit int, metadata map[string]any) error {
 		}
 
 		if len(value) > limit {
-			return errors.New("0051")
+			return cn.ErrMetadataValueLengthExceeded
 		}
 	}
 
@@ -145,7 +145,7 @@ func GenerateUUIDv7() (uuid.UUID, error) {
 func StructToJSONString(s any) (string, error) {
 	jsonByte, err := json.Marshal(s)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("struct to JSON: %w", err)
 	}
 
 	return string(jsonByte), nil
@@ -182,8 +182,8 @@ func (r *Syscmd) ExecCmd(name string, arg ...string) ([]byte, error) {
 	return exec.Command(name, arg...).Output()
 }
 
-// GetCPUUsage get the current CPU usage
-func GetCPUUsage(ctx context.Context, cpuGauge metric.Int64Gauge) {
+// GetCPUUsage reads the current CPU usage and records it through the MetricsFactory gauge.
+func GetCPUUsage(ctx context.Context, factory *metrics.MetricsFactory) {
 	logger := NewLoggerFromContext(ctx)
 
 	out, err := cpu.Percent(100*time.Millisecond, false)
@@ -196,11 +196,13 @@ func GetCPUUsage(ctx context.Context, cpuGauge metric.Int64Gauge) {
 		percentageCPU = int64(out[0])
 	}
 
-	cpuGauge.Record(ctx, percentageCPU)
+	if err := factory.RecordSystemCPUUsage(ctx, percentageCPU); err != nil {
+		logger.Log(ctx, log.LevelWarn, "error recording CPU gauge", log.Err(err))
+	}
 }
 
-// GetMemUsage get the current memory usage
-func GetMemUsage(ctx context.Context, memGauge metric.Int64Gauge) {
+// GetMemUsage reads the current memory usage and records it through the MetricsFactory gauge.
+func GetMemUsage(ctx context.Context, factory *metrics.MetricsFactory) {
 	logger := NewLoggerFromContext(ctx)
 
 	var percentageMem int64 = 0
@@ -212,7 +214,9 @@ func GetMemUsage(ctx context.Context, memGauge metric.Int64Gauge) {
 		percentageMem = int64(out.UsedPercent)
 	}
 
-	memGauge.Record(ctx, percentageMem)
+	if err := factory.RecordSystemMemUsage(ctx, percentageMem); err != nil {
+		logger.Log(ctx, log.LevelWarn, "error recording memory gauge", log.Err(err))
+	}
 }
 
 // GetMapNumKinds get the map of numeric kinds to use in validations and conversions.

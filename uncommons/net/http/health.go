@@ -103,11 +103,14 @@ func HealthWithDependencies(dependencies ...DependencyCheck) fiber.Handler {
 				status.Healthy = dep.CircuitBreaker.IsHealthy(dep.ServiceName)
 			}
 
-			// Run custom health check if provided
-			// This overrides the circuit breaker health status if both are provided
+			// Run custom health check if provided.
+			// When both CircuitBreaker and HealthCheck are configured, both must
+			// report healthy (AND semantics) to prevent silently bypassing
+			// circuit breaker protection.
 			if dep.HealthCheck != nil {
-				healthy := dep.HealthCheck()
-				status.Healthy = healthy
+				if !dep.HealthCheck() {
+					status.Healthy = false
+				}
 			}
 
 			// Update overall status based on final dependency health

@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"sync"
 	"sync/atomic"
@@ -199,6 +200,22 @@ func TestBuildTLSConfig(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 	assert.Equal(t, uint16(tls.VersionTLS12), cfg.MinVersion)
+
+	cfg, err = buildTLSConfig(TLSConfig{
+		CACertBase64: base64.StdEncoding.EncodeToString(generateTestCertificatePEM(t)),
+		MinVersion:   tls.VersionTLS13,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, uint16(tls.VersionTLS13), cfg.MinVersion)
+
+	cfg, err = buildTLSConfig(TLSConfig{
+		CACertBase64: base64.StdEncoding.EncodeToString(generateTestCertificatePEM(t)),
+		MinVersion:   tls.VersionTLS10,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, uint16(tls.VersionTLS12), cfg.MinVersion)
 }
 
 func TestClient_NilReceiverGuards(t *testing.T) {
@@ -329,6 +346,49 @@ func TestClient_RefreshStatusErrorAndRecovery(t *testing.T) {
 	}, 500*time.Millisecond, 10*time.Millisecond)
 
 	require.NoError(t, client.Close())
+}
+
+func TestClient_RefreshTick_ReconnectFailureReturnsFalse(t *testing.T) {
+	validCert := base64.StdEncoding.EncodeToString(generateTestCertificatePEM(t))
+	normalized, err := normalizeConfig(Config{
+		Topology: Topology{Standalone: &StandaloneTopology{Address: "127.0.0.1:6379"}},
+		TLS:      &TLSConfig{CACertBase64: validCert},
+		Auth: Auth{GCPIAM: &GCPIAMAuth{
+			CredentialsBase64:       base64.StdEncoding.EncodeToString([]byte("{}")),
+			ServiceAccount:          "svc@project.iam.gserviceaccount.com",
+			RefreshEvery:            time.Millisecond,
+			RefreshCheckInterval:    time.Millisecond,
+			RefreshOperationTimeout: time.Second,
+		}},
+		Logger: &log.NopLogger{},
+	})
+	require.NoError(t, err)
+
+	reconnectErr := errors.New("simulated reconnect failure")
+	initialRefresh := time.Now().Add(-time.Hour)
+
+	client := &Client{
+		cfg:    normalized,
+		logger: normalized.Logger,
+		token:  "old-token",
+		tokenRetriever: func(context.Context) (string, error) {
+			return "new-token", nil
+		},
+		reconnectFn: func(context.Context) error {
+			return reconnectErr
+		},
+		lastRefresh: initialRefresh,
+	}
+
+	ok := client.refreshTick(context.Background(), normalized.Auth.GCPIAM)
+	assert.False(t, ok)
+	assert.ErrorIs(t, client.LastRefreshError(), reconnectErr)
+
+	client.mu.RLock()
+	defer client.mu.RUnlock()
+
+	assert.Equal(t, "old-token", client.token)
+	assert.Equal(t, initialRefresh, client.lastRefresh)
 }
 
 func TestClient_Connect_ReconnectClosesPreviousClient(t *testing.T) {
@@ -717,6 +777,23 @@ func TestBuildUniversalOptionsLocked_Topologies(t *testing.T) {
 	})
 }
 
+func TestBuildUniversalOptionsLocked_NoTopology(t *testing.T) {
+	c := &Client{logger: &log.NopLogger{}}
+	_, err := c.buildUniversalOptionsLocked()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidConfig)
+	assert.Contains(t, err.Error(), "no topology configured")
+}
+
+func TestClient_GetClient_NoTopology_ReturnsError(t *testing.T) {
+	// A bare Client{} with no Config (e.g., constructed outside of New()) must
+	// return an error from GetClient rather than silently connecting to localhost:6379.
+	c := &Client{}
+	_, err := c.GetClient(context.Background())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidConfig)
+}
+
 func TestClient_GetClient_ReconnectsWhenNil(t *testing.T) {
 	mr := miniredis.RunT(t)
 
@@ -923,6 +1000,120 @@ func TestNormalizeGCPIAMDefaults(t *testing.T) {
 		assert.Equal(t, 2*time.Hour, auth.TokenLifetime)
 		assert.Equal(t, 30*time.Minute, auth.RefreshEvery)
 	})
+}
+
+func TestNormalizeConnectionOptionsDefaults_PoolSizeCap(t *testing.T) {
+	opts := ConnectionOptions{PoolSize: 5000}
+	normalizeConnectionOptionsDefaults(&opts)
+	assert.Equal(t, maxPoolSize, opts.PoolSize)
+}
+
+func TestNormalizeConnectionOptionsDefaults_PoolSizeAtCap(t *testing.T) {
+	opts := ConnectionOptions{PoolSize: 1000}
+	normalizeConnectionOptionsDefaults(&opts)
+	assert.Equal(t, 1000, opts.PoolSize)
+}
+
+func TestValidateConfig_RefreshEveryExceedsTokenLifetime(t *testing.T) {
+	validCert := base64.StdEncoding.EncodeToString(generateTestCertificatePEM(t))
+	_, err := normalizeConfig(Config{
+		Topology: Topology{Standalone: &StandaloneTopology{Address: "127.0.0.1:6379"}},
+		TLS:      &TLSConfig{CACertBase64: validCert},
+		Auth: Auth{GCPIAM: &GCPIAMAuth{
+			CredentialsBase64: base64.StdEncoding.EncodeToString([]byte("{}")),
+			ServiceAccount:    "svc@project.iam.gserviceaccount.com",
+			TokenLifetime:     30 * time.Minute,
+			RefreshEvery:      50 * time.Minute,
+		}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "RefreshEvery must be less than TokenLifetime")
+}
+
+func TestValidateConfig_RefreshEveryEqualsTokenLifetime(t *testing.T) {
+	validCert := base64.StdEncoding.EncodeToString(generateTestCertificatePEM(t))
+	_, err := normalizeConfig(Config{
+		Topology: Topology{Standalone: &StandaloneTopology{Address: "127.0.0.1:6379"}},
+		TLS:      &TLSConfig{CACertBase64: validCert},
+		Auth: Auth{GCPIAM: &GCPIAMAuth{
+			CredentialsBase64: base64.StdEncoding.EncodeToString([]byte("{}")),
+			ServiceAccount:    "svc@project.iam.gserviceaccount.com",
+			TokenLifetime:     1 * time.Hour,
+			RefreshEvery:      1 * time.Hour,
+		}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "RefreshEvery must be less than TokenLifetime")
+}
+
+func TestStaticPasswordAuth_StringRedactsPassword(t *testing.T) {
+	auth := StaticPasswordAuth{Password: "super-secret-password"}
+	s := auth.String()
+	assert.Contains(t, s, "REDACTED")
+	assert.NotContains(t, s, "super-secret-password")
+
+	gs := auth.GoString()
+	assert.Contains(t, gs, "REDACTED")
+	assert.NotContains(t, gs, "super-secret-password")
+}
+
+func TestGCPIAMAuth_StringRedactsCredentials(t *testing.T) {
+	auth := GCPIAMAuth{
+		CredentialsBase64: "c2VjcmV0LWtleS1tYXRlcmlhbA==",
+		ServiceAccount:    "svc@project.iam.gserviceaccount.com",
+	}
+	s := auth.String()
+	assert.Contains(t, s, "svc@project.iam.gserviceaccount.com")
+	assert.Contains(t, s, "REDACTED")
+	assert.NotContains(t, s, "c2VjcmV0LWtleS1tYXRlcmlhbA==")
+
+	gs := auth.GoString()
+	assert.Contains(t, gs, "REDACTED")
+	assert.NotContains(t, gs, "c2VjcmV0LWtleS1tYXRlcmlhbA==")
+}
+
+func TestStaticPasswordAuth_FmtRedacts(t *testing.T) {
+	auth := StaticPasswordAuth{Password: "my-password-123"}
+	// fmt.Sprintf uses String()/GoString() methods
+	assert.NotContains(t, fmt.Sprintf("%v", auth), "my-password-123")
+	assert.NotContains(t, fmt.Sprintf("%s", auth), "my-password-123")
+	assert.NotContains(t, fmt.Sprintf("%#v", auth), "my-password-123")
+}
+
+func TestGCPIAMAuth_FmtRedacts(t *testing.T) {
+	auth := GCPIAMAuth{
+		CredentialsBase64: "secret-base64-content",
+		ServiceAccount:    "svc@project.iam.gserviceaccount.com",
+	}
+	assert.NotContains(t, fmt.Sprintf("%v", auth), "secret-base64-content")
+	assert.NotContains(t, fmt.Sprintf("%s", auth), "secret-base64-content")
+	assert.NotContains(t, fmt.Sprintf("%#v", auth), "secret-base64-content")
+}
+
+func TestSetPackageLogger_NilDefaultsToNop(t *testing.T) {
+	// Should not panic with nil
+	SetPackageLogger(nil)
+	logger := resolvePackageLogger()
+	require.NotNil(t, logger)
+
+	// Reset to NopLogger
+	SetPackageLogger(&log.NopLogger{})
+}
+
+func TestSetPackageLogger_CustomLogger(t *testing.T) {
+	SetPackageLogger(&log.NopLogger{})
+	logger := resolvePackageLogger()
+	require.NotNil(t, logger)
+}
+
+func TestClient_RefreshTokenLoop_NilGCPIAM(t *testing.T) {
+	// refreshTokenLoop with non-nil client but nil GCPIAM should return immediately.
+	c := &Client{
+		cfg:    Config{},
+		logger: &log.NopLogger{},
+	}
+	// Should return immediately without panic.
+	c.refreshTokenLoop(context.Background())
 }
 
 func generateTestCertificatePEM(t *testing.T) []byte {

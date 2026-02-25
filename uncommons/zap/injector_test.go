@@ -104,17 +104,45 @@ func TestResolveLevelEmptyForLocalDefaultsToDebug(t *testing.T) {
 }
 
 func TestBuildConfigByEnvironmentDev(t *testing.T) {
-	t.Parallel()
+	t.Setenv("LOG_ENCODING", "")
 
 	cfg := buildConfigByEnvironment(EnvironmentDevelopment)
-	assert.Equal(t, "json", cfg.Encoding)
+	assert.Equal(t, "console", cfg.Encoding)
 	assert.True(t, cfg.Development)
 }
 
 func TestBuildConfigByEnvironmentProd(t *testing.T) {
-	t.Parallel()
+	t.Setenv("LOG_ENCODING", "")
 
 	cfg := buildConfigByEnvironment(EnvironmentProduction)
 	assert.Equal(t, "json", cfg.Encoding)
 	assert.False(t, cfg.Development)
+}
+
+func TestResolveEncodingFromEnvVar(t *testing.T) {
+	t.Setenv("LOG_ENCODING", "json")
+	assert.Equal(t, "json", resolveEncoding(EnvironmentLocal))
+
+	t.Setenv("LOG_ENCODING", "console")
+	assert.Equal(t, "console", resolveEncoding(EnvironmentProduction))
+
+	t.Setenv("LOG_ENCODING", "invalid")
+	assert.Equal(t, "console", resolveEncoding(EnvironmentLocal))
+	assert.Equal(t, "json", resolveEncoding(EnvironmentProduction))
+}
+
+func TestResolveLevelFromEnvVar(t *testing.T) {
+	t.Setenv("LOG_LEVEL", "warn")
+
+	level, err := resolveLevel(Config{Environment: EnvironmentProduction, Level: ""})
+	require.NoError(t, err)
+	assert.Equal(t, zapcore.WarnLevel, level.Level())
+}
+
+func TestResolveLevelConfigOverridesEnvVar(t *testing.T) {
+	t.Setenv("LOG_LEVEL", "warn")
+
+	level, err := resolveLevel(Config{Environment: EnvironmentProduction, Level: "error"})
+	require.NoError(t, err)
+	assert.Equal(t, zapcore.ErrorLevel, level.Level(), "Config.Level should take precedence over LOG_LEVEL env var")
 }

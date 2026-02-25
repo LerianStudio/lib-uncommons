@@ -63,12 +63,14 @@ func WithBasicAuth(f BasicAuthFunc, realm string) fiber.Handler {
 	}
 }
 
+// sanitizeBasicAuthRealm strips CR, LF, and double-quote characters from the realm string.
 func sanitizeBasicAuthRealm(realm string) string {
 	realm = strings.TrimSpace(realm)
 
 	return strings.NewReplacer("\r", "", "\n", "", "\"", "").Replace(realm)
 }
 
+// unauthorizedResponse sends a 401 response with a WWW-Authenticate header.
 func unauthorizedResponse(c *fiber.Ctx, realm string) error {
 	c.Set(constant.WWWAuthenticate, `Basic realm="`+realm+`"`)
 

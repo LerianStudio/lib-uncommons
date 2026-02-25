@@ -13,11 +13,15 @@ func NewNop() Logger {
 // Log drops all log events.
 func (l *NopLogger) Log(_ context.Context, _ Level, _ string, _ ...Field) {}
 
+// With returns the same no-op logger.
+//
 //nolint:ireturn
 func (l *NopLogger) With(_ ...Field) Logger {
 	return l
 }
 
+// WithGroup returns the same no-op logger.
+//
 //nolint:ireturn
 func (l *NopLogger) WithGroup(_ string) Logger {
 	return l

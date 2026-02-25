@@ -2,6 +2,8 @@ package http
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"strings"
@@ -15,7 +17,7 @@ import (
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/security"
 	"github.com/gofiber/fiber/v2"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -26,6 +28,7 @@ import (
 // Can be overridden via METRICS_COLLECTION_INTERVAL environment variable.
 const DefaultMetricsCollectionInterval = 5 * time.Second
 
+// Metrics collector singleton state.
 var (
 	metricsCollectorOnce     = &sync.Once{}
 	metricsCollectorShutdown chan struct{}
@@ -34,6 +37,7 @@ var (
 	metricsCollectorInitErr  error
 )
 
+// telemetryRuntimeLogger returns the runtime logger from the telemetry middleware, or nil.
 func telemetryRuntimeLogger(tm *TelemetryMiddleware) runtime.Logger {
 	if tm == nil || tm.Telemetry == nil {
 		return nil
@@ -64,7 +68,7 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *opentelemetry.Telemetry, exclud
 			return c.Next()
 		}
 
-		if len(excludedRoutes) > 0 && tm.isRouteExcluded(c, excludedRoutes) {
+		if len(excludedRoutes) > 0 && tm != nil && tm.isRouteExcluded(c, excludedRoutes) {
 			return c.Next()
 		}
 
@@ -89,15 +93,6 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *opentelemetry.Telemetry, exclud
 		ctx, span := tracer.Start(traceCtx, routePathWithMethod, trace.WithSpanKind(trace.SpanKindServer))
 		defer span.End()
 
-		span.SetAttributes(
-			attribute.String("http.method", c.Method()),
-			attribute.String("http.url", sanitizeURL(c.OriginalURL())),
-			attribute.String("http.route", c.Route().Path),
-			attribute.String("http.scheme", c.Protocol()),
-			attribute.String("http.host", c.Hostname()),
-			attribute.String("http.user_agent", c.Get("User-Agent")),
-		)
-
 		ctx = uncommons.ContextWithTracer(ctx, tracer)
 		ctx = uncommons.ContextWithMetricFactory(ctx, effectiveTelemetry.MetricsFactory)
 
@@ -110,9 +105,23 @@ func (tm *TelemetryMiddleware) WithTelemetry(tl *opentelemetry.Telemetry, exclud
 
 		err = c.Next()
 
+		statusCode := c.Response().StatusCode()
 		span.SetAttributes(
-			attribute.Int("http.status_code", c.Response().StatusCode()),
+			attribute.String("http.request.method", c.Method()),
+			// url.path holds the concrete request path (sanitized). Use http.route for the low-cardinality template.
+			attribute.String("url.path", sanitizeURL(c.OriginalURL())),
+			attribute.String("http.route", c.Route().Path),
+			attribute.String("url.scheme", c.Protocol()),
+			attribute.String("server.address", c.Hostname()),
+			attribute.String("user_agent.original", c.Get(cn.HeaderUserAgent)),
+			attribute.Int("http.response.status_code", statusCode),
 		)
+
+		if err != nil {
+			opentelemetry.HandleSpanError(span, "handler error", err)
+		} else if statusCode >= 500 {
+			span.SetStatus(codes.Error, fmt.Sprintf("HTTP %d", statusCode))
+		}
 
 		return err
 	}
@@ -178,9 +187,15 @@ func (tm *TelemetryMiddleware) WithTelemetryInterceptor(tl *opentelemetry.Teleme
 
 		resp, err := handler(ctx, req)
 
+		grpcStatusCode := status.Code(err)
 		span.SetAttributes(
-			attribute.Int("grpc.status_code", int(status.Code(err))),
+			attribute.String("rpc.method", info.FullMethod),
+			attribute.Int("rpc.grpc.status_code", int(grpcStatusCode)),
 		)
+
+		if err != nil {
+			opentelemetry.HandleSpanError(span, "gRPC handler error", err)
+		}
 
 		return resp, err
 	}
@@ -202,6 +217,7 @@ func (tm *TelemetryMiddleware) EndTracingSpansInterceptor() grpc.UnaryServerInte
 	}
 }
 
+// collectMetrics ensures the background metrics collector goroutine is running.
 func (tm *TelemetryMiddleware) collectMetrics(_ context.Context) error {
 	return tm.ensureMetricsCollector()
 }
@@ -220,6 +236,7 @@ func getMetricsCollectionInterval() time.Duration {
 	return DefaultMetricsCollectionInterval
 }
 
+// ensureMetricsCollector lazily starts the background metrics collector singleton.
 func (tm *TelemetryMiddleware) ensureMetricsCollector() error {
 	if tm == nil || tm.Telemetry == nil {
 		return nil
@@ -243,15 +260,9 @@ func (tm *TelemetryMiddleware) ensureMetricsCollector() error {
 	}
 
 	metricsCollectorOnce.Do(func() {
-		cpuGauge, err := tm.Telemetry.MeterProvider.Meter(tm.Telemetry.ServiceName).Int64Gauge("system.cpu.usage", metric.WithUnit("percentage"))
-		if err != nil {
-			metricsCollectorInitErr = err
-			return
-		}
-
-		memGauge, err := tm.Telemetry.MeterProvider.Meter(tm.Telemetry.ServiceName).Int64Gauge("system.mem.usage", metric.WithUnit("percentage"))
-		if err != nil {
-			metricsCollectorInitErr = err
+		factory := tm.Telemetry.MetricsFactory
+		if factory == nil {
+			metricsCollectorInitErr = errors.New("telemetry MetricsFactory is nil, cannot start system metrics collector")
 			return
 		}
 
@@ -265,8 +276,8 @@ func (tm *TelemetryMiddleware) ensureMetricsCollector() error {
 			"metrics_collector",
 			runtime.KeepRunning,
 			func(_ context.Context) {
-				uncommons.GetCPUUsage(context.Background(), cpuGauge)
-				uncommons.GetMemUsage(context.Background(), memGauge)
+				uncommons.GetCPUUsage(context.Background(), factory)
+				uncommons.GetMemUsage(context.Background(), factory)
 
 				for {
 					select {
@@ -274,8 +285,8 @@ func (tm *TelemetryMiddleware) ensureMetricsCollector() error {
 						ticker.Stop()
 						return
 					case <-ticker.C:
-						uncommons.GetCPUUsage(context.Background(), cpuGauge)
-						uncommons.GetMemUsage(context.Background(), memGauge)
+						uncommons.GetCPUUsage(context.Background(), factory)
+						uncommons.GetMemUsage(context.Background(), factory)
 					}
 				}
 			},
@@ -308,6 +319,7 @@ func StopMetricsCollector() {
 	}
 }
 
+// isRouteExcluded reports whether the request path matches any excluded route prefix.
 func (tm *TelemetryMiddleware) isRouteExcluded(c *fiber.Ctx, excludedRoutes []string) bool {
 	for _, route := range excludedRoutes {
 		if strings.HasPrefix(c.Path(), route) {
@@ -358,7 +370,7 @@ func getGRPCUserAgent(ctx context.Context) string {
 		return ""
 	}
 
-	userAgents := md.Get("user-agent")
+	userAgents := md.Get(strings.ToLower(cn.HeaderUserAgent))
 	if len(userAgents) == 0 {
 		return ""
 	}

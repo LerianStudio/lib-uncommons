@@ -41,6 +41,8 @@ This document maps every notable v1 API path (from the `main` branch) to the cur
 
 - `TelemetryConfig` gains fields: `InsecureExporter bool`, `Propagator propagation.TextMapPropagator`, `Redactor *Redactor`
 - New method: `(*Telemetry).Tracer(name) (trace.Tracer, error)`
+- New method: `(*Telemetry).Meter(name) (metric.Meter, error)`
+- New method: `(*Telemetry).ShutdownTelemetryWithContext(ctx) error` -- context-aware shutdown (alternative to `ShutdownTelemetry()`)
 - New type: `RedactingAttrBagSpanProcessor` (span processor that redacts sensitive span attributes)
 
 ### Obfuscation -> Redaction
@@ -195,10 +197,15 @@ Sync(ctx context.Context) error
 v2 introduces a structured `Field` type with constructors:
 
 - `Field` struct: `Key string`, `Value any`
+- `Any(key, value) Field`
 - `String(key, value) Field`
 - `Int(key, value) Field`
 - `Bool(key, value) Field`
 - `Err(err) Field`
+
+### Level constants
+
+- `LevelError` (0), `LevelWarn` (1), `LevelInfo` (2), `LevelDebug` (3), `LevelUnknown` (255)
 
 ### GoLogger
 
@@ -209,10 +216,8 @@ v2 introduces a structured `Field` type with constructors:
 | v1 | v2 |
 |----|----|
 | `uncommons/logging` package | removed entirely |
-| `logging.SafeErrorf(...)` | `log.SafeErrorf(...)` |
-| `logging.SanitizeExternalResponse(...)` | `log.SanitizeExternalResponse(...)` |
-
-New: `log.SetProductionModeResolver(fn)` -- injectable production mode detection.
+| `logging.SafeErrorf(...)` | `log.SafeError(logger, ctx, msg, err, production)` |
+| `logging.SanitizeExternalResponse(...)` | `log.SanitizeExternalResponse(statusCode) string` |
 
 ---
 
@@ -223,14 +228,16 @@ New: `log.SetProductionModeResolver(fn)` -- injectable production mode detection
 | `ZapWithTraceLogger` struct | `Logger` struct (renamed, restructured) |
 | `InitializeLoggerWithError() (log.Logger, error)` | removed (use `New(...)`) |
 | `InitializeLogger() log.Logger` | removed (use `New(...)`) |
-| `InitializeLoggerFromConfig(...)` | `New(cfg Config) (*Logger, zap.AtomicLevel, error)` |
+| `InitializeLoggerFromConfig(...)` | `New(cfg Config) (*Logger, error)` |
 | `hydrateArgs` / template-based logging | removed |
 
 ### New in v2
 
-- New types: `Config`, `Environment` (string type with constants)
+- New types: `Config`, `Environment` (string type with constants: `EnvironmentProduction`, `EnvironmentStaging`, `EnvironmentUAT`, `EnvironmentDevelopment`, `EnvironmentLocal`)
 - `Logger.Raw() *zap.Logger` -- access underlying zap logger
-- Field constructors: `Any(key, value)`, `String(key, value)`, `Int(key, value)`, `Bool(key, value)`, `Duration(key, value)`
+- `Logger.Level() zap.AtomicLevel` -- access dynamic log level
+- Direct zap convenience methods: `Debug()`, `Info()`, `Warn()`, `Error()`, `WithZapFields()`
+- Field constructors: `Any(key, value)`, `String(key, value)`, `Int(key, value)`, `Bool(key, value)`, `Duration(key, value)`, `ErrorField(err)`
 
 ---
 
@@ -301,6 +308,38 @@ New types: `ResourceOwnershipVerifier` func type, `IDLocation` type, `ErrInvalid
 
 New: `DefaultReverseProxyPolicy()`, `ReverseProxyPolicy` struct with SSRF protection.
 
+### Pagination (v2 refinement)
+
+| v2 (previous) | v2 (current) |
+|---|---|
+| `EncodeTimestampCursor(time, uuid) string` | `EncodeTimestampCursor(time, uuid) (string, error)` |
+| `EncodeSortCursor(col, val, id, next) string` | `EncodeSortCursor(col, val, id, next) (string, error)` |
+| `CalculateSortCursorPagination(...) (next, prev string)` | `CalculateSortCursorPagination(...) (next, prev string, err error)` |
+| `ErrOffsetMustBePositive` sentinel | removed (negative offset silently coerced to `DefaultOffset=0`; see note below) |
+| `type Order string` + `Asc Order = "asc"` / `Desc Order = "desc"` | removed; replaced by `SortDirASC = "ASC"` / `SortDirDESC = "DESC"` (untyped `string`, uppercase) |
+
+**Migration note (offset coercion):** The `ErrOffsetMustBePositive` sentinel error is removed. In v2, negative offsets are silently coerced to `DefaultOffset=0` instead of returning an error. This tradeoff avoids breaking callers that relied on the previous behavior and preserves backward compatibility. However, callers should validate offsets before calling pagination functions (e.g., reject negative offsets at the handler level) since the pagination codepaths that previously returned `ErrOffsetMustBePositive` will now silently accept any negative value.
+
+**Migration note (cursor/sort):** The cursor encode functions now return errors. The `Order` type is removed; use the `SortDirASC`/`SortDirDESC` constants directly. Note the **case change** from lowercase `"asc"`/`"desc"` to uppercase `"ASC"`/`"DESC"` — any consumer that stores or compares these values must be updated.
+
+New pagination defaults in `constants/pagination.go`: `DefaultLimit=20`, `DefaultOffset=0`, `MaxLimit=200`.
+
+### Handler
+
+| v2 (previous) | v2 (current) |
+|---|---|
+| `Ping` handler returns `"healthy"` | `Ping` handler returns `"pong"` |
+
+**Migration note:** Any health check monitor that string-matches the response body for `"healthy"` must be updated. Use `HealthWithDependencies` for production health endpoints.
+
+### Health check semantics
+
+| v2 (previous) | v2 (current) |
+|---|---|
+| `HealthWithDependencies`: HealthCheck overrides CircuitBreaker status | Both must report healthy (AND semantics) |
+
+**Migration note:** An open circuit breaker can no longer be overridden by a passing HealthCheck function. This is the correct reliability behavior but may surface previously-hidden unhealthy states.
+
 ### Rate limit storage
 
 | v1 | v2 |
@@ -320,7 +359,14 @@ New: `DefaultReverseProxyPolicy()`, `ReverseProxyPolicy` struct with SSRF protec
 
 Use `ServerManager` (already existed in v1) with `StartWithGracefulShutdown()`.
 
-New: `(*ServerManager).WithShutdownTimeout(d) *ServerManager`
+### New in v2
+
+- `(*ServerManager).WithShutdownTimeout(d) *ServerManager` -- configures max wait for gRPC GracefulStop before hard stop (default: 30s)
+- `(*ServerManager).WithShutdownHook(hook func(context.Context) error) *ServerManager` -- registers cleanup callbacks executed during graceful shutdown (nil hooks are silently ignored)
+- `(*ServerManager).WithShutdownChannel(ch <-chan struct{}) *ServerManager` -- custom shutdown trigger for tests (instead of relying on OS signals)
+- `(*ServerManager).StartWithGracefulShutdownWithError() error` -- returns error on config failure instead of calling `os.Exit(1)`
+- `(*ServerManager).ServersStarted() <-chan struct{}` -- closed when server goroutines have been launched (for test coordination)
+- `ErrNoServersConfigured` sentinel error
 
 ---
 
@@ -334,10 +380,22 @@ New: `(*ServerManager).WithShutdownTimeout(d) *ServerManager`
 | `GetDB(ctx) (*mongo.Client, error)` | `Client(ctx) (*mongo.Client, error)` |
 | `EnsureIndexes(ctx, collection, index)` | `EnsureIndexes(ctx, collection, indexes...) error` (variadic) |
 
+### Error sentinels (v2 refinement)
+
+| v2 (previous) | v2 (current) | Notes |
+|---|---|---|
+| `ErrClientClosed` (nil receiver) | `ErrNilClient` | Nil receiver now returns `ErrNilClient`; `ErrClientClosed` reserved for closed/not-connected state |
+
 ### New in v2
 
-- Methods: `Database(ctx)`, `DatabaseName()`, `Ping(ctx)`, `Close(ctx)`
-- Types: `Config`, `URIConfig`, `Option`
+- Methods: `Database(ctx)`, `DatabaseName()`, `Ping(ctx)`, `Close(ctx)`, `ResolveClient(ctx)` (alias for `Client(ctx)`)
+- Types: `Config`, `URIConfig`, `Option`, `TLSConfig`
+- Sentinel errors: `ErrNilClient`, `ErrNilDependency`, `ErrInvalidConfig`, `ErrEmptyURI`, `ErrEmptyDatabaseName`, `ErrEmptyCollectionName`, `ErrEmptyIndexes`, `ErrConnect`, `ErrPing`, `ErrDisconnect`, `ErrCreateIndex`, `ErrNilMongoClient`, `ErrNilContext`
+- URI builder errors: `ErrInvalidScheme`, `ErrEmptyHost`, `ErrInvalidPort`, `ErrPortNotAllowedForSRV`, `ErrPasswordWithoutUser`
+- `Config.TLS` field — optional `*TLSConfig` for TLS connections (mirrors redis `TLSConfig`)
+- Non-TLS connection warning — logs at `Warn` level when connecting without TLS
+- `Config.MaxPoolSize` silently clamped to 1000 (mirrors redis `maxPoolSize` pattern)
+- Credential clearing — `Config.URI` is cleared after successful `Connect()` to reduce credential exposure
 
 ---
 
@@ -366,10 +424,29 @@ Recommended rollout:
 - Use `TLSConfig.AllowLegacyMinVersion=true` only for temporary exceptions and monitor warning logs.
 - Remove legacy override after endpoint upgrades to restore strict floor enforcement.
 
+### Interface and lock handle changes
+
+| v2 (previous) | v2 (current) |
+|----|----|
+| `TryLock(ctx, key) (*redsync.Mutex, bool, error)` | `TryLock(ctx, key) (LockHandle, bool, error)` |
+| `Unlock(ctx, *redsync.Mutex) error` | `LockHandle.Unlock(ctx) error` |
+| `DistributedLocker` interface (4 methods, imports `redsync`) | `LockManager` interface (3 methods, no `redsync` dependency) |
+| `DistributedLock` struct | `RedisLockManager` struct |
+| `NewDistributedLock(conn)` | `NewRedisLockManager(conn) (*RedisLockManager, error)` |
+
+**Migration note:** `TryLock` now returns an opaque `LockHandle` instead of `*redsync.Mutex`. Call `handle.Unlock(ctx)` directly instead of `lock.Unlock(ctx, mutex)`. The standalone `Unlock` method on `DistributedLock` is deprecated -- it now accepts `LockHandle` instead of `*redsync.Mutex`. Consumers no longer need to import `github.com/go-redsync/redsync/v4` to use the `DistributedLocker` interface.
+
 ### New in v2
 
 - Config types: `Config`, `Topology`, `StandaloneTopology`, `SentinelTopology`, `ClusterTopology`, `TLSConfig`, `Auth`, `StaticPasswordAuth`, `GCPIAMAuth`, `ConnectionOptions`
-- Methods: `Close() error`, `Status() (Status, error)`, `IsConnected() (bool, error)`, `LastRefreshError() error`
+- Methods: `GetClient(ctx) (redis.UniversalClient, error)`, `Close() error`, `Status() (Status, error)`, `IsConnected() (bool, error)`, `LastRefreshError() error`
+- `SetPackageLogger(log.Logger)` -- configures package-level logger for nil-receiver assertion diagnostics
+- `LockHandle` interface -- opaque lock token with self-contained `Unlock(ctx) error`
+- `DefaultLockOptions() LockOptions` -- sensible defaults for general-purpose locking
+- `RateLimiterLockOptions() LockOptions` -- optimized for rate limiter use case
+- `StaticPasswordAuth.String()` / `GCPIAMAuth.String()` -- credential redaction in `fmt` output
+- Config validation: `RefreshEvery < TokenLifetime` enforced, `PoolSize` capped at 1000, `LockOptions.Tries` capped at 1000
+- Lazy pool adapter: `DistributedLock` survives IAM token refresh reconnections
 
 ---
 
@@ -384,10 +461,14 @@ Recommended rollout:
 | `Pagination` struct | removed (moved to `uncommons/net/http`) |
 | `squirrel` dependency | removed |
 
+### Error wrapping (v2 refinement)
+
+`SanitizedError.Unwrap()` returns `nil` to prevent error chain traversal from leaking database credentials. `Error()` returns the sanitized text. Because `Unwrap()` is intentionally blocked, `errors.Is/errors.As` do not match the hidden original cause through `SanitizedError`.
+
 ### New in v2
 
 - Methods: `Primary() (*sql.DB, error)`, `Close() error`, `IsConnected() (bool, error)`
-- Types: `Config`, `MigrationConfig`
+- Types: `Config`, `MigrationConfig`, `SanitizedError`
 - Migration: `NewMigrator(cfg MigrationConfig) (*Migrator, error)` and `(*Migrator).Up(ctx) error`
 
 ---
@@ -465,10 +546,11 @@ New function: `ResolveOperation(pending, isSource bool, status TransactionStatus
 
 | v1 | v2 |
 |----|----|
-| `NewManager(logger) Manager` | `NewManager(logger) (Manager, error)` (returns error on nil logger) |
+| `NewManager(logger) Manager` | `NewManager(logger, opts...) (Manager, error)` (returns error on nil logger; accepts options) |
 | `(*Manager).GetOrCreate(serviceName, config) CircuitBreaker` | `(*Manager).GetOrCreate(serviceName, config) (CircuitBreaker, error)` (validates config) |
 
 New: `Config.Validate() error`
+New: `WithMetricsFactory(f *metrics.MetricsFactory) ManagerOption` -- emits `circuit_breaker_state_transitions_total` and `circuit_breaker_executions_total` counters
 
 ---
 
@@ -563,6 +645,16 @@ New sentinel errors for time validation: `ErrTokenExpired`, `ErrTokenNotYetValid
 |----|----|
 | `DefaultHandler(reason)` panics | `DefaultHandler(reason)` records assertion failure (no panic) |
 | `ManagerShutdown.Terminate(reason)` panics on nil handler | Records assertion failure, returns without panic |
+| Direct struct construction `&ManagerShutdown{}` | `New(opts ...ManagerOption) *ManagerShutdown` constructor with functional options |
+
+### New in v2
+
+- `New(opts ...ManagerOption) *ManagerShutdown` -- constructor with default handler and functional options
+- `WithLogger(l log.Logger) ManagerOption` -- provides structured logger for assertion and validation logging
+- `DefaultHandlerWithError(reason string) error` -- returns `ErrLicenseValidationFailed` instead of panicking
+- `(*ManagerShutdown).TerminateWithError(reason) error` -- returns error instead of invoking handler (for validation checks)
+- `(*ManagerShutdown).TerminateSafe(reason) error` -- invokes handler but returns error if manager is uninitialized
+- Sentinel errors: `ErrLicenseValidationFailed`, `ErrManagerNotInitialized`
 
 ---
 
@@ -590,21 +682,40 @@ Field list expanded with additional financial and PII identifiers.
 
 ### uncommons/circuitbreaker
 
-- `NewManager(logger) (Manager, error)` -- circuit breaker manager for service-level resilience
-- `NewHealthChecker(config) HealthChecker` -- periodic health checks with recovery
-- Core types: `Config`, `State`, `Counts`, `CircuitBreaker` interface
+- `NewManager(logger, opts...) (Manager, error)` -- circuit breaker manager for service-level resilience
+- `WithMetricsFactory(f *metrics.MetricsFactory) ManagerOption` -- emits state transition and execution counters
+- `NewHealthCheckerWithValidation(manager, interval, timeout, logger) (HealthChecker, error)` -- periodic health checks with recovery and config validation
+- Preset configs: `DefaultConfig()`, `AggressiveConfig()`, `ConservativeConfig()`, `HTTPServiceConfig()`, `DatabaseConfig()`
+- `Config.Validate() error` -- validates circuit breaker configuration
+- Core types: `Config`, `State`, `Counts`, `CircuitBreaker` interface, `Manager` interface, `HealthChecker` interface
+- State constants: `StateClosed`, `StateOpen`, `StateHalfOpen`, `StateUnknown`
+- Sentinel errors: `ErrInvalidConfig`, `ErrNilLogger`, `ErrNilCircuitBreaker`, `ErrNilManager`, `ErrInvalidHealthCheckInterval`, `ErrInvalidHealthCheckTimeout`
 
 ### uncommons/assert
 
 - `New(ctx, logger, component, operation) *Asserter` -- production-safe assertions
 - Methods: `That()`, `NotNil()`, `NotEmpty()`, `NoError()`, `Never()`, `Halt()`
 - Returns errors + emits telemetry instead of panicking
+- Metrics: `InitAssertionMetrics(factory)`, `GetAssertionMetrics()`, `ResetAssertionMetrics()`
+- Predicates library (`predicates.go`): `Positive`, `NonNegative`, `NotZero`, `InRange`, `PositiveInt`, `InRangeInt`, `ValidUUID`, `ValidAmount`, `ValidScale`, `PositiveDecimal`, `NonNegativeDecimal`, `ValidPort`, `ValidSSLMode`, `DebitsEqualCredits`, `NonZeroTotals`, `ValidTransactionStatus`, `TransactionCanTransitionTo`, `TransactionCanBeReverted`, `BalanceSufficientForRelease`, `DateNotInFuture`, `DateAfter`, `BalanceIsZero`, `TransactionHasOperations`, `TransactionOperationsMatch`
+- Sentinel error: `ErrAssertionFailed`
+
+### uncommons/runtime
+
+- Recovery: `RecoverAndLog`, `RecoverAndCrash`, `RecoverWithPolicy` (and `*WithContext` variants)
+- Safe goroutines: `SafeGo`, `SafeGoWithContext`, `SafeGoWithContextAndComponent` with `PanicPolicy` (KeepRunning/CrashProcess)
+- Panic metrics: `InitPanicMetrics(factory[, logger])`, `GetPanicMetrics()`, `ResetPanicMetrics()`
+- Span recording: `RecordPanicToSpan`, `RecordPanicToSpanWithComponent`
+- Error reporter: `SetErrorReporter(reporter)`, `GetErrorReporter()` with `ErrorReporter` interface
+- Production mode: `SetProductionMode(bool)`, `IsProductionMode() bool`
+- Sentinel error: `ErrPanic`
 
 ### uncommons/safe
 
-- **Regex:** `Compile()`, `CompilePOSIX()`, `MatchString()`, `FindString()` with caching
+- **Math:** `Divide()`, `DivideRound()`, `DivideOrZero()`, `DivideOrDefault()`, `Percentage()`, `PercentageOrZero()` on `decimal.Decimal` with zero-division safety; `DivideFloat64()`, `DivideFloat64OrZero()` for float64
+- **Regex:** `Compile()`, `CompilePOSIX()`, `MatchString()`, `FindString()`, `ClearCache()` with caching
 - **Slices:** `First[T]()`, `Last[T]()`, `At[T]()` with error returns and `*OrDefault` variants
-- **Math:** `Divide()`, `DivideRound()`, `DivideOrZero()`, `DivideOrDefault()`, `Percentage()`, `PercentageOrZero()` on `decimal.Decimal` with zero-division safety
+- Sentinel errors: `ErrDivisionByZero`, `ErrInvalidRegex`, `ErrEmptySlice`, `ErrIndexOutOfBounds`
 
 ### uncommons/security
 
@@ -628,7 +739,7 @@ Field list expanded with additional financial and PII identifiers.
 - `Exponential(base, attempt) time.Duration` -- exponential delay calculation
 - `FullJitter(delay) time.Duration` -- crypto/rand-based jitter
 - `ExponentialWithJitter(base, attempt) time.Duration` -- combined helper
-- `WaitContext(ctx, delay) error` -- context-aware sleep
+- `WaitContext(ctx, delay) error` -- context-aware sleep (renamed from `SleepWithContext`)
 
 ### uncommons/pointers
 
@@ -644,6 +755,8 @@ Field list expanded with additional financial and PII identifiers.
 - `WithContext(ctx) (*Group, context.Context)` -- goroutine group with cancellation
 - `(*Group).Go(fn)` -- launch goroutine with panic recovery
 - `(*Group).Wait() error` -- wait and return first error
+- `(*Group).SetLogger(logger)` -- configure logger for panic recovery diagnostics
+- Sentinel error: `ErrPanicRecovered`
 
 ---
 

@@ -9,8 +9,11 @@ import (
 )
 
 var (
-	ErrNilCounter   = errors.New("counter instrument is nil")
-	ErrNilGauge     = errors.New("gauge instrument is nil")
+	// ErrNilCounter is returned when a counter builder has no instrument.
+	ErrNilCounter = errors.New("counter instrument is nil")
+	// ErrNilGauge is returned when a gauge builder has no instrument.
+	ErrNilGauge = errors.New("gauge instrument is nil")
+	// ErrNilHistogram is returned when a histogram builder has no instrument.
 	ErrNilHistogram = errors.New("histogram instrument is nil")
 )
 

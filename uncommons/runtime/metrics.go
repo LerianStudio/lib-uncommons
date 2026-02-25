@@ -2,35 +2,23 @@ package runtime
 
 import (
 	"context"
-	stdlog "log"
 	"sync"
 
+	constant "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry/metrics"
 )
-
-const (
-	// maxLabelLength is the maximum length for metric labels to prevent cardinality explosion.
-	maxLabelLength = 64
-)
-
-// sanitizeLabel truncates a label value to prevent metric cardinality issues.
-func sanitizeLabel(value string) string {
-	if len(value) > maxLabelLength {
-		return value[:maxLabelLength]
-	}
-
-	return value
-}
 
 // PanicMetrics provides panic-related metrics using OpenTelemetry.
 // It wraps lib-uncommons' MetricsFactory for consistent metric handling.
 type PanicMetrics struct {
 	factory *metrics.MetricsFactory
+	logger  Logger
 }
 
 // panicRecoveredMetric defines the metric for counting recovered panics.
 var panicRecoveredMetric = metrics.Metric{
-	Name:        "panic_recovered_total",
+	Name:        constant.MetricPanicRecoveredTotal,
 	Unit:        "1",
 	Description: "Total number of recovered panics",
 }
@@ -42,7 +30,13 @@ var (
 	panicMetricsMu       sync.RWMutex
 )
 
-// InitPanicMetrics initializes the panic metrics with the provided MetricsFactory.
+// InitPanicMetrics initializes panic metrics with the provided MetricsFactory.
+//
+// Backward compatibility:
+//   - InitPanicMetrics(factory)
+//   - InitPanicMetrics(factory, logger)
+//
+// The logger is optional and used only for metric recording diagnostics.
 // This should be called once during application startup after telemetry is initialized.
 // It is safe to call multiple times; subsequent calls are no-ops.
 //
@@ -54,7 +48,7 @@ var (
 //	}
 //	tl.ApplyGlobals()
 //	runtime.InitPanicMetrics(tl.MetricsFactory)
-func InitPanicMetrics(factory *metrics.MetricsFactory) {
+func InitPanicMetrics(factory *metrics.MetricsFactory, logger ...Logger) {
 	panicMetricsMu.Lock()
 	defer panicMetricsMu.Unlock()
 
@@ -66,8 +60,14 @@ func InitPanicMetrics(factory *metrics.MetricsFactory) {
 		return // Already initialized
 	}
 
+	var l Logger
+	if len(logger) > 0 {
+		l = logger[0]
+	}
+
 	panicMetricsInstance = &PanicMetrics{
 		factory: factory,
+		logger:  l,
 	}
 }
 
@@ -104,18 +104,24 @@ func (pm *PanicMetrics) RecordPanicRecovered(ctx context.Context, component, gor
 
 	counter, err := pm.factory.Counter(panicRecoveredMetric)
 	if err != nil {
-		stdlog.Printf("[WARN] runtime: failed to create panic metric counter: %v", err)
+		if pm.logger != nil {
+			pm.logger.Log(ctx, log.LevelWarn, "failed to create panic metric counter", log.Err(err))
+		}
+
 		return
 	}
 
 	err = counter.
 		WithLabels(map[string]string{
-			"component":      sanitizeLabel(component),
-			"goroutine_name": sanitizeLabel(goroutineName),
+			"component":      constant.SanitizeMetricLabel(component),
+			"goroutine_name": constant.SanitizeMetricLabel(goroutineName),
 		}).
 		AddOne(ctx)
 	if err != nil {
-		stdlog.Printf("[WARN] runtime: failed to record panic metric: %v", err)
+		if pm.logger != nil {
+			pm.logger.Log(ctx, log.LevelWarn, "failed to record panic metric", log.Err(err))
+		}
+
 		return
 	}
 }

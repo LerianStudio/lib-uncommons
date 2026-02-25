@@ -191,7 +191,7 @@ func (f *MetricsFactory) getOrCreateCounter(m Metric) (metric.Int64Counter, erro
 	counter, err := f.meter.Int64Counter(m.Name, counterOpts...)
 	if err != nil {
 		if f.logger != nil {
-			f.logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to create counter metric %q", m.Name), log.Err(err))
+			f.logger.Log(context.Background(), log.LevelError, "failed to create counter metric", log.String("metric_name", m.Name), log.Err(err))
 		}
 
 		return nil, fmt.Errorf("create counter %q: %w", m.Name, err)
@@ -226,7 +226,7 @@ func (f *MetricsFactory) getOrCreateGauge(m Metric) (metric.Int64Gauge, error) {
 	gauge, err := f.meter.Int64Gauge(m.Name, gaugeOpts...)
 	if err != nil {
 		if f.logger != nil {
-			f.logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to create gauge metric %q", m.Name), log.Err(err))
+			f.logger.Log(context.Background(), log.LevelError, "failed to create gauge metric", log.String("metric_name", m.Name), log.Err(err))
 		}
 
 		return nil, fmt.Errorf("create gauge %q: %w", m.Name, err)
@@ -265,7 +265,7 @@ func (f *MetricsFactory) getOrCreateHistogram(m Metric) (metric.Int64Histogram, 
 	histogram, err := f.meter.Int64Histogram(m.Name, histogramOpts...)
 	if err != nil {
 		if f.logger != nil {
-			f.logger.Log(context.Background(), log.LevelError, fmt.Sprintf("failed to create histogram metric %q", m.Name), log.Err(err))
+			f.logger.Log(context.Background(), log.LevelError, "failed to create histogram metric", log.String("metric_name", m.Name), log.Err(err))
 		}
 
 		return nil, fmt.Errorf("create histogram %q: %w", m.Name, err)

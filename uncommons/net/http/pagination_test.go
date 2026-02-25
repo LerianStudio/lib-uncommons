@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	cn "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -94,9 +95,11 @@ func TestParsePagination(t *testing.T) {
 			expectedErr:    nil,
 		},
 		{
-			name:        "negative offset returns error",
-			queryString: "limit=10&offset=-1",
-			expectedErr: ErrOffsetMustBePositive,
+			name:           "negative offset coerces to default",
+			queryString:    "limit=10&offset=-1",
+			expectedLimit:  10,
+			expectedOffset: 0,
+			expectedErr:    nil,
 		},
 		{
 			name:           "very large limit gets capped",
@@ -437,7 +440,8 @@ func TestEncodeTimestampCursor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			encoded := EncodeTimestampCursor(tc.timestamp, tc.id)
+			encoded, err := EncodeTimestampCursor(tc.timestamp, tc.id)
+			require.NoError(t, err)
 			assert.NotEmpty(t, encoded)
 
 			decoded, err := DecodeTimestampCursor(encoded)
@@ -453,7 +457,8 @@ func TestDecodeTimestampCursor(t *testing.T) {
 
 	validTimestamp := time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC)
 	validID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
-	validCursor := EncodeTimestampCursor(validTimestamp, validID)
+	validCursor, encErr := EncodeTimestampCursor(validTimestamp, validID)
+	require.NoError(t, encErr)
 
 	tests := []struct {
 		name              string
@@ -520,7 +525,8 @@ func TestParseTimestampCursorPagination(t *testing.T) {
 
 	validTimestamp := time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC)
 	validID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
-	validCursor := EncodeTimestampCursor(validTimestamp, validID)
+	validCursor, encErr := EncodeTimestampCursor(validTimestamp, validID)
+	require.NoError(t, encErr)
 
 	tests := []struct {
 		name              string
@@ -629,7 +635,8 @@ func TestTimestampCursor_RoundTrip(t *testing.T) {
 	timestamp := time.Date(2025, 6, 15, 14, 30, 45, 0, time.UTC)
 	id := uuid.MustParse("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
 
-	encoded := EncodeTimestampCursor(timestamp, id)
+	encoded, encErr := EncodeTimestampCursor(timestamp, id)
+	require.NoError(t, encErr)
 	decoded, err := DecodeTimestampCursor(encoded)
 
 	require.NoError(t, err)
@@ -641,9 +648,9 @@ func TestTimestampCursor_RoundTrip(t *testing.T) {
 func TestPaginationConstants(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, 20, DefaultLimit)
-	assert.Equal(t, 0, DefaultOffset)
-	assert.Equal(t, 200, MaxLimit)
+	assert.Equal(t, 20, cn.DefaultLimit)
+	assert.Equal(t, 0, cn.DefaultOffset)
+	assert.Equal(t, 200, cn.MaxLimit)
 }
 
 func TestEncodeSortCursor_RoundTrip(t *testing.T) {
@@ -683,7 +690,8 @@ func TestEncodeSortCursor_RoundTrip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			encoded := EncodeSortCursor(tc.sortColumn, tc.sortValue, tc.id, tc.pointsNext)
+			encoded, err := EncodeSortCursor(tc.sortColumn, tc.sortValue, tc.id, tc.pointsNext)
+			require.NoError(t, err)
 			assert.NotEmpty(t, encoded)
 
 			decoded, err := DecodeSortCursor(encoded)
@@ -863,12 +871,13 @@ func TestCalculateSortCursorPagination(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			next, prev := CalculateSortCursorPagination(
+			next, prev, calcErr := CalculateSortCursorPagination(
 				tc.isFirstPage, tc.hasPagination, tc.pointsNext,
 				"created_at",
 				"2025-01-01T00:00:00Z", "id-first",
 				"2025-01-02T00:00:00Z", "id-last",
 			)
+			require.NoError(t, calcErr)
 
 			if tc.expectNext {
 				assert.NotEmpty(t, next, "expected next cursor")
@@ -969,4 +978,116 @@ func TestValidateSortColumn_CustomDefault(t *testing.T) {
 
 	result := ValidateSortColumn("unknown", []string{"name"}, "created_at")
 	assert.Equal(t, "created_at", result)
+}
+
+// ---------------------------------------------------------------------------
+// Nil guard tests
+// ---------------------------------------------------------------------------
+
+func TestParsePagination_NilContext(t *testing.T) {
+	t.Parallel()
+
+	limit, offset, err := ParsePagination(nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrContextNotFound)
+	assert.Zero(t, limit)
+	assert.Zero(t, offset)
+}
+
+func TestParseOpaqueCursorPagination_NilContext(t *testing.T) {
+	t.Parallel()
+
+	cursor, limit, err := ParseOpaqueCursorPagination(nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrContextNotFound)
+	assert.Empty(t, cursor)
+	assert.Zero(t, limit)
+}
+
+func TestParseTimestampCursorPagination_NilContext(t *testing.T) {
+	t.Parallel()
+
+	cursor, limit, err := ParseTimestampCursorPagination(nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrContextNotFound)
+	assert.Nil(t, cursor)
+	assert.Zero(t, limit)
+}
+
+// ---------------------------------------------------------------------------
+// Lenient negative offset coercion
+// ---------------------------------------------------------------------------
+
+func TestParsePagination_NegativeOffsetCoercesToZero(t *testing.T) {
+	t.Parallel()
+
+	app := fiber.New()
+
+	var limit, offset int
+	var err error
+
+	app.Get("/test", func(c *fiber.Ctx) error {
+		limit, offset, err = ParsePagination(c)
+		return nil
+	})
+
+	req := httptest.NewRequest("GET", "/test?limit=10&offset=-100", nil)
+	resp, testErr := app.Test(req)
+	require.NoError(t, testErr)
+	resp.Body.Close()
+
+	require.NoError(t, err)
+	assert.Equal(t, 10, limit)
+	assert.Equal(t, 0, offset, "negative offset should be coerced to 0 (DefaultOffset)")
+}
+
+// ---------------------------------------------------------------------------
+// EncodeTimestampCursor and EncodeSortCursor return proper errors
+// ---------------------------------------------------------------------------
+
+func TestEncodeTimestampCursor_Success(t *testing.T) {
+	t.Parallel()
+
+	ts := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+	id := uuid.MustParse("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+
+	encoded, err := EncodeTimestampCursor(ts, id)
+	require.NoError(t, err)
+	assert.NotEmpty(t, encoded)
+
+	// Verify round-trip
+	decoded, err := DecodeTimestampCursor(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, ts, decoded.Timestamp)
+	assert.Equal(t, id, decoded.ID)
+}
+
+func TestEncodeSortCursor_Success(t *testing.T) {
+	t.Parallel()
+
+	encoded, err := EncodeSortCursor("created_at", "2025-01-01", "some-id", true)
+	require.NoError(t, err)
+	assert.NotEmpty(t, encoded)
+
+	decoded, err := DecodeSortCursor(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, "created_at", decoded.SortColumn)
+	assert.Equal(t, "2025-01-01", decoded.SortValue)
+	assert.Equal(t, "some-id", decoded.ID)
+	assert.True(t, decoded.PointsNext)
+}
+
+func TestEncodeSortCursor_EmptySortColumn_DecodesButFailsValidation(t *testing.T) {
+	t.Parallel()
+
+	// EncodeSortCursor doesn't validate -- it just marshals.
+	// But DecodeSortCursor validates sort column is non-empty and safe.
+	encoded, err := EncodeSortCursor("", "value", "id-1", true)
+	require.NoError(t, err)
+	assert.NotEmpty(t, encoded)
+
+	_, err = DecodeSortCursor(encoded)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidCursor)
+	assert.Contains(t, err.Error(), "invalid sort column")
 }

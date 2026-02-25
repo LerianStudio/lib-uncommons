@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	txn "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 )
@@ -211,11 +212,11 @@ func NonZeroTotals(debits, credits decimal.Decimal) bool {
 // validTransactionStatuses contains valid transaction status values.
 // Package-level for zero-allocation lookups.
 var validTransactionStatuses = map[string]bool{
-	"CREATED":  true,
-	"APPROVED": true,
-	"PENDING":  true,
-	"CANCELED": true,
-	"NOTED":    true,
+	txn.CREATED:  true,
+	txn.APPROVED: true,
+	txn.PENDING:  true,
+	txn.CANCELED: true,
+	txn.NOTED:    true,
 }
 
 // ValidTransactionStatus returns true if status is a valid transaction status.
@@ -236,9 +237,9 @@ func ValidTransactionStatus(status string) bool {
 // Key: current state, Value: set of valid target states.
 // Only PENDING transactions can be committed (APPROVED) or canceled (CANCELED).
 var validTransitions = map[string]map[string]bool{
-	"PENDING": {
-		"APPROVED": true,
-		"CANCELED": true,
+	txn.PENDING: {
+		txn.APPROVED: true,
+		txn.CANCELED: true,
 	},
 	// CREATED, APPROVED, CANCELED, NOTED are terminal states - no forward transitions
 }
@@ -270,7 +271,7 @@ func TransactionCanTransitionTo(current, target string) bool {
 //
 // This ensures only original transactions can be reverted, not reversals.
 func TransactionCanBeReverted(status string, hasParent bool) bool {
-	if status != "APPROVED" {
+	if status != txn.APPROVED {
 		return false
 	}
 

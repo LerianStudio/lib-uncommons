@@ -52,17 +52,23 @@ type RequestInfo struct {
 	Body          string
 }
 
-// ResponseMetricsWrapper is a Wrapper responsible for collect the response data such as status code and size
-// It implements built-in ResponseWriter interface.
+// ResponseMetricsWrapper is a Wrapper responsible for collecting the response data such as status code and size.
 type ResponseMetricsWrapper struct {
 	Context    *fiber.Ctx
 	StatusCode int
 	Size       int
-	Body       string
 }
 
 // NewRequestInfo creates an instance of RequestInfo.
-func NewRequestInfo(c *fiber.Ctx) *RequestInfo {
+// The obfuscationDisabled parameter controls whether sensitive fields in the
+// request body are obfuscated. Pass the middleware's effective setting (which
+// combines the global LOG_OBFUSCATION_DISABLED env var with per-middleware
+// overrides via WithObfuscationDisabled) to honour per-middleware configuration.
+func NewRequestInfo(c *fiber.Ctx, obfuscationDisabled bool) *RequestInfo {
+	if c == nil {
+		return &RequestInfo{Date: time.Now().UTC()}
+	}
+
 	username, referer := "-", "-"
 	rawURL := string(c.Request().URI().FullURI())
 
@@ -73,8 +79,8 @@ func NewRequestInfo(c *fiber.Ctx) *RequestInfo {
 		}
 	}
 
-	if c.Get("Referer") != "" {
-		referer = c.Get("Referer")
+	if c.Get(cn.HeaderReferer) != "" {
+		referer = c.Get(cn.HeaderReferer)
 	}
 
 	body := ""
@@ -82,7 +88,7 @@ func NewRequestInfo(c *fiber.Ctx) *RequestInfo {
 	if c.Request().Header.ContentLength() > 0 {
 		bodyBytes := c.Body()
 
-		if !logObfuscationDisabled {
+		if !obfuscationDisabled {
 			body = getBodyObfuscatedString(c, bodyBytes)
 		} else {
 			body = string(bodyBytes)
@@ -92,7 +98,7 @@ func NewRequestInfo(c *fiber.Ctx) *RequestInfo {
 	return &RequestInfo{
 		TraceID:       c.Get(cn.HeaderID),
 		Method:        c.Method(),
-		URI:           c.OriginalURL(),
+		URI:           sanitizeURL(c.OriginalURL()),
 		Username:      username,
 		Referer:       referer,
 		UserAgent:     c.Get(cn.HeaderUserAgent),
@@ -128,13 +134,19 @@ func (r *RequestInfo) String() string {
 // FinishRequestInfo calculates the duration of RequestInfo automatically using time.Now()
 // It also set StatusCode and Size of RequestInfo passed by ResponseMetricsWrapper.
 func (r *RequestInfo) FinishRequestInfo(rw *ResponseMetricsWrapper) {
+	if rw == nil {
+		return
+	}
+
 	r.Duration = time.Now().UTC().Sub(r.Date)
 	r.Status = rw.StatusCode
 	r.Size = rw.Size
 }
 
+// logMiddleware holds the logger and configuration used by HTTP and gRPC logging middleware.
 type logMiddleware struct {
-	Logger log.Logger
+	Logger              log.Logger
+	ObfuscationDisabled bool
 }
 
 // LogMiddlewareOption represents the log middleware function as an implementation.
@@ -149,10 +161,20 @@ func WithCustomLogger(logger log.Logger) LogMiddlewareOption {
 	}
 }
 
+// WithObfuscationDisabled is a functional option that disables log body obfuscation.
+// This is primarily intended for testing and local development.
+// In production, use the LOG_OBFUSCATION_DISABLED environment variable.
+func WithObfuscationDisabled(disabled bool) LogMiddlewareOption {
+	return func(l *logMiddleware) {
+		l.ObfuscationDisabled = disabled
+	}
+}
+
 // buildOpts creates an instance of logMiddleware with options.
 func buildOpts(opts ...LogMiddlewareOption) *logMiddleware {
 	mid := &logMiddleware{
-		Logger: &log.GoLogger{},
+		Logger:              &log.GoLogger{},
+		ObfuscationDisabled: logObfuscationDisabled,
 	}
 
 	for _, opt := range opts {
@@ -177,11 +199,11 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 
 		setRequestHeaderID(c)
 
-		info := NewRequestInfo(c)
+		mid := buildOpts(opts...)
+
+		info := NewRequestInfo(c, mid.ObfuscationDisabled)
 
 		headerID := c.Get(cn.HeaderID)
-
-		mid := buildOpts(opts...)
 		logger := mid.Logger.
 			With(log.String(cn.HeaderID, info.TraceID)).
 			With(log.String("message_prefix", headerID+cn.LoggerDefaultSeparator))
@@ -195,7 +217,6 @@ func WithHTTPLogging(opts ...LogMiddlewareOption) fiber.Handler {
 			Context:    c,
 			StatusCode: c.Response().StatusCode(),
 			Size:       len(c.Response().Body()),
-			Body:       "",
 		}
 
 		info.FinishRequestInfo(&rw)
@@ -260,6 +281,7 @@ func WithGrpcLogging(opts ...LogMiddlewareOption) grpc.UnaryServerInterceptor {
 	}
 }
 
+// setRequestHeaderID ensures the Fiber request carries a unique correlation ID header.
 func setRequestHeaderID(c *fiber.Ctx) {
 	headerID := c.Get(cn.HeaderID)
 
@@ -274,6 +296,7 @@ func setRequestHeaderID(c *fiber.Ctx) {
 	c.SetUserContext(ctx)
 }
 
+// setGRPCRequestHeaderID extracts or generates a correlation ID from gRPC metadata.
 func setGRPCRequestHeaderID(ctx context.Context) context.Context {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if ok {
@@ -287,8 +310,9 @@ func setGRPCRequestHeaderID(ctx context.Context) context.Context {
 	return uncommons.ContextWithHeaderID(ctx, uuid.New().String())
 }
 
+// getBodyObfuscatedString returns the request body with sensitive fields obfuscated.
 func getBodyObfuscatedString(c *fiber.Ctx, bodyBytes []byte) string {
-	contentType := c.Get("Content-Type")
+	contentType := c.Get(cn.HeaderContentType)
 
 	var obfuscatedBody string
 
@@ -305,13 +329,22 @@ func getBodyObfuscatedString(c *fiber.Ctx, bodyBytes []byte) string {
 	return obfuscatedBody
 }
 
+// handleJSONBody obfuscates sensitive fields in a JSON request body.
+// Handles both top-level objects and arrays.
 func handleJSONBody(bodyBytes []byte) string {
-	var bodyData map[string]any
+	var bodyData any
 	if err := json.Unmarshal(bodyBytes, &bodyData); err != nil {
 		return string(bodyBytes)
 	}
 
-	obfuscateMapRecursively(bodyData, 0)
+	switch v := bodyData.(type) {
+	case map[string]any:
+		obfuscateMapRecursively(v, 0)
+	case []any:
+		obfuscateSliceRecursively(v, 0)
+	default:
+		return string(bodyBytes)
+	}
 
 	updatedBody, err := json.Marshal(bodyData)
 	if err != nil {
@@ -321,6 +354,7 @@ func handleJSONBody(bodyBytes []byte) string {
 	return string(updatedBody)
 }
 
+// obfuscateMapRecursively replaces sensitive map values up to maxObfuscationDepth levels.
 func obfuscateMapRecursively(data map[string]any, depth int) {
 	if depth >= maxObfuscationDepth {
 		return
@@ -341,6 +375,7 @@ func obfuscateMapRecursively(data map[string]any, depth int) {
 	}
 }
 
+// obfuscateSliceRecursively walks slice elements and obfuscates nested sensitive fields.
 func obfuscateSliceRecursively(data []any, depth int) {
 	if depth >= maxObfuscationDepth {
 		return
@@ -356,6 +391,7 @@ func obfuscateSliceRecursively(data []any, depth int) {
 	}
 }
 
+// handleURLEncodedBody obfuscates sensitive fields in a URL-encoded request body.
 func handleURLEncodedBody(bodyBytes []byte) string {
 	formData, err := url.ParseQuery(string(bodyBytes))
 	if err != nil {
@@ -379,6 +415,7 @@ func handleURLEncodedBody(bodyBytes []byte) string {
 	return updatedBody.Encode()
 }
 
+// handleMultipartBody obfuscates sensitive fields in a multipart/form-data request body.
 func handleMultipartBody(c *fiber.Ctx) string {
 	form, err := c.MultipartForm()
 	if err != nil {

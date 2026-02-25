@@ -2,9 +2,11 @@ package zap
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	logpkg "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/runtime"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -92,6 +94,10 @@ func (l *Logger) Enabled(level logpkg.Level) bool {
 
 // Sync flushes buffered logs, respecting context cancellation.
 func (l *Logger) Sync(ctx context.Context) error {
+	if ctx == nil {
+		return l.must().Sync()
+	}
+
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -99,6 +105,14 @@ func (l *Logger) Sync(ctx context.Context) error {
 	done := make(chan error, 1)
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				runtime.HandlePanicValue(ctx, nil, r, "zap", "sync")
+
+				done <- fmt.Errorf("panic during logger sync: %v", r)
+			}
+		}()
+
 		done <- l.must().Sync()
 	}()
 

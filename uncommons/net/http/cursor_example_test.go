@@ -5,6 +5,7 @@ package http_test
 import (
 	"fmt"
 
+	cn "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	uhttp "github.com/LerianStudio/lib-uncommons/v2/uncommons/net/http"
 )
 
@@ -21,7 +22,7 @@ func ExampleEncodeCursor() {
 		return
 	}
 
-	op, order, err := uhttp.CursorDirectionRules(uhttp.SortDirASC, decoded.Direction)
+	op, order, err := uhttp.CursorDirectionRules(cn.SortDirASC, decoded.Direction)
 
 	fmt.Println(err == nil)
 	fmt.Println(decoded.ID, decoded.Direction)

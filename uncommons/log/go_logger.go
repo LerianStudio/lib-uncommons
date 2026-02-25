@@ -46,6 +46,8 @@ func (l *GoLogger) Log(_ context.Context, level Level, msg string, fields ...Fie
 	log.Print(line)
 }
 
+// With returns a child logger with additional persistent fields.
+//
 //nolint:ireturn
 func (l *GoLogger) With(fields ...Field) Logger {
 	if l == nil {
@@ -66,6 +68,8 @@ func (l *GoLogger) With(fields ...Field) Logger {
 	}
 }
 
+// WithGroup returns a child logger scoped under the provided group name.
+//
 //nolint:ireturn
 func (l *GoLogger) WithGroup(name string) Logger {
 	if l == nil {

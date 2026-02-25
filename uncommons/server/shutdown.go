@@ -38,6 +38,27 @@ type ServerManager struct {
 	shutdownOnce       sync.Once
 	shutdownTimeout    time.Duration
 	startupErrors      chan error
+	shutdownHooks      []func(context.Context) error
+}
+
+// ensureRuntimeDefaults initializes zero-value fields so exported lifecycle
+// methods remain nil-safe even when ServerManager is manually instantiated.
+func (sm *ServerManager) ensureRuntimeDefaults() {
+	if sm == nil {
+		return
+	}
+
+	if sm.logger == nil {
+		sm.logger = log.NewNop()
+	}
+
+	if sm.serversStarted == nil {
+		sm.serversStarted = make(chan struct{})
+	}
+
+	if sm.startupErrors == nil {
+		sm.startupErrors = make(chan error, 2)
+	}
 }
 
 // NewServerManager creates a new instance of ServerManager.
@@ -64,6 +85,10 @@ func NewServerManager(
 
 // WithHTTPServer configures the HTTP server for the ServerManager.
 func (sm *ServerManager) WithHTTPServer(app *fiber.App, address string) *ServerManager {
+	if sm == nil {
+		return nil
+	}
+
 	sm.httpServer = app
 	sm.httpAddress = address
 
@@ -72,6 +97,10 @@ func (sm *ServerManager) WithHTTPServer(app *fiber.App, address string) *ServerM
 
 // WithGRPCServer configures the gRPC server for the ServerManager.
 func (sm *ServerManager) WithGRPCServer(server *grpc.Server, address string) *ServerManager {
+	if sm == nil {
+		return nil
+	}
+
 	sm.grpcServer = server
 	sm.grpcAddress = address
 
@@ -81,6 +110,10 @@ func (sm *ServerManager) WithGRPCServer(server *grpc.Server, address string) *Se
 // WithShutdownChannel configures a custom shutdown channel for the ServerManager.
 // This allows tests to trigger shutdown deterministically instead of relying on OS signals.
 func (sm *ServerManager) WithShutdownChannel(ch <-chan struct{}) *ServerManager {
+	if sm == nil {
+		return nil
+	}
+
 	sm.shutdownChan = ch
 
 	return sm
@@ -89,7 +122,26 @@ func (sm *ServerManager) WithShutdownChannel(ch <-chan struct{}) *ServerManager 
 // WithShutdownTimeout configures the maximum duration to wait for gRPC GracefulStop
 // before forcing a hard stop. Defaults to 30 seconds.
 func (sm *ServerManager) WithShutdownTimeout(d time.Duration) *ServerManager {
+	if sm == nil {
+		return nil
+	}
+
 	sm.shutdownTimeout = d
+
+	return sm
+}
+
+// WithShutdownHook registers a function to be called during graceful shutdown.
+// Hooks are executed in registration order, AFTER HTTP server shutdown and
+// BEFORE telemetry shutdown. Each hook receives a context bounded by the
+// shutdown timeout. Errors from hooks are logged but do not prevent subsequent
+// hooks or the rest of the shutdown sequence from running (best-effort cleanup).
+func (sm *ServerManager) WithShutdownHook(hook func(context.Context) error) *ServerManager {
+	if sm == nil || hook == nil {
+		return sm
+	}
+
+	sm.shutdownHooks = append(sm.shutdownHooks, hook)
 
 	return sm
 }
@@ -112,9 +164,7 @@ func (sm *ServerManager) validateConfiguration() error {
 // initServers validates configuration and starts servers without blocking.
 // Returns an error if validation fails. Does not call Fatal.
 func (sm *ServerManager) initServers() error {
-	if sm.serversStarted == nil {
-		sm.serversStarted = make(chan struct{})
-	}
+	sm.ensureRuntimeDefaults()
 
 	if err := sm.validateConfiguration(); err != nil {
 		return err
@@ -129,6 +179,12 @@ func (sm *ServerManager) initServers() error {
 // Returns an error if no servers are configured instead of calling Fatal.
 // Blocks until shutdown signal is received or shutdown channel is closed.
 func (sm *ServerManager) StartWithGracefulShutdownWithError() error {
+	if sm == nil {
+		return ErrNoServersConfigured
+	}
+
+	sm.ensureRuntimeDefaults()
+
 	if err := sm.initServers(); err != nil {
 		return err
 	}
@@ -143,6 +199,13 @@ func (sm *ServerManager) StartWithGracefulShutdownWithError() error {
 // Note: On configuration error, logFatal always terminates the process regardless of logger availability.
 // Use StartWithGracefulShutdownWithError() for proper error handling without process termination.
 func (sm *ServerManager) StartWithGracefulShutdown() {
+	if sm == nil {
+		fmt.Println("no servers configured: use WithHTTPServer() or WithGRPCServer()")
+		os.Exit(1)
+	}
+
+	sm.ensureRuntimeDefaults()
+
 	if err := sm.initServers(); err != nil {
 		// logFatal exits the process via os.Exit(1); code below is unreachable on error
 		sm.logFatal(err.Error())
@@ -178,10 +241,10 @@ func (sm *ServerManager) startServers() {
 			"start_http_server",
 			runtime.KeepRunning,
 			func(_ context.Context) {
-				sm.logInfof("Starting HTTP server on %s", sm.httpAddress)
+				sm.logger.Log(context.Background(), log.LevelInfo, "starting HTTP server", log.String("address", sm.httpAddress))
 
 				if err := sm.httpServer.Listen(sm.httpAddress); err != nil {
-					sm.logErrorf("HTTP server error: %v", err)
+					sm.logger.Log(context.Background(), log.LevelError, "HTTP server error", log.Err(err))
 
 					select {
 					case sm.startupErrors <- fmt.Errorf("HTTP server: %w", err):
@@ -203,11 +266,11 @@ func (sm *ServerManager) startServers() {
 			"start_grpc_server",
 			runtime.KeepRunning,
 			func(_ context.Context) {
-				sm.logInfof("Starting gRPC server on %s", sm.grpcAddress)
+				sm.logger.Log(context.Background(), log.LevelInfo, "starting gRPC server", log.String("address", sm.grpcAddress))
 
 				listener, err := net.Listen("tcp", sm.grpcAddress)
 				if err != nil {
-					sm.logErrorf("Failed to listen on gRPC address: %v", err)
+					sm.logger.Log(context.Background(), log.LevelError, "failed to listen on gRPC address", log.Err(err))
 
 					select {
 					case sm.startupErrors <- fmt.Errorf("gRPC listen: %w", err):
@@ -218,7 +281,7 @@ func (sm *ServerManager) startServers() {
 				}
 
 				if err := sm.grpcServer.Serve(listener); err != nil {
-					sm.logErrorf("gRPC server error: %v", err)
+					sm.logger.Log(context.Background(), log.LevelError, "gRPC server error", log.Err(err))
 
 					select {
 					case sm.startupErrors <- fmt.Errorf("gRPC serve: %w", err):
@@ -231,7 +294,7 @@ func (sm *ServerManager) startServers() {
 		started++
 	}
 
-	sm.logInfof("Launched %d server goroutine(s)", started)
+	sm.logger.Log(context.Background(), log.LevelInfo, "launched server goroutines", log.Int("count", started))
 
 	// Signal that server goroutines have been launched (not that sockets are bound).
 	sm.serversStartedOnce.Do(func() {
@@ -243,20 +306,6 @@ func (sm *ServerManager) startServers() {
 func (sm *ServerManager) logInfo(msg string) {
 	if sm.logger != nil {
 		sm.logger.Log(context.Background(), log.LevelInfo, msg)
-	}
-}
-
-// logInfof safely logs a formatted info message if logger is available
-func (sm *ServerManager) logInfof(format string, args ...any) {
-	if sm.logger != nil {
-		sm.logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf(format, args...))
-	}
-}
-
-// logErrorf safely logs an error message if logger is available
-func (sm *ServerManager) logErrorf(format string, args ...any) {
-	if sm.logger != nil {
-		sm.logger.Log(context.Background(), log.LevelError, fmt.Sprintf(format, args...))
 	}
 }
 
@@ -277,11 +326,13 @@ func (sm *ServerManager) logFatal(msg string) {
 // when a termination signal is received, when the shutdown channel is closed,
 // or when a server startup error is detected.
 func (sm *ServerManager) handleShutdown() {
+	sm.ensureRuntimeDefaults()
+
 	if sm.shutdownChan != nil {
 		select {
 		case <-sm.shutdownChan:
 		case err := <-sm.startupErrors:
-			sm.logErrorf("Server startup failed: %v", err)
+			sm.logger.Log(context.Background(), log.LevelError, "server startup failed", log.Err(err))
 		}
 	} else {
 		c := make(chan os.Signal, 1)
@@ -291,7 +342,7 @@ func (sm *ServerManager) handleShutdown() {
 		case <-c:
 			signal.Stop(c)
 		case err := <-sm.startupErrors:
-			sm.logErrorf("Server startup failed: %v", err)
+			sm.logger.Log(context.Background(), log.LevelError, "server startup failed", log.Err(err))
 		}
 	}
 
@@ -303,6 +354,8 @@ func (sm *ServerManager) handleShutdown() {
 // executeShutdown performs the actual shutdown operations in the correct order for ServerManager.
 // It is idempotent: multiple calls are safe, but only the first invocation executes the shutdown sequence.
 func (sm *ServerManager) executeShutdown() {
+	sm.ensureRuntimeDefaults()
+
 	sm.shutdownOnce.Do(func() {
 		// Use a non-blocking read to check if servers have started.
 		// This prevents a deadlock if a panic occurs before startServers() completes.
@@ -319,8 +372,24 @@ func (sm *ServerManager) executeShutdown() {
 			sm.logInfo("Shutting down HTTP server...")
 
 			if err := sm.httpServer.Shutdown(); err != nil {
-				sm.logErrorf("Error during HTTP server shutdown: %v", err)
+				sm.logger.Log(context.Background(), log.LevelError, "error during HTTP server shutdown", log.Err(err))
 			}
+		}
+
+		// Execute shutdown hooks (best-effort, between HTTP and telemetry shutdown).
+		// Each hook gets its own context with an independent timeout to prevent
+		// one slow hook from consuming the entire budget.
+		for i, hook := range sm.shutdownHooks {
+			hookCtx, hookCancel := context.WithTimeout(context.Background(), sm.shutdownTimeout)
+
+			if err := hook(hookCtx); err != nil {
+				sm.logger.Log(context.Background(), log.LevelError, "shutdown hook failed",
+					log.Int("hook_index", i),
+					log.Err(err),
+				)
+			}
+
+			hookCancel()
 		}
 
 		// Shutdown telemetry BEFORE gRPC server to allow metrics export
@@ -335,10 +404,17 @@ func (sm *ServerManager) executeShutdown() {
 
 			done := make(chan struct{})
 
-			go func() {
-				sm.grpcServer.GracefulStop()
-				close(done)
-			}()
+			runtime.SafeGoWithContextAndComponent(
+				context.Background(),
+				sm.logger,
+				"server",
+				"grpc_graceful_stop",
+				runtime.KeepRunning,
+				func(_ context.Context) {
+					sm.grpcServer.GracefulStop()
+					close(done)
+				},
+			)
 
 			select {
 			case <-done:
@@ -354,7 +430,7 @@ func (sm *ServerManager) executeShutdown() {
 			sm.logInfo("Syncing logger...")
 
 			if err := sm.logger.Sync(context.Background()); err != nil {
-				sm.logErrorf("Failed to sync logger: %v", err)
+				sm.logger.Log(context.Background(), log.LevelError, "failed to sync logger", log.Err(err))
 			}
 		}
 

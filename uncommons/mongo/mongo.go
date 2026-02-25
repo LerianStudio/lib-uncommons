@@ -2,6 +2,9 @@ package mongo
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"sort"
@@ -10,30 +13,68 @@ import (
 	"time"
 
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/backoff"
+	constant "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	libOpentelemetry "github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry/metrics"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
 	defaultServerSelectionTimeout = 5 * time.Second
 	defaultHeartbeatInterval      = 10 * time.Second
+	maxMaxPoolSize                = 1000
 )
 
 var (
-	ErrNilContext          = errors.New("context cannot be nil")
-	ErrEmptyURI            = errors.New("mongo uri cannot be empty")
-	ErrEmptyDatabaseName   = errors.New("database name cannot be empty")
-	ErrClientClosed        = errors.New("mongo client is closed")
+	// ErrNilContext is returned when a required context is nil.
+	ErrNilContext = errors.New("context cannot be nil")
+	// ErrNilClient is returned when a *Client receiver is nil.
+	ErrNilClient = errors.New("mongo client is nil")
+	// ErrClientClosed is returned when the client is not connected.
+	ErrClientClosed = errors.New("mongo client is closed")
+	// ErrNilDependency is returned when an Option sets a required dependency to nil.
+	ErrNilDependency = errors.New("mongo option set a required dependency to nil")
+	// ErrInvalidConfig indicates the provided configuration is invalid.
+	ErrInvalidConfig = errors.New("invalid mongo config")
+	// ErrEmptyURI is returned when Mongo URI is empty.
+	ErrEmptyURI = errors.New("mongo uri cannot be empty")
+	// ErrEmptyDatabaseName is returned when database name is empty.
+	ErrEmptyDatabaseName = errors.New("database name cannot be empty")
+	// ErrEmptyCollectionName is returned when collection name is empty.
 	ErrEmptyCollectionName = errors.New("collection name cannot be empty")
-	ErrEmptyIndexes        = errors.New("at least one index must be provided")
-	ErrConnect             = errors.New("mongo connect failed")
-	ErrPing                = errors.New("mongo ping failed")
-	ErrDisconnect          = errors.New("mongo disconnect failed")
-	ErrCreateIndex         = errors.New("mongo create index failed")
-	ErrNilMongoClient      = errors.New("mongo driver returned nil client")
+	// ErrEmptyIndexes is returned when no index model is provided.
+	ErrEmptyIndexes = errors.New("at least one index must be provided")
+	// ErrConnect wraps connection establishment failures.
+	ErrConnect = errors.New("mongo connect failed")
+	// ErrPing wraps connectivity probe failures.
+	ErrPing = errors.New("mongo ping failed")
+	// ErrDisconnect wraps disconnection failures.
+	ErrDisconnect = errors.New("mongo disconnect failed")
+	// ErrCreateIndex wraps index creation failures.
+	ErrCreateIndex = errors.New("mongo create index failed")
+	// ErrNilMongoClient is returned when mongo driver returns a nil client.
+	ErrNilMongoClient = errors.New("mongo driver returned nil client")
 )
+
+// nilClientAssert fires a telemetry assertion for nil-receiver calls and returns ErrNilClient.
+func nilClientAssert(operation string) error {
+	asserter := assert.New(context.Background(), nil, "mongo", operation)
+	_ = asserter.Never(context.Background(), "mongo client receiver is nil")
+
+	return ErrNilClient
+}
+
+// TLSConfig configures TLS validation for MongoDB connections.
+type TLSConfig struct {
+	CACertBase64 string
+	MinVersion   uint16
+}
 
 // Config defines MongoDB connection and pool behavior.
 type Config struct {
@@ -42,7 +83,9 @@ type Config struct {
 	MaxPoolSize            uint64
 	ServerSelectionTimeout time.Duration
 	HeartbeatInterval      time.Duration
+	TLS                    *TLSConfig
 	Logger                 log.Logger
+	MetricsFactory         *metrics.MetricsFactory
 }
 
 func (cfg Config) validate() error {
@@ -54,19 +97,40 @@ func (cfg Config) validate() error {
 		return ErrEmptyDatabaseName
 	}
 
+	if cfg.TLS != nil && strings.TrimSpace(cfg.TLS.CACertBase64) == "" {
+		return configError("TLS CA cert is required when TLS is configured")
+	}
+
 	return nil
 }
 
 // Option customizes internal client dependencies (primarily for tests).
 type Option func(*clientDeps)
 
+// connectBackoffCap is the maximum delay between lazy-connect retries.
+const connectBackoffCap = 30 * time.Second
+
+// connectionFailuresMetric defines the counter for mongo connection failures.
+var connectionFailuresMetric = metrics.Metric{
+	Name:        "mongo_connection_failures_total",
+	Unit:        "1",
+	Description: "Total number of mongo connection failures",
+}
+
 // Client wraps a MongoDB client with lifecycle and index helpers.
 type Client struct {
-	mu           sync.RWMutex
-	client       *mongo.Client
-	databaseName string
-	cfg          Config
-	deps         clientDeps
+	mu             sync.RWMutex
+	client         *mongo.Client
+	databaseName   string
+	cfg            Config
+	metricsFactory *metrics.MetricsFactory
+	uri            string // private copy for reconnection; cfg.URI cleared after connect
+	deps           clientDeps
+
+	// Lazy-connect rate-limiting: prevents thundering-herd reconnect storms
+	// when the database is down by enforcing exponential backoff between attempts.
+	lastConnectAttempt time.Time
+	connectAttempts    int
 }
 
 type clientDeps struct {
@@ -101,6 +165,8 @@ func NewClient(ctx context.Context, cfg Config, opts ...Option) (*Client, error)
 		return nil, ErrNilContext
 	}
 
+	cfg = normalizeConfig(cfg)
+
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -118,10 +184,16 @@ func NewClient(ctx context.Context, cfg Config, opts ...Option) (*Client, error)
 		opt(&deps)
 	}
 
+	if deps.connect == nil || deps.ping == nil || deps.disconnect == nil || deps.createIndex == nil {
+		return nil, ErrNilDependency
+	}
+
 	client := &Client{
-		databaseName: cfg.Database,
-		cfg:          cfg,
-		deps:         deps,
+		databaseName:   cfg.Database,
+		cfg:            cfg,
+		metricsFactory: cfg.MetricsFactory,
+		uri:            cfg.URI,
+		deps:           deps,
 	}
 
 	if err := client.Connect(ctx); err != nil {
@@ -134,12 +206,19 @@ func NewClient(ctx context.Context, cfg Config, opts ...Option) (*Client, error)
 // Connect establishes a MongoDB connection if one is not already open.
 func (c *Client) Connect(ctx context.Context) error {
 	if c == nil {
-		return ErrClientClosed
+		return nilClientAssert("connect")
 	}
 
 	if ctx == nil {
 		return ErrNilContext
 	}
+
+	tracer := otel.Tracer("mongo")
+
+	ctx, span := tracer.Start(ctx, "mongo.connect")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemMongoDB))
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -148,7 +227,21 @@ func (c *Client) Connect(ctx context.Context) error {
 		return nil
 	}
 
-	clientOptions := options.Client().ApplyURI(c.cfg.URI)
+	if err := c.connectLocked(ctx); err != nil {
+		c.recordConnectionFailure("connect")
+
+		libOpentelemetry.HandleSpanError(span, "Failed to connect to mongo", err)
+
+		return err
+	}
+
+	return nil
+}
+
+// connectLocked performs the actual connection logic.
+// The caller MUST hold c.mu (write lock) before calling this method.
+func (c *Client) connectLocked(ctx context.Context) error {
+	clientOptions := options.Client().ApplyURI(c.uri)
 
 	serverSelectionTimeout := c.cfg.ServerSelectionTimeout
 	if serverSelectionTimeout <= 0 {
@@ -167,9 +260,19 @@ func (c *Client) Connect(ctx context.Context) error {
 		clientOptions.SetMaxPoolSize(c.cfg.MaxPoolSize)
 	}
 
+	if c.cfg.TLS != nil {
+		tlsCfg, err := buildTLSConfig(*c.cfg.TLS)
+		if err != nil {
+			return fmt.Errorf("%w: TLS configuration: %w", ErrConnect, err)
+		}
+
+		clientOptions.SetTLSConfig(tlsCfg)
+	}
+
 	mongoClient, err := c.deps.connect(ctx, clientOptions)
 	if err != nil {
 		c.log(ctx, "mongo connect failed", log.Err(err))
+
 		return fmt.Errorf("%w: %w", ErrConnect, err)
 	}
 
@@ -189,13 +292,24 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	c.client = mongoClient
 
+	if c.cfg.TLS == nil && !isTLSImplied(c.uri) {
+		c.logAtLevel(ctx, log.LevelWarn, "mongo connection established without TLS; "+
+			"consider configuring TLS for production use")
+	}
+
+	c.cfg.URI = ""
+
 	return nil
 }
 
 // Client returns the underlying mongo client if connected.
+//
+// Note: the returned *mongo.Client may become stale if Close is called
+// concurrently from another goroutine. Callers that need atomicity
+// across multiple operations should coordinate externally.
 func (c *Client) Client(ctx context.Context) (*mongo.Client, error) {
 	if c == nil {
-		return nil, ErrClientClosed
+		return nil, nilClientAssert("client")
 	}
 
 	if ctx == nil {
@@ -212,13 +326,82 @@ func (c *Client) Client(ctx context.Context) (*mongo.Client, error) {
 	return c.client, nil
 }
 
+// ResolveClient returns a connected mongo client, reconnecting lazily if needed.
+// Unlike Client(), this method attempts to re-establish a dropped connection using
+// double-checked locking with backoff rate-limiting to prevent reconnect storms.
+func (c *Client) ResolveClient(ctx context.Context) (*mongo.Client, error) {
+	if c == nil {
+		return nil, nilClientAssert("resolve_client")
+	}
+
+	if ctx == nil {
+		return nil, ErrNilContext
+	}
+
+	// Fast path: already connected (read-lock only).
+	c.mu.RLock()
+	client := c.client
+	c.mu.RUnlock()
+
+	if client != nil {
+		return client, nil
+	}
+
+	// Slow path: acquire write lock and double-check before connecting.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.client != nil {
+		return c.client, nil
+	}
+
+	// Rate-limit lazy-connect retries: if previous attempts failed recently,
+	// enforce a minimum delay before the next attempt to prevent reconnect storms.
+	if c.connectAttempts > 0 {
+		delay := backoff.ExponentialWithJitter(1*time.Second, c.connectAttempts)
+		if delay > connectBackoffCap {
+			delay = connectBackoffCap
+		}
+
+		if elapsed := time.Since(c.lastConnectAttempt); elapsed < delay {
+			return nil, fmt.Errorf("mongo resolve_client: rate-limited (next attempt in %s)", delay-elapsed)
+		}
+	}
+
+	c.lastConnectAttempt = time.Now()
+
+	tracer := otel.Tracer("mongo")
+
+	ctx, span := tracer.Start(ctx, "mongo.resolve")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemMongoDB))
+
+	if err := c.connectLocked(ctx); err != nil {
+		c.connectAttempts++
+		c.recordConnectionFailure("resolve")
+
+		libOpentelemetry.HandleSpanError(span, "Failed to resolve mongo connection", err)
+
+		return nil, err
+	}
+
+	c.connectAttempts = 0
+
+	if c.client == nil {
+		err := ErrClientClosed
+		libOpentelemetry.HandleSpanError(span, "Mongo client not connected after resolve", err)
+
+		return nil, err
+	}
+
+	return c.client, nil
+}
+
 // DatabaseName returns the configured database name.
 func (c *Client) DatabaseName() (string, error) {
 	if c == nil {
-		asserter := assert.New(context.Background(), &log.GoLogger{Level: log.LevelError}, "mongo", "DatabaseName")
-		_ = asserter.Never(context.Background(), "mongo client receiver is nil")
-
-		return "", ErrClientClosed
+		return "", nilClientAssert("database_name")
 	}
 
 	c.mu.RLock()
@@ -228,6 +411,10 @@ func (c *Client) DatabaseName() (string, error) {
 }
 
 // Database returns the configured mongo database handle.
+//
+// Note: the returned *mongo.Database may become stale if Close is called
+// concurrently from another goroutine. Callers that need atomicity
+// across multiple operations should coordinate externally.
 func (c *Client) Database(ctx context.Context) (*mongo.Database, error) {
 	client, err := c.Client(ctx)
 	if err != nil {
@@ -245,20 +432,32 @@ func (c *Client) Database(ctx context.Context) (*mongo.Database, error) {
 // Ping checks MongoDB availability using the active connection.
 func (c *Client) Ping(ctx context.Context) error {
 	if c == nil {
-		return ErrClientClosed
+		return nilClientAssert("ping")
 	}
 
 	if ctx == nil {
 		return ErrNilContext
 	}
 
+	tracer := otel.Tracer("mongo")
+
+	ctx, span := tracer.Start(ctx, "mongo.ping")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemMongoDB))
+
 	client, err := c.Client(ctx)
 	if err != nil {
+		libOpentelemetry.HandleSpanError(span, "Failed to get mongo client for ping", err)
+
 		return err
 	}
 
 	if err := c.deps.ping(ctx, client); err != nil {
-		return fmt.Errorf("%w: %w", ErrPing, err)
+		pingErr := fmt.Errorf("%w: %w", ErrPing, err)
+		libOpentelemetry.HandleSpanError(span, "Mongo ping failed", pingErr)
+
+		return pingErr
 	}
 
 	return nil
@@ -269,15 +468,19 @@ func (c *Client) Ping(ctx context.Context) error {
 // This prevents callers from retrying operations on a potentially half-closed client.
 func (c *Client) Close(ctx context.Context) error {
 	if c == nil {
-		asserter := assert.New(context.Background(), nil, "mongo", "Close")
-		_ = asserter.Never(context.Background(), "mongo client receiver is nil")
-
-		return ErrClientClosed
+		return nilClientAssert("close")
 	}
 
 	if ctx == nil {
 		return ErrNilContext
 	}
+
+	tracer := otel.Tracer("mongo")
+
+	ctx, span := tracer.Start(ctx, "mongo.close")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemMongoDB))
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -291,7 +494,11 @@ func (c *Client) Close(ctx context.Context) error {
 
 	if err != nil {
 		c.log(ctx, "mongo disconnect failed", log.Err(err))
-		return fmt.Errorf("%w: %w", ErrDisconnect, err)
+
+		disconnectErr := fmt.Errorf("%w: %w", ErrDisconnect, err)
+		libOpentelemetry.HandleSpanError(span, "Failed to disconnect from mongo", disconnectErr)
+
+		return disconnectErr
 	}
 
 	return nil
@@ -300,7 +507,7 @@ func (c *Client) Close(ctx context.Context) error {
 // EnsureIndexes creates indexes for a collection if they do not already exist.
 func (c *Client) EnsureIndexes(ctx context.Context, collection string, indexes ...mongo.IndexModel) error {
 	if c == nil {
-		return ErrClientClosed
+		return nilClientAssert("ensure_indexes")
 	}
 
 	if ctx == nil {
@@ -315,20 +522,46 @@ func (c *Client) EnsureIndexes(ctx context.Context, collection string, indexes .
 		return ErrEmptyIndexes
 	}
 
+	tracer := otel.Tracer("mongo")
+
+	ctx, span := tracer.Start(ctx, "mongo.ensure_indexes")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String(constant.AttrDBSystem, constant.DBSystemMongoDB),
+		attribute.String(constant.AttrDBMongoDBCollection, collection),
+	)
+
 	client, err := c.Client(ctx)
 	if err != nil {
+		libOpentelemetry.HandleSpanError(span, "Failed to get mongo client for ensure indexes", err)
+
 		return err
 	}
 
 	databaseName, err := c.DatabaseName()
 	if err != nil {
+		libOpentelemetry.HandleSpanError(span, "Failed to get database name for ensure indexes", err)
+
 		return err
 	}
 
 	var indexErrors []error
 
 	for _, index := range indexes {
+		if err := ctx.Err(); err != nil {
+			indexErrors = append(indexErrors, fmt.Errorf("%w: context cancelled: %w", ErrCreateIndex, err))
+
+			break
+		}
+
 		fields := indexKeysString(index.Keys)
+
+		if fields == "<unknown>" {
+			c.logAtLevel(ctx, log.LevelWarn, "unrecognized index key type; expected bson.D or bson.M",
+				log.String("collection", collection))
+		}
+
 		c.log(ctx, "ensuring mongo index", log.String("collection", collection), log.String("fields", fields))
 
 		if err := c.deps.createIndex(ctx, client, databaseName, collection, index); err != nil {
@@ -343,7 +576,10 @@ func (c *Client) EnsureIndexes(ctx context.Context, collection string, indexes .
 	}
 
 	if len(indexErrors) > 0 {
-		return errors.Join(indexErrors...)
+		joinedErr := errors.Join(indexErrors...)
+		libOpentelemetry.HandleSpanError(span, "Failed to ensure some mongo indexes", joinedErr)
+
+		return joinedErr
 	}
 
 	return nil
@@ -363,6 +599,98 @@ func (c *Client) logAtLevel(ctx context.Context, level log.Level, message string
 	}
 
 	c.cfg.Logger.Log(ctx, level, message, fields...)
+}
+
+// normalizeConfig applies safe defaults and clamps to a Config.
+func normalizeConfig(cfg Config) Config {
+	if cfg.MaxPoolSize > maxMaxPoolSize {
+		cfg.MaxPoolSize = maxMaxPoolSize
+	}
+
+	if cfg.TLS != nil {
+		tlsCopy := *cfg.TLS
+		cfg.TLS = &tlsCopy
+	}
+
+	normalizeTLSDefaults(cfg.TLS)
+
+	return cfg
+}
+
+// normalizeTLSDefaults enforces a minimum TLS version of 1.2.
+func normalizeTLSDefaults(tlsCfg *TLSConfig) {
+	if tlsCfg == nil {
+		return
+	}
+
+	if tlsCfg.MinVersion < tls.VersionTLS12 {
+		tlsCfg.MinVersion = tls.VersionTLS12
+	}
+}
+
+// buildTLSConfig creates a *tls.Config from a TLSConfig.
+// MinVersion defaults to TLS 1.2. If cfg.MinVersion is set, it must be
+// tls.VersionTLS12 or tls.VersionTLS13; any other value returns ErrInvalidConfig.
+func buildTLSConfig(cfg TLSConfig) (*tls.Config, error) {
+	caCert, err := base64.StdEncoding.DecodeString(cfg.CACertBase64)
+	if err != nil {
+		return nil, fmt.Errorf("decoding CA cert: %w", err)
+	}
+
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCert) {
+		return nil, fmt.Errorf("adding CA cert to pool failed: %w", ErrInvalidConfig)
+	}
+
+	if cfg.MinVersion != 0 && cfg.MinVersion != tls.VersionTLS12 && cfg.MinVersion != tls.VersionTLS13 {
+		return nil, fmt.Errorf("%w: unsupported TLS MinVersion %#x (must be tls.VersionTLS12 or tls.VersionTLS13)", ErrInvalidConfig, cfg.MinVersion)
+	}
+
+	tlsConfig := &tls.Config{
+		RootCAs:    caCertPool,
+		MinVersion: tls.VersionTLS12,
+	}
+
+	if cfg.MinVersion == tls.VersionTLS13 {
+		tlsConfig.MinVersion = tls.VersionTLS13
+	}
+
+	return tlsConfig, nil
+}
+
+// isTLSImplied returns true if the URI scheme or query parameters indicate TLS.
+func isTLSImplied(uri string) bool {
+	return strings.HasPrefix(uri, "mongodb+srv://") ||
+		strings.Contains(uri, "tls=true") ||
+		strings.Contains(uri, "ssl=true")
+}
+
+// configError wraps a configuration validation message with ErrInvalidConfig.
+func configError(msg string) error {
+	return fmt.Errorf("%w: %s", ErrInvalidConfig, msg)
+}
+
+// recordConnectionFailure increments the mongo connection failure counter.
+// No-op when metricsFactory is nil.
+func (c *Client) recordConnectionFailure(operation string) {
+	if c == nil || c.metricsFactory == nil {
+		return
+	}
+
+	counter, err := c.metricsFactory.Counter(connectionFailuresMetric)
+	if err != nil {
+		c.logAtLevel(context.Background(), log.LevelWarn, "failed to create mongo metric counter", log.Err(err))
+		return
+	}
+
+	err = counter.
+		WithLabels(map[string]string{
+			"operation": constant.SanitizeMetricLabel(operation),
+		}).
+		AddOne(context.Background())
+	if err != nil {
+		c.logAtLevel(context.Background(), log.LevelWarn, "failed to record mongo metric", log.Err(err))
+	}
 }
 
 // indexKeysString returns a string representation of the index keys.

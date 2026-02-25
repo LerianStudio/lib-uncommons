@@ -8,11 +8,16 @@ import (
 )
 
 var (
-	ErrInvalidScheme        = errors.New("invalid mongo uri scheme")
-	ErrEmptyHost            = errors.New("mongo uri host cannot be empty")
-	ErrInvalidPort          = errors.New("mongo uri port is invalid")
+	// ErrInvalidScheme is returned when URI scheme is not mongodb or mongodb+srv.
+	ErrInvalidScheme = errors.New("invalid mongo uri scheme")
+	// ErrEmptyHost is returned when URI host is empty.
+	ErrEmptyHost = errors.New("mongo uri host cannot be empty")
+	// ErrInvalidPort is returned when URI port is outside the valid TCP range.
+	ErrInvalidPort = errors.New("mongo uri port is invalid")
+	// ErrPortNotAllowedForSRV is returned when a port is provided for mongodb+srv.
 	ErrPortNotAllowedForSRV = errors.New("port cannot be set for mongodb+srv")
-	ErrPasswordWithoutUser  = errors.New("password requires username")
+	// ErrPasswordWithoutUser is returned when password is set without username.
+	ErrPasswordWithoutUser = errors.New("password requires username")
 )
 
 // URIConfig contains the components used to build a MongoDB URI.
@@ -32,12 +37,13 @@ func BuildURI(cfg URIConfig) (string, error) {
 	host := strings.TrimSpace(cfg.Host)
 	port := strings.TrimSpace(cfg.Port)
 	database := strings.TrimSpace(cfg.Database)
+	username := strings.TrimSpace(cfg.Username)
 
-	if err := validateBuildURIInput(scheme, host, port, cfg.Username, cfg.Password); err != nil {
+	if err := validateBuildURIInput(scheme, host, port, username, cfg.Password); err != nil {
 		return "", err
 	}
 
-	uri := buildURL(scheme, host, port, cfg.Username, cfg.Password, database, cfg.Query)
+	uri := buildURL(scheme, host, port, username, cfg.Password, database, cfg.Query)
 
 	return uri.String(), nil
 }
@@ -102,6 +108,9 @@ func buildURL(scheme, host, port, username, password, database string, query url
 	return uri
 }
 
+// buildHost concatenates host and port. The caller is responsible for validating
+// that host contains only legitimate hostname characters. The mongo driver
+// validates the full URI downstream via connstring.Parse.
 func buildHost(host, port string) string {
 	if port == "" {
 		return host

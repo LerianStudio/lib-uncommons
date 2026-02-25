@@ -16,9 +16,13 @@ import (
 var ErrLoggerNil = errors.New("logger is nil")
 
 var (
-	ErrNilLauncher  = errors.New("launcher is nil")
-	ErrEmptyApp     = errors.New("app name is empty")
-	ErrNilApp       = errors.New("app is nil")
+	// ErrNilLauncher is returned when a launcher method is called on a nil receiver.
+	ErrNilLauncher = errors.New("launcher is nil")
+	// ErrEmptyApp is returned when an app name is empty or whitespace.
+	ErrEmptyApp = errors.New("app name is empty")
+	// ErrNilApp is returned when a nil app instance is provided.
+	ErrNilApp = errors.New("app is nil")
+	// ErrConfigFailed is returned when launcher option application collected errors.
 	ErrConfigFailed = errors.New("launcher configuration failed")
 )
 
@@ -49,7 +53,7 @@ func RunApp(name string, app App) LauncherOption {
 			l.configErrors = append(l.configErrors, fmt.Errorf("add app %q: %w", name, err))
 
 			if l.Logger != nil {
-				l.Logger.Log(context.Background(), log.LevelError, fmt.Sprintf("Launcher add app error: %v", err))
+				l.Logger.Log(context.Background(), log.LevelError, "launcher add app error", log.Err(err))
 			}
 		}
 	}
@@ -106,7 +110,7 @@ func (l *Launcher) Add(appName string, a App) error {
 func (l *Launcher) Run() {
 	if err := l.RunWithError(); err != nil {
 		if l.Logger != nil {
-			l.Logger.Log(context.Background(), log.LevelError, fmt.Sprintf("Launcher error: %v", err))
+			l.Logger.Log(context.Background(), log.LevelError, "launcher error", log.Err(err))
 		}
 	}
 }
@@ -115,6 +119,10 @@ func (l *Launcher) Run() {
 // or if any configuration errors were collected during option application.
 // Safe to call on a Launcher created without NewLauncher (fields are lazy-initialized).
 func (l *Launcher) RunWithError() error {
+	if l == nil {
+		return ErrNilLauncher
+	}
+
 	if l.Logger == nil {
 		return ErrLoggerNil
 	}
@@ -136,7 +144,7 @@ func (l *Launcher) RunWithError() error {
 	count := len(l.apps)
 	l.wg.Add(count)
 
-	l.Logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Starting %d app(s)", count))
+	l.Logger.Log(context.Background(), log.LevelInfo, "starting apps", log.Int("count", count))
 
 	for name, app := range l.apps {
 		nameCopy := name
@@ -151,22 +159,20 @@ func (l *Launcher) RunWithError() error {
 			func(_ context.Context) {
 				defer l.wg.Done()
 
-				l.Logger.Log(context.Background(), log.LevelInfo, "--")
-				l.Logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Launcher: App (%s) starting", nameCopy))
+				l.Logger.Log(context.Background(), log.LevelInfo, "app starting", log.String("app", nameCopy))
 
 				if err := appCopy.Run(l); err != nil {
-					l.Logger.Log(context.Background(), log.LevelError, fmt.Sprintf("Launcher: App (%s) error:", nameCopy))
-					l.Logger.Log(context.Background(), log.LevelError, fmt.Sprintf("%s", err))
+					l.Logger.Log(context.Background(), log.LevelError, "app error", log.String("app", nameCopy), log.Err(err))
 				}
 
-				l.Logger.Log(context.Background(), log.LevelInfo, fmt.Sprintf("Launcher: App (%s) finished", nameCopy))
+				l.Logger.Log(context.Background(), log.LevelInfo, "app finished", log.String("app", nameCopy))
 			},
 		)
 	}
 
 	l.wg.Wait()
 
-	l.Logger.Log(context.Background(), log.LevelInfo, "Launcher: Terminated")
+	l.Logger.Log(context.Background(), log.LevelInfo, "launcher terminated")
 
 	return nil
 }

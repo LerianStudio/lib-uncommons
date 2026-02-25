@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	constant "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/shopspring/decimal"
 )
 
@@ -12,10 +13,14 @@ import (
 type Operation string
 
 const (
-	OperationDebit   Operation = "DEBIT"
-	OperationCredit  Operation = "CREDIT"
-	OperationOnHold  Operation = "ON_HOLD"
-	OperationRelease Operation = "RELEASE"
+	// OperationDebit decreases available balance from a source.
+	OperationDebit Operation = Operation(constant.DEBIT)
+	// OperationCredit increases available balance on a destination.
+	OperationCredit Operation = Operation(constant.CREDIT)
+	// OperationOnHold moves value from available to on-hold.
+	OperationOnHold Operation = Operation(constant.ONHOLD)
+	// OperationRelease moves value from on-hold back to available.
+	OperationRelease Operation = Operation(constant.RELEASE)
 )
 
 // TransactionStatus represents the lifecycle state of a transaction intent.
@@ -34,17 +39,23 @@ const (
 type TransactionStatus string
 
 const (
-	StatusCreated  TransactionStatus = "CREATED"
-	StatusApproved TransactionStatus = "APPROVED"
-	StatusPending  TransactionStatus = "PENDING"
-	StatusCanceled TransactionStatus = "CANCELED"
+	// StatusCreated marks an intent as recorded but not yet approved.
+	StatusCreated TransactionStatus = TransactionStatus(constant.CREATED)
+	// StatusApproved marks an intent as approved for processing.
+	StatusApproved TransactionStatus = TransactionStatus(constant.APPROVED)
+	// StatusPending marks an intent as currently being processed.
+	StatusPending TransactionStatus = TransactionStatus(constant.PENDING)
+	// StatusCanceled marks an intent as rejected or rolled back.
+	StatusCanceled TransactionStatus = TransactionStatus(constant.CANCELED)
 )
 
 // AccountType classifies balances by ownership boundary.
 type AccountType string
 
 const (
+	// AccountTypeInternal identifies balances owned within the platform.
 	AccountTypeInternal AccountType = "internal"
+	// AccountTypeExternal identifies balances owned outside the platform.
 	AccountTypeExternal AccountType = "external"
 )
 
@@ -52,16 +63,26 @@ const (
 type ErrorCode string
 
 const (
-	ErrorInsufficientFunds                   ErrorCode = "0018"
-	ErrorAccountIneligibility                ErrorCode = "0019"
-	ErrorAccountStatusTransactionRestriction ErrorCode = "0024"
-	ErrorAssetCodeNotFound                   ErrorCode = "0034"
-	ErrorTransactionValueMismatch            ErrorCode = "0073"
-	ErrorTransactionAmbiguous                ErrorCode = "0090"
-	ErrorOnHoldExternalAccount               ErrorCode = "0098"
-	ErrorDataCorruption                      ErrorCode = "0099"
-	ErrorInvalidInput                        ErrorCode = "1001"
-	ErrorInvalidStateTransition              ErrorCode = "1002"
+	// ErrorInsufficientFunds indicates the source balance cannot cover the amount.
+	ErrorInsufficientFunds ErrorCode = ErrorCode(constant.CodeInsufficientFunds)
+	// ErrorAccountIneligibility indicates the account cannot participate in the transaction.
+	ErrorAccountIneligibility ErrorCode = ErrorCode(constant.CodeAccountIneligibility)
+	// ErrorAccountStatusTransactionRestriction indicates account status blocks this transaction.
+	ErrorAccountStatusTransactionRestriction ErrorCode = ErrorCode(constant.CodeAccountStatusTransactionRestriction)
+	// ErrorAssetCodeNotFound indicates the requested asset was not found.
+	ErrorAssetCodeNotFound ErrorCode = ErrorCode(constant.CodeAssetCodeNotFound)
+	// ErrorTransactionValueMismatch indicates allocations do not match transaction total.
+	ErrorTransactionValueMismatch ErrorCode = ErrorCode(constant.CodeTransactionValueMismatch)
+	// ErrorTransactionAmbiguous indicates transaction routing cannot be determined uniquely.
+	ErrorTransactionAmbiguous ErrorCode = ErrorCode(constant.CodeTransactionAmbiguous)
+	// ErrorOnHoldExternalAccount indicates on-hold operations are not allowed for external accounts.
+	ErrorOnHoldExternalAccount ErrorCode = ErrorCode(constant.CodeOnHoldExternalAccount)
+	// ErrorDataCorruption indicates persisted transaction data is inconsistent.
+	ErrorDataCorruption ErrorCode = "0099"
+	// ErrorInvalidInput indicates request payload validation failed.
+	ErrorInvalidInput ErrorCode = "1001"
+	// ErrorInvalidStateTransition indicates an invalid transaction state transition was requested.
+	ErrorInvalidStateTransition ErrorCode = "1002"
 )
 
 // DomainError represents a structured transaction domain validation error.

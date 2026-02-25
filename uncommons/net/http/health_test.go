@@ -194,6 +194,104 @@ func TestHealthWithDependencies_HealthCheckOverridesCB(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
 
+// ---------------------------------------------------------------------------
+// AND semantics: Both CB and HealthCheck must pass
+// ---------------------------------------------------------------------------
+
+func TestHealthWithDependencies_ANDSemantics_CBHealthyButHealthCheckFails(t *testing.T) {
+	t.Parallel()
+
+	mgr := &mockCBManager{state: circuitbreaker.StateClosed, healthy: true}
+
+	app := fiber.New()
+	app.Get("/health", HealthWithDependencies(
+		DependencyCheck{
+			Name:           "database",
+			CircuitBreaker: mgr,
+			ServiceName:    "pg",
+			HealthCheck:    func() bool { return false }, // HealthCheck fails
+		},
+	))
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	// CB is healthy but HealthCheck returns false -> overall degraded
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+
+	var result map[string]any
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	require.NoError(t, err)
+	assert.Equal(t, "degraded", result["status"])
+
+	deps, ok := result["dependencies"].(map[string]any)
+	require.True(t, ok)
+
+	dep, ok := deps["database"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, false, dep["healthy"])
+}
+
+func TestHealthWithDependencies_ANDSemantics_CBUnhealthyButHealthCheckPasses(t *testing.T) {
+	t.Parallel()
+
+	mgr := &mockCBManager{state: circuitbreaker.StateOpen, healthy: false}
+
+	app := fiber.New()
+	app.Get("/health", HealthWithDependencies(
+		DependencyCheck{
+			Name:           "database",
+			CircuitBreaker: mgr,
+			ServiceName:    "pg",
+			HealthCheck:    func() bool { return true }, // HealthCheck passes
+		},
+	))
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	// CB is unhealthy -> overall degraded (HealthCheck can't override CB's false)
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+
+	var result map[string]any
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	require.NoError(t, err)
+	assert.Equal(t, "degraded", result["status"])
+}
+
+func TestHealthWithDependencies_ANDSemantics_BothHealthy(t *testing.T) {
+	t.Parallel()
+
+	mgr := &mockCBManager{state: circuitbreaker.StateClosed, healthy: true}
+
+	app := fiber.New()
+	app.Get("/health", HealthWithDependencies(
+		DependencyCheck{
+			Name:           "database",
+			CircuitBreaker: mgr,
+			ServiceName:    "pg",
+			HealthCheck:    func() bool { return true },
+		},
+	))
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	// Both healthy -> available
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result map[string]any
+	err = json.NewDecoder(resp.Body).Decode(&result)
+	require.NoError(t, err)
+	assert.Equal(t, "available", result["status"])
+}
+
 func TestHealthWithDependencies_CBWithoutServiceName(t *testing.T) {
 	t.Parallel()
 

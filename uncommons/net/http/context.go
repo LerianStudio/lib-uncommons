@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -18,7 +19,9 @@ type TenantExtractor func(ctx context.Context) string
 type IDLocation string
 
 const (
+	// IDLocationParam extracts the ID from a URL path parameter.
 	IDLocationParam IDLocation = "param"
+	// IDLocationQuery extracts the ID from a query string parameter.
 	IDLocationQuery IDLocation = "query"
 )
 
@@ -42,11 +45,13 @@ var (
 // ErrVerifierNotConfigured indicates that no ownership verifier was provided.
 var ErrVerifierNotConfigured = errors.New("ownership verifier is not configured")
 
-// Sentinel errors for general resource ownership verification.
 // ErrLookupFailed indicates an ownership lookup failed unexpectedly.
 var ErrLookupFailed = errors.New("resource lookup failed")
 
 // Sentinel errors for exception ownership verification.
+//
+// Deprecated: Domain-specific errors should be defined in consuming services.
+// Use RegisterResourceErrors to register custom resource error mappings instead.
 var (
 	ErrMissingExceptionID    = errors.New("exception ID is required")
 	ErrInvalidExceptionID    = errors.New("exception ID must be a valid UUID")
@@ -55,12 +60,66 @@ var (
 )
 
 // Sentinel errors for dispute ownership verification.
+//
+// Deprecated: Domain-specific errors should be defined in consuming services.
+// Use RegisterResourceErrors to register custom resource error mappings instead.
 var (
 	ErrMissingDisputeID    = errors.New("dispute ID is required")
 	ErrInvalidDisputeID    = errors.New("dispute ID must be a valid UUID")
 	ErrDisputeNotFound     = errors.New("dispute not found")
 	ErrDisputeAccessDenied = errors.New("access to dispute denied")
 )
+
+// ResourceErrorMapping defines how a resource type's ownership errors should be classified.
+// Register mappings via RegisterResourceErrors to extend classifyResourceOwnershipError
+// without modifying this library.
+type ResourceErrorMapping struct {
+	// NotFoundErr is matched via errors.Is to detect "not found" responses from verifiers.
+	NotFoundErr error
+	// AccessDeniedErr is matched via errors.Is to detect "access denied" responses.
+	AccessDeniedErr error
+}
+
+// resourceErrorRegistry holds registered resource-specific error mappings.
+// Protected by registryMu for concurrent safety.
+var (
+	resourceErrorRegistry []ResourceErrorMapping
+	registryMu            sync.RWMutex
+)
+
+func init() {
+	// Register legacy exception/dispute errors for backward compatibility.
+	resourceErrorRegistry = []ResourceErrorMapping{
+		{NotFoundErr: ErrExceptionNotFound, AccessDeniedErr: ErrExceptionAccessDenied},
+		{NotFoundErr: ErrDisputeNotFound, AccessDeniedErr: ErrDisputeAccessDenied},
+	}
+}
+
+// RegisterResourceErrors adds a resource error mapping to the global registry.
+// Safe for concurrent use. Call at service initialization to register domain-specific
+// error pairs so that classifyResourceOwnershipError can recognize them.
+//
+// Example:
+//
+//	func init() {
+//	    http.RegisterResourceErrors(http.ResourceErrorMapping{
+//	        NotFoundErr:     ErrInvoiceNotFound,
+//	        AccessDeniedErr: ErrInvoiceAccessDenied,
+//	    })
+//	}
+func RegisterResourceErrors(mapping ResourceErrorMapping) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+
+	// Detect duplicate registrations by comparing error sentinel pointers.
+	for _, existing := range resourceErrorRegistry {
+		if errors.Is(existing.NotFoundErr, mapping.NotFoundErr) && errors.Is(existing.AccessDeniedErr, mapping.AccessDeniedErr) {
+			return // Already registered, skip duplicate
+		}
+	}
+
+	resourceErrorRegistry = append(resourceErrorRegistry, mapping)
+}
 
 // TenantOwnershipVerifier validates ownership using tenant and resource IDs.
 type TenantOwnershipVerifier func(ctx context.Context, tenantID, resourceID uuid.UUID) error
@@ -146,6 +205,8 @@ func ParseAndVerifyResourceScopedID(
 	return resourceID, tenantID, nil
 }
 
+// parseTenantAndResourceID extracts and validates both tenant and resource UUIDs
+// from the Fiber request context, returning them along with the Go context.
 func parseTenantAndResourceID(
 	fiberCtx *fiber.Ctx,
 	idName string,
@@ -187,6 +248,8 @@ func parseTenantAndResourceID(
 	return resourceID, ctx, tenantID, nil
 }
 
+// getIDValue retrieves the raw ID string from the Fiber context using the
+// specified location (path parameter or query string).
 func getIDValue(fiberCtx *fiber.Ctx, idName string, location IDLocation) (string, error) {
 	if fiberCtx == nil {
 		return "", ErrContextNotFound
@@ -202,6 +265,8 @@ func getIDValue(fiberCtx *fiber.Ctx, idName string, location IDLocation) (string
 	}
 }
 
+// classifyOwnershipError maps a verifier error to the appropriate sentinel,
+// substituting accessErr when a custom access-denied error is provided.
 func classifyOwnershipError(err, accessErr error) error {
 	switch {
 	case errors.Is(err, ErrContextNotFound):
@@ -225,21 +290,32 @@ func classifyOwnershipError(err, accessErr error) error {
 	}
 }
 
+// classifyResourceOwnershipError maps a resource-scoped verifier error to the
+// appropriate sentinel using the global resource error registry.
+// This allows consuming services to register their own domain-specific error
+// mappings without modifying the shared library.
 func classifyResourceOwnershipError(label string, err, accessErr error) error {
-	switch {
-	case errors.Is(err, ErrExceptionNotFound),
-		errors.Is(err, ErrDisputeNotFound):
-		return err
-	case errors.Is(err, ErrExceptionAccessDenied),
-		errors.Is(err, ErrDisputeAccessDenied):
-		if accessErr != nil {
-			return accessErr
+	registryMu.RLock()
+
+	registry := make([]ResourceErrorMapping, len(resourceErrorRegistry))
+	copy(registry, resourceErrorRegistry)
+	registryMu.RUnlock()
+
+	for _, mapping := range registry {
+		if mapping.NotFoundErr != nil && errors.Is(err, mapping.NotFoundErr) {
+			return err
 		}
 
-		return err
-	default:
-		return fmt.Errorf("%s %w: %w", label, ErrLookupFailed, err)
+		if mapping.AccessDeniedErr != nil && errors.Is(err, mapping.AccessDeniedErr) {
+			if accessErr != nil {
+				return accessErr
+			}
+
+			return err
+		}
 	}
+
+	return fmt.Errorf("%s %w: %w", label, ErrLookupFailed, err)
 }
 
 // SetHandlerSpanAttributes adds tenant_id and context_id attributes to a trace span.

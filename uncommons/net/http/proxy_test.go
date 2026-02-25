@@ -3,6 +3,7 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -567,8 +568,6 @@ func TestServeReverseProxy_HeaderForwarding(t *testing.T) {
 	defer target.Close()
 
 	req := httptest.NewRequest(http.MethodGet, "http://original-host.local/proxy", nil)
-	// Explicitly set the Host header so ServeReverseProxy can read it via req.Header.Get("Host")
-	req.Header.Set("Host", "original-host.local")
 	rr := httptest.NewRecorder()
 
 	host := requestHostFromURL(t, target.URL)
@@ -590,7 +589,7 @@ func TestServeReverseProxy_HeaderForwarding(t *testing.T) {
 
 	// The request Host should be rewritten to the target host
 	assert.Contains(t, receivedHost, host)
-	// X-Forwarded-Host should contain the original host header value
+	// X-Forwarded-Host should contain the original host from req.Host.
 	assert.Equal(t, "original-host.local", receivedForwardedHost)
 }
 
@@ -786,6 +785,120 @@ func TestServeReverseProxy_MultipleAllowedSchemes(t *testing.T) {
 	}, rr, req)
 
 	require.NoError(t, err)
+}
+
+// ---------------------------------------------------------------------------
+// ssrfSafeTransport: DNS rebinding protection
+// ---------------------------------------------------------------------------
+
+func TestSSRFSafeTransport_DialContext_RejectsPrivateIP(t *testing.T) {
+	t.Parallel()
+
+	// Create a transport with SSRF protection enabled
+	transport := newSSRFSafeTransport(ReverseProxyPolicy{
+		AllowedSchemes:          []string{"http"},
+		AllowedHosts:            []string{"localhost"},
+		AllowUnsafeDestinations: false,
+	})
+
+	require.NotNil(t, transport)
+	require.NotNil(t, transport.base)
+	require.NotNil(t, transport.base.DialContext, "DialContext should be set when AllowUnsafeDestinations is false")
+
+	_, err := transport.base.DialContext(context.Background(), "tcp", "localhost:80")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUnsafeProxyDestination)
+}
+
+func TestSSRFSafeTransport_DialContext_AllowsWhenUnsafeEnabled(t *testing.T) {
+	t.Parallel()
+
+	// When AllowUnsafeDestinations is true, transport uses the plain dialer
+	transport := newSSRFSafeTransport(ReverseProxyPolicy{
+		AllowedSchemes:          []string{"http"},
+		AllowedHosts:            []string{"localhost"},
+		AllowUnsafeDestinations: true,
+	})
+
+	require.NotNil(t, transport)
+	require.NotNil(t, transport.base)
+	// DialContext is set to plain dialer (not nil) even when unsafe is allowed
+	require.NotNil(t, transport.base.DialContext)
+}
+
+// ---------------------------------------------------------------------------
+// ssrfSafeTransport: RoundTrip validates redirect targets
+// ---------------------------------------------------------------------------
+
+func TestSSRFSafeTransport_RoundTrip_RejectsUntrustedScheme(t *testing.T) {
+	t.Parallel()
+
+	transport := newSSRFSafeTransport(ReverseProxyPolicy{
+		AllowedSchemes:          []string{"https"},
+		AllowedHosts:            []string{"example.com"},
+		AllowUnsafeDestinations: false,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/path", nil)
+
+	_, err := transport.RoundTrip(req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUntrustedProxyScheme)
+}
+
+func TestSSRFSafeTransport_RoundTrip_RejectsUntrustedHost(t *testing.T) {
+	t.Parallel()
+
+	transport := newSSRFSafeTransport(ReverseProxyPolicy{
+		AllowedSchemes:          []string{"https"},
+		AllowedHosts:            []string{"trusted.com"},
+		AllowUnsafeDestinations: false,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "https://evil.com/path", nil)
+
+	_, err := transport.RoundTrip(req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUntrustedProxyHost)
+}
+
+func TestSSRFSafeTransport_RoundTrip_RejectsPrivateIPInRedirect(t *testing.T) {
+	t.Parallel()
+
+	transport := newSSRFSafeTransport(ReverseProxyPolicy{
+		AllowedSchemes:          []string{"https"},
+		AllowedHosts:            []string{"127.0.0.1"},
+		AllowUnsafeDestinations: false,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "https://127.0.0.1/admin", nil)
+
+	_, err := transport.RoundTrip(req)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUnsafeProxyDestination)
+}
+
+func TestNewSSRFSafeTransport_PolicyIsStored(t *testing.T) {
+	t.Parallel()
+
+	policy := ReverseProxyPolicy{
+		AllowedSchemes:          []string{"https", "http"},
+		AllowedHosts:            []string{"api.example.com"},
+		AllowUnsafeDestinations: false,
+	}
+
+	transport := newSSRFSafeTransport(policy)
+
+	assert.Equal(t, policy.AllowedSchemes, transport.policy.AllowedSchemes)
+	assert.Equal(t, policy.AllowedHosts, transport.policy.AllowedHosts)
+	assert.Equal(t, policy.AllowUnsafeDestinations, transport.policy.AllowUnsafeDestinations)
+}
+
+func TestErrDNSResolutionFailed_Exists(t *testing.T) {
+	t.Parallel()
+
+	assert.NotNil(t, ErrDNSResolutionFailed)
+	assert.Contains(t, ErrDNSResolutionFailed.Error(), "DNS resolution failed")
 }
 
 // parseTestIP is a helper that parses an IP string for tests.

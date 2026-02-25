@@ -3,10 +3,15 @@
 package uncommons
 
 import (
+	"bytes"
+	"io"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetenvOrDefault_WithValue(t *testing.T) {
@@ -182,4 +187,50 @@ func TestSetConfigFromEnvVars_MissingEnvVars(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.Empty(t, config.Field, "missing env var should result in zero value")
+}
+
+func TestInitLocalEnvConfigPrintsVersionAndEnvironment(t *testing.T) {
+	t.Setenv("VERSION", "NO-VERSION")
+	t.Setenv("ENV_NAME", "development")
+
+	localEnvConfig = nil
+	localEnvConfigOnce = sync.Once{}
+
+	stdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create pipe: %v", err)
+	}
+
+	os.Stdout = writer
+
+	var output bytes.Buffer
+	copyDone := make(chan struct{})
+	copyErrCh := make(chan error, 1)
+	go func() {
+		_, copyErr := io.Copy(&output, reader)
+		copyErrCh <- copyErr
+		close(copyDone)
+	}()
+
+	defer func() {
+		require.NoError(t, reader.Close())
+		os.Stdout = stdout
+	}()
+
+	InitLocalEnvConfig()
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+
+	<-copyDone
+	require.NoError(t, <-copyErrCh)
+
+	result := output.String()
+
+	want := "VERSION: NO-VERSION\n\nENVIRONMENT NAME: development\n\n"
+	if !strings.Contains(result, want) {
+		t.Fatalf("unexpected output. got: %q", result)
+	}
 }

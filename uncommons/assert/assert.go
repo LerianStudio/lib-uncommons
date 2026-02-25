@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	constant "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry/metrics"
 
@@ -330,10 +331,8 @@ func isNil(v any) bool {
 	}
 }
 
-const maxLabelLength = 64
-
 // AssertionSpanEventName is the event name used when recording assertion failures on spans.
-const AssertionSpanEventName = "assertion.failed"
+const AssertionSpanEventName = constant.EventAssertionFailed
 
 // AssertionMetrics provides assertion-related metrics using OpenTelemetry.
 // It wraps lib-uncommons' MetricsFactory for consistent metric handling.
@@ -343,7 +342,7 @@ type AssertionMetrics struct {
 
 // assertionFailedMetric defines the metric for counting failed assertions.
 var assertionFailedMetric = metrics.Metric{
-	Name:        "assertion_failed_total",
+	Name:        constant.MetricAssertionFailedTotal,
 	Unit:        "1",
 	Description: "Total number of failed assertions",
 }
@@ -399,27 +398,21 @@ func (am *AssertionMetrics) RecordAssertionFailed(
 
 	counter, err := am.factory.Counter(assertionFailedMetric)
 	if err != nil {
+		logAssertion(nil, fmt.Sprintf("failed to create assertion metric counter: %v", err))
 		return
 	}
 
 	err = counter.
 		WithLabels(map[string]string{
-			"component": sanitizeLabel(component),
-			"operation": sanitizeLabel(operation),
-			"assertion": sanitizeLabel(assertion),
+			"component": constant.SanitizeMetricLabel(component),
+			"operation": constant.SanitizeMetricLabel(operation),
+			"assertion": constant.SanitizeMetricLabel(assertion),
 		}).
 		AddOne(ctx)
 	if err != nil {
+		logAssertion(nil, fmt.Sprintf("failed to record assertion metric: %v", err))
 		return
 	}
-}
-
-func sanitizeLabel(value string) string {
-	if len(value) > maxLabelLength {
-		return value[:maxLabelLength]
-	}
-
-	return value
 }
 
 func recordAssertionMetric(ctx context.Context, component, operation, assertion string) {

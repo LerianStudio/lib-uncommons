@@ -7,7 +7,12 @@ import (
 	"time"
 
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/assert"
+	constant "github.com/LerianStudio/lib-uncommons/v2/uncommons/constants"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
+	libOpentelemetry "github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 
 	libRedis "github.com/LerianStudio/lib-uncommons/v2/uncommons/redis"
 )
@@ -17,10 +22,28 @@ const (
 	scanBatchSize = 100
 )
 
+// ErrStorageUnavailable is returned when Redis storage is nil or not initialized.
 var ErrStorageUnavailable = errors.New("ratelimit redis storage is unavailable")
 
-func unavailableStorageError(operation string) error {
-	asserter := assert.New(context.Background(), nil, "http.ratelimit", operation)
+// RedisStorageOption is a functional option for configuring RedisStorage.
+type RedisStorageOption func(*RedisStorage)
+
+// WithRedisStorageLogger provides a structured logger for assertion and error logging.
+func WithRedisStorageLogger(l log.Logger) RedisStorageOption {
+	return func(s *RedisStorage) {
+		if l != nil {
+			s.logger = l
+		}
+	}
+}
+
+func (storage *RedisStorage) unavailableStorageError(operation string) error {
+	var logger log.Logger
+	if storage != nil {
+		logger = storage.logger
+	}
+
+	asserter := assert.New(context.Background(), logger, "http.ratelimit", operation)
 	_ = asserter.Never(context.Background(), "ratelimit redis storage is unavailable")
 
 	return ErrStorageUnavailable
@@ -29,33 +52,49 @@ func unavailableStorageError(operation string) error {
 // RedisStorage implements fiber.Storage interface using lib-uncommons Redis connection.
 // This enables distributed rate limiting across multiple application instances.
 type RedisStorage struct {
-	conn *libRedis.Client
+	conn   *libRedis.Client
+	logger log.Logger
 }
 
 // NewRedisStorage creates a new Redis-backed storage for Fiber rate limiting.
-// Returns nil if the Redis connection is nil.
-func NewRedisStorage(conn *libRedis.Client) *RedisStorage {
+// Returns nil if the Redis connection is nil. Options can configure a logger.
+func NewRedisStorage(conn *libRedis.Client, opts ...RedisStorageOption) *RedisStorage {
+	storage := &RedisStorage{}
+
+	for _, opt := range opts {
+		opt(storage)
+	}
+
 	if conn == nil {
-		asserter := assert.New(context.Background(), nil, "http.ratelimit", "NewRedisStorage")
+		asserter := assert.New(context.Background(), storage.logger, "http.ratelimit", "NewRedisStorage")
 		_ = asserter.Never(context.Background(), "redis connection is nil; ratelimit storage disabled")
 
 		return nil
 	}
 
-	return &RedisStorage{conn: conn}
+	storage.conn = conn
+
+	return storage
 }
 
 // Get retrieves the value for the given key.
 // Returns nil, nil when the key does not exist.
 func (storage *RedisStorage) Get(key string) ([]byte, error) {
 	if storage == nil || storage.conn == nil {
-		return nil, unavailableStorageError("Get")
+		return nil, storage.unavailableStorageError("Get")
 	}
 
 	ctx := context.Background()
+	tracer := otel.Tracer("ratelimit")
+
+	ctx, span := tracer.Start(ctx, "ratelimit.get")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemRedis))
 
 	client, err := storage.conn.GetClient(ctx)
 	if err != nil {
+		libOpentelemetry.HandleSpanError(span, "Failed to get redis client for ratelimit", err)
 		return nil, fmt.Errorf("get redis client: %w", err)
 	}
 
@@ -65,6 +104,9 @@ func (storage *RedisStorage) Get(key string) ([]byte, error) {
 	}
 
 	if err != nil {
+		storage.logError(ctx, "redis get failed", err, "key", key)
+		libOpentelemetry.HandleSpanError(span, "Ratelimit redis get failed", err)
+
 		return nil, fmt.Errorf("redis get: %w", err)
 	}
 
@@ -75,7 +117,7 @@ func (storage *RedisStorage) Get(key string) ([]byte, error) {
 // 0 expiration means no expiration. Empty key or value will be ignored.
 func (storage *RedisStorage) Set(key string, val []byte, exp time.Duration) error {
 	if storage == nil || storage.conn == nil {
-		return unavailableStorageError("Set")
+		return storage.unavailableStorageError("Set")
 	}
 
 	if key == "" || len(val) == 0 {
@@ -83,13 +125,23 @@ func (storage *RedisStorage) Set(key string, val []byte, exp time.Duration) erro
 	}
 
 	ctx := context.Background()
+	tracer := otel.Tracer("ratelimit")
+
+	ctx, span := tracer.Start(ctx, "ratelimit.set")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemRedis))
 
 	client, err := storage.conn.GetClient(ctx)
 	if err != nil {
+		libOpentelemetry.HandleSpanError(span, "Failed to get redis client for ratelimit", err)
 		return fmt.Errorf("get redis client: %w", err)
 	}
 
 	if err := client.Set(ctx, keyPrefix+key, val, exp).Err(); err != nil {
+		storage.logError(ctx, "redis set failed", err, "key", key)
+		libOpentelemetry.HandleSpanError(span, "Ratelimit redis set failed", err)
+
 		return fmt.Errorf("redis set: %w", err)
 	}
 
@@ -100,17 +152,27 @@ func (storage *RedisStorage) Set(key string, val []byte, exp time.Duration) erro
 // Returns no error if the key does not exist.
 func (storage *RedisStorage) Delete(key string) error {
 	if storage == nil || storage.conn == nil {
-		return unavailableStorageError("Delete")
+		return storage.unavailableStorageError("Delete")
 	}
 
 	ctx := context.Background()
+	tracer := otel.Tracer("ratelimit")
+
+	ctx, span := tracer.Start(ctx, "ratelimit.delete")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemRedis))
 
 	client, err := storage.conn.GetClient(ctx)
 	if err != nil {
+		libOpentelemetry.HandleSpanError(span, "Failed to get redis client for ratelimit", err)
 		return fmt.Errorf("get redis client: %w", err)
 	}
 
 	if err := client.Del(ctx, keyPrefix+key).Err(); err != nil {
+		storage.logError(ctx, "redis delete failed", err, "key", key)
+		libOpentelemetry.HandleSpanError(span, "Ratelimit redis delete failed", err)
+
 		return fmt.Errorf("redis delete: %w", err)
 	}
 
@@ -121,13 +183,20 @@ func (storage *RedisStorage) Delete(key string) error {
 // This uses SCAN to find and delete keys with the rate limit prefix.
 func (storage *RedisStorage) Reset() error {
 	if storage == nil || storage.conn == nil {
-		return unavailableStorageError("Reset")
+		return storage.unavailableStorageError("Reset")
 	}
 
 	ctx := context.Background()
+	tracer := otel.Tracer("ratelimit")
+
+	ctx, span := tracer.Start(ctx, "ratelimit.reset")
+	defer span.End()
+
+	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemRedis))
 
 	client, err := storage.conn.GetClient(ctx)
 	if err != nil {
+		libOpentelemetry.HandleSpanError(span, "Failed to get redis client for ratelimit", err)
 		return fmt.Errorf("get redis client: %w", err)
 	}
 
@@ -136,11 +205,17 @@ func (storage *RedisStorage) Reset() error {
 	for {
 		keys, nextCursor, err := client.Scan(ctx, cursor, keyPrefix+"*", scanBatchSize).Result()
 		if err != nil {
+			storage.logError(ctx, "redis scan failed during reset", err)
+			libOpentelemetry.HandleSpanError(span, "Ratelimit redis scan failed", err)
+
 			return fmt.Errorf("redis scan: %w", err)
 		}
 
 		if len(keys) > 0 {
 			if err := client.Del(ctx, keys...).Err(); err != nil {
+				storage.logError(ctx, "redis batch delete failed during reset", err)
+				libOpentelemetry.HandleSpanError(span, "Ratelimit redis batch delete failed", err)
+
 				return fmt.Errorf("redis batch delete: %w", err)
 			}
 		}
@@ -152,6 +227,29 @@ func (storage *RedisStorage) Reset() error {
 	}
 
 	return nil
+}
+
+// logError logs a Redis operation error if a logger is configured.
+func (storage *RedisStorage) logError(_ context.Context, msg string, err error, kv ...string) {
+	if storage == nil || storage.logger == nil {
+		return
+	}
+
+	fields := make([]log.Field, 0, 1+(len(kv)+1)/2)
+	fields = append(fields, log.Err(err))
+
+	for i := 0; i+1 < len(kv); i += 2 {
+		fields = append(fields, log.String(kv[i], kv[i+1]))
+	}
+
+	// Defensively handle odd-length kv: use a sentinel so missing values are obvious in logs.
+	if len(kv)%2 != 0 {
+		const missingValue = "<missing>"
+
+		fields = append(fields, log.String(kv[len(kv)-1], missingValue))
+	}
+
+	storage.logger.Log(context.Background(), log.LevelWarn, msg, fields...)
 }
 
 // Close is a no-op as the Redis connection is managed by the application lifecycle.
