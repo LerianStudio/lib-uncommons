@@ -821,10 +821,10 @@ func (dispatcher *Dispatcher) handleListPendingError(ctx context.Context, span t
 
 func (dispatcher *Dispatcher) clearListPendingFailureCount(tenantKey string) {
 	dispatcher.failureCountsMu.Lock()
+	defer dispatcher.failureCountsMu.Unlock()
+
 	if tenantKey == "" || tenantKey == defaultTenantFailureCounterFallback {
 		dispatcher.listPendingFailureCounts[defaultTenantFailureCounterFallback] = 0
-		dispatcher.failureCountsMu.Unlock()
-
 		return
 	}
 
@@ -832,13 +832,10 @@ func (dispatcher *Dispatcher) clearListPendingFailureCount(tenantKey string) {
 		// Untracked tenants are folded into fallback when cap is reached. Any
 		// successful list for such tenants should also clear fallback failures.
 		dispatcher.listPendingFailureCounts[defaultTenantFailureCounterFallback] = 0
-		dispatcher.failureCountsMu.Unlock()
-
 		return
 	}
 
 	delete(dispatcher.listPendingFailureCounts, tenantKey)
-	dispatcher.failureCountsMu.Unlock()
 }
 
 func (dispatcher *Dispatcher) publishEventWithRetry(ctx context.Context, event *OutboxEvent) error {
@@ -866,7 +863,7 @@ func (dispatcher *Dispatcher) publishEventWithRetry(ctx context.Context, event *
 		}
 
 		delay := backoff.ExponentialWithJitter(publishBackoff, attempt)
-		if waitErr := backoff.SleepWithContext(ctx, delay); waitErr != nil {
+		if waitErr := backoff.WaitContext(ctx, delay); waitErr != nil {
 			lastErr = fmt.Errorf("publish retry wait interrupted: %w", waitErr)
 			break
 		}
