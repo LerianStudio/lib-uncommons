@@ -10,6 +10,7 @@ import (
 
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/outbox"
 	libPostgres "github.com/LerianStudio/lib-uncommons/v2/uncommons/postgres"
+	"golang.org/x/sync/singleflight"
 )
 
 // ColumnResolver supports column-per-tenant strategy.
@@ -25,6 +26,7 @@ type ColumnResolver struct {
 	cache        []string
 	cacheSet     bool
 	cacheUntil   time.Time
+	sfGroup      singleflight.Group
 }
 
 const defaultTenantDiscoveryTTL = 10 * time.Second
@@ -108,6 +110,28 @@ func (resolver *ColumnResolver) DiscoverTenants(ctx context.Context) ([]string, 
 		ctx = context.Background()
 	}
 
+	// Coalesce concurrent cache-miss queries via singleflight to prevent
+	// thundering herd on TTL expiry when multiple dispatchers poll tenants.
+	result, err, _ := resolver.sfGroup.Do("discover", func() (any, error) {
+		// Double-check cache inside singleflight — another caller may have
+		// already refreshed it while we were waiting for the flight leader.
+		if cached, ok := resolver.cachedTenants(time.Now().UTC()); ok {
+			return cached, nil
+		}
+
+		return resolver.queryTenants(ctx)
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	tenants, _ := result.([]string)
+
+	return tenants, nil
+}
+
+func (resolver *ColumnResolver) queryTenants(ctx context.Context) ([]string, error) {
 	db, err := resolver.primaryDB(ctx)
 	if err != nil {
 		return nil, err
@@ -153,6 +177,12 @@ func (resolver *ColumnResolver) DiscoverTenants(ctx context.Context) ([]string, 
 	resolver.storeCachedTenants(tenants, time.Now().UTC())
 
 	return tenants, nil
+}
+
+// RequiresTenant returns true because column-per-tenant strategy always requires
+// a tenant ID to scope queries via WHERE clauses.
+func (resolver *ColumnResolver) RequiresTenant() bool {
+	return true
 }
 
 func (resolver *ColumnResolver) TenantColumn() string {
