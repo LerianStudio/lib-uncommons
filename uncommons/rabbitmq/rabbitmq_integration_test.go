@@ -59,6 +59,7 @@ func newTestConnection(amqpURL, mgmtURL string) *RabbitMQConnection {
 		HealthCheckURL:         mgmtURL,
 		User:                   testRabbitMQUser,
 		Pass:                   testRabbitMQPass,
+		AllowInsecureHealthCheck: true,
 		Logger:                 log.NewNop(),
 	}
 }
