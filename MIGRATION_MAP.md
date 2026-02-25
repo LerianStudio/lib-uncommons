@@ -354,6 +354,18 @@ New: `(*ServerManager).WithShutdownTimeout(d) *ServerManager`
 | `InitVariables()` | removed (handled by constructor) |
 | `BuildTLSConfig()` | removed (handled internally) |
 
+### Behavioral changes
+
+| Behavior | v2 |
+|----------|-----|
+| TLS minimum version | `normalizeTLSDefaults` enforces `tls.VersionTLS12` as the minimum TLS version. Explicit `tls.VersionTLS10` or `tls.VersionTLS11` values in `TLSConfig.MinVersion` are upgraded to TLS 1.2 and a warning is logged. If you still need legacy endpoints temporarily, set `TLSConfig.AllowLegacyMinVersion=true` as an explicit compatibility override and plan removal. |
+
+Recommended rollout:
+
+- First deploy with explicit `TLSConfig.MinVersion=tls.VersionTLS12` where endpoints are compatible.
+- Use `TLSConfig.AllowLegacyMinVersion=true` only for temporary exceptions and monitor warning logs.
+- Remove legacy override after endpoint upgrades to restore strict floor enforcement.
+
 ### New in v2
 
 - Config types: `Config`, `Topology`, `StandaloneTopology`, `SentinelTopology`, `ClusterTopology`, `TLSConfig`, `Auth`, `StaticPasswordAuth`, `GCPIAMAuth`, `ConnectionOptions`
@@ -400,7 +412,25 @@ New: `(*ServerManager).WithShutdownTimeout(d) *ServerManager`
 
 - `HealthCheckContext(ctx) (bool, error)`
 - `Close() error`, `CloseContext(ctx) error`
-- New errors: `ErrInsecureTLS`, `ErrNilConnection`
+- New errors: `ErrInsecureTLS`, `ErrNilConnection`, `ErrInsecureHealthCheck`, `ErrHealthCheckHostNotAllowed`, `ErrHealthCheckAllowedHostsRequired`
+
+### Health check rollout/security knobs
+
+- Basic auth over plain HTTP is rejected by default; set `AllowInsecureHealthCheck=true` only as temporary compatibility override.
+- Basic-auth health checks now require `HealthCheckAllowedHosts` unless `AllowInsecureHealthCheck=true` is explicitly set.
+- Host allowlist controls: `HealthCheckAllowedHosts` (accepts `host` or `host:port`) and `RequireHealthCheckAllowedHosts`.
+- Recommended rollout: configure `HealthCheckAllowedHosts` first, then enable `RequireHealthCheckAllowedHosts=true`.
+
+---
+
+## uncommons/outbox/postgres
+
+### Behavioral changes
+
+| Behavior | v2 |
+|----------|-----|
+| Schema resolver tenant enforcement | `SchemaResolver` now requires tenant context by default. Use `WithAllowEmptyTenant()` only for explicit public-schema/single-tenant flows. |
+| Column migration primary key | `migrations/column/000001_outbox_events_column.up.sql` uses composite primary key `(tenant_id, id)` to avoid cross-tenant key coupling. |
 
 ---
 

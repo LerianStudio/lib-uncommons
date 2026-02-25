@@ -35,8 +35,8 @@ go get github.com/LerianStudio/lib-uncommons/v2
 
 - `uncommons/postgres`: explicit `Config` constructor + `Migrator` with thread-safe connection manager
 - `uncommons/mongo`: `Config`-based client with functional options, URI builder, and index helpers
-- `uncommons/redis`: topology-based `Config` (standalone/sentinel/cluster) + IAM auth and distributed locking (Redsync)
-- `uncommons/rabbitmq`: connection/channel/health helpers for AMQP with context-aware methods
+- `uncommons/redis`: topology-based `Config` (standalone/sentinel/cluster) + IAM auth and distributed locking (Redsync); TLS defaults to a TLS1.2 minimum floor, with `AllowLegacyMinVersion` as an explicit temporary compatibility override
+- `uncommons/rabbitmq`: connection/channel/health helpers, confirmable publisher with broker acks and auto-recovery, and DLQ topology utilities (`AllowInsecureHealthCheck`, `HealthCheckAllowedHosts`, `RequireHealthCheckAllowedHosts` for health-check rollout hardening; basic-auth health checks require allowlist unless insecure compatibility is explicitly enabled)
 
 ### HTTP and server utilities
 
@@ -57,6 +57,7 @@ go get github.com/LerianStudio/lib-uncommons/v2
 ### Domain and support packages
 
 - `uncommons/transaction`: intent-based transaction planning, balance eligibility validation, and posting flow
+- `uncommons/outbox`: transactional outbox contracts, dispatcher, sanitizer, and PostgreSQL adapters for schema-per-tenant or column-per-tenant models (schema resolver requires tenant context by default; column migration uses composite key `(tenant_id, id)`)
 - `uncommons/crypto`: hashing and symmetric encryption helpers
 - `uncommons/jwt`: HS256/384/512 JWT signing and verification
 - `uncommons/license`: license validation and enforcement helpers
