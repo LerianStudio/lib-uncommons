@@ -118,8 +118,9 @@ type ClusterTopology struct {
 
 // TLSConfig configures TLS validation for Redis connections.
 type TLSConfig struct {
-	CACertBase64 string
-	MinVersion   uint16
+	CACertBase64          string
+	MinVersion            uint16
+	AllowLegacyMinVersion bool
 }
 
 // Auth selects one Redis authentication strategy.
@@ -807,8 +808,36 @@ func (c *Client) usesGCPIAM() bool {
 func normalizeConfig(cfg Config) (Config, error) {
 	normalizeLoggerDefault(&cfg)
 	normalizeConnectionOptionsDefaults(&cfg.Options)
-	normalizeTLSDefaults(cfg.TLS)
+	originalTLSMinVersion := uint16(0)
+	if cfg.TLS != nil {
+		originalTLSMinVersion = cfg.TLS.MinVersion
+	}
+	tlsMinVersionUpgraded, legacyTLSAllowed := normalizeTLSDefaults(cfg.TLS)
 	normalizeGCPIAMDefaults(cfg.Auth.GCPIAM)
+
+	if tlsMinVersionUpgraded {
+		if originalTLSMinVersion == 0 {
+			cfg.Logger.Log(
+				context.Background(),
+				log.LevelInfo,
+				"redis TLS MinVersion was not set and has been defaulted to tls.VersionTLS12",
+			)
+		} else {
+			cfg.Logger.Log(
+				context.Background(),
+				log.LevelWarn,
+				"redis TLS MinVersion was below TLS1.2 and has been upgraded to tls.VersionTLS12",
+			)
+		}
+	}
+
+	if legacyTLSAllowed {
+		cfg.Logger.Log(
+			context.Background(),
+			log.LevelWarn,
+			"redis TLS MinVersion below TLS1.2 retained because AllowLegacyMinVersion=true; this is insecure and should be temporary",
+		)
+	}
 
 	if err := validateConfig(cfg); err != nil {
 		return Config{}, err
@@ -865,14 +894,35 @@ func normalizeConnectionOptionsDefaults(options *ConnectionOptions) {
 	}
 }
 
-func normalizeTLSDefaults(tlsCfg *TLSConfig) {
+// normalizeTLSDefaults enforces a TLS 1.2 minimum floor. Versions below TLS 1.2
+// (including TLS 1.0 and 1.1) have known vulnerabilities and are rejected by
+// most compliance frameworks. If MinVersion is unset, it is upgraded. If
+// MinVersion is below tls.VersionTLS12, it is upgraded unless
+// AllowLegacyMinVersion is set explicitly.
+//
+// Returns (upgraded, legacyAllowed).
+func normalizeTLSDefaults(tlsCfg *TLSConfig) (bool, bool) {
 	if tlsCfg == nil {
-		return
+		return false, false
+	}
+
+	if tlsCfg.MinVersion == 0 {
+		tlsCfg.MinVersion = tls.VersionTLS12
+
+		return true, false
 	}
 
 	if tlsCfg.MinVersion < tls.VersionTLS12 {
+		if tlsCfg.AllowLegacyMinVersion {
+			return false, true
+		}
+
 		tlsCfg.MinVersion = tls.VersionTLS12
+
+		return true, false
 	}
+
+	return false, false
 }
 
 func normalizeGCPIAMDefaults(auth *GCPIAMAuth) {

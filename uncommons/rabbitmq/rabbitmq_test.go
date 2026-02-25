@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -121,7 +122,8 @@ func TestRabbitMQConnection_Connect(t *testing.T) {
 
 		healthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"status":"error"}`))
+			_, err := w.Write([]byte(`{"status":"error"}`))
+			assert.NoError(t, err)
 		}))
 		defer healthServer.Close()
 
@@ -231,7 +233,13 @@ func TestRabbitMQConnection_Connect(t *testing.T) {
 			connectDone <- conn.Connect()
 		}()
 
-		<-healthStarted
+		select {
+		case <-healthStarted:
+		case err := <-connectDone:
+			t.Fatalf("connect completed before health check request started: %v", err)
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for health check request to start")
+		}
 
 		ensureDone := make(chan error, 1)
 		go func() {
@@ -244,8 +252,19 @@ func TestRabbitMQConnection_Connect(t *testing.T) {
 
 		close(continueHealth)
 
-		assert.NoError(t, <-connectDone)
-		assert.NoError(t, <-ensureDone)
+		select {
+		case err := <-connectDone:
+			assert.NoError(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("connect did not complete")
+		}
+
+		select {
+		case err := <-ensureDone:
+			assert.NoError(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("ensure channel did not complete")
+		}
 	})
 
 	t.Run("nil logger is safe", func(t *testing.T) {
@@ -654,6 +673,26 @@ func TestRabbitMQConnection_HealthCheck(t *testing.T) {
 		assert.True(t, healthy)
 	})
 
+	t.Run("returns defaults validation error", func(t *testing.T) {
+		t.Parallel()
+
+		conn := &RabbitMQConnection{
+			HealthCheckURL: "https://localhost:15672",
+			Logger:         &log.NopLogger{},
+			healthHTTPClient: &http.Client{
+				Transport: &http.Transport{
+					TLSClientConfig: &tls.Config{
+						InsecureSkipVerify: true, //nolint:gosec // intentional for validation test
+					},
+				},
+			},
+		}
+
+		healthy, err := conn.HealthCheckContext(context.Background())
+		assert.ErrorIs(t, err, ErrInsecureTLS)
+		assert.False(t, healthy)
+	})
+
 	t.Run("server returns error status", func(t *testing.T) {
 		t.Parallel()
 
@@ -734,6 +773,20 @@ func TestRabbitMQConnection_HealthCheck(t *testing.T) {
 		assert.False(t, healthy)
 	})
 
+	t.Run("strict allowlist mode requires configured hosts", func(t *testing.T) {
+		t.Parallel()
+
+		conn := &RabbitMQConnection{
+			HealthCheckURL:                 "http://localhost:15672",
+			Logger:                         &log.NopLogger{},
+			RequireHealthCheckAllowedHosts: true,
+		}
+
+		healthy, err := conn.HealthCheck()
+		assert.ErrorIs(t, err, ErrHealthCheckAllowedHostsRequired)
+		assert.False(t, healthy)
+	})
+
 	t.Run("invalid URL scheme is rejected", func(t *testing.T) {
 		t.Parallel()
 
@@ -749,7 +802,8 @@ func TestRabbitMQConnection_HealthCheck(t *testing.T) {
 
 		healthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"status":"ok"}`))
+			_, err := w.Write([]byte(`{"status":"ok"}`))
+			assert.NoError(t, err)
 		}))
 		defer healthServer.Close()
 
@@ -784,17 +838,19 @@ func TestRabbitMQConnection_HealthCheck(t *testing.T) {
 		defer healthServer.Close()
 
 		badAuth := &RabbitMQConnection{
-			HealthCheckURL: healthServer.URL,
-			User:           "wrong",
-			Pass:           "wrong",
-			Logger:         &log.NopLogger{},
+			HealthCheckURL:           healthServer.URL,
+			User:                     "wrong",
+			Pass:                     "wrong",
+			Logger:                   &log.NopLogger{},
+			AllowInsecureHealthCheck: true,
 		}
 
 		goodAuth := &RabbitMQConnection{
-			HealthCheckURL: healthServer.URL,
-			User:           "correct",
-			Pass:           "correct",
-			Logger:         &log.NopLogger{},
+			HealthCheckURL:           healthServer.URL,
+			User:                     "correct",
+			Pass:                     "correct",
+			Logger:                   &log.NopLogger{},
+			AllowInsecureHealthCheck: true,
 		}
 
 		badHealthy, badErr := badAuth.HealthCheck()
@@ -804,6 +860,77 @@ func TestRabbitMQConnection_HealthCheck(t *testing.T) {
 		goodHealthy, goodErr := goodAuth.HealthCheck()
 		assert.NoError(t, goodErr)
 		assert.True(t, goodHealthy)
+	})
+
+	t.Run("https basic auth without explicit allowlist derives host from connection string", func(t *testing.T) {
+		t.Parallel()
+
+		healthServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			username, password, ok := r.BasicAuth()
+			if !ok || username != "correct" || password != "correct" {
+				w.WriteHeader(http.StatusUnauthorized)
+
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`{"status":"ok"}`))
+			assert.NoError(t, err)
+		}))
+		defer healthServer.Close()
+
+		parsedURL, err := url.Parse(healthServer.URL)
+		assert.NoError(t, err)
+
+		conn := &RabbitMQConnection{
+			ConnectionStringSource: "amqp://guest:guest@" + parsedURL.Host,
+			HealthCheckURL:         healthServer.URL,
+			User:                   "correct",
+			Pass:                   "correct",
+			Logger:                 &log.NopLogger{},
+			healthHTTPClient:       healthServer.Client(),
+			AllowInsecureTLS:       true,
+		}
+
+		healthy, healthErr := conn.HealthCheck()
+		assert.NoError(t, healthErr)
+		assert.True(t, healthy)
+	})
+
+	t.Run("healthCheck uses provided policy snapshot", func(t *testing.T) {
+		t.Parallel()
+
+		healthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`{"status":"ok"}`))
+			assert.NoError(t, err)
+		}))
+		defer healthServer.Close()
+
+		parsed, err := url.Parse(healthServer.URL)
+		assert.NoError(t, err)
+
+		conn := &RabbitMQConnection{
+			AllowInsecureHealthCheck: false,
+			HealthCheckAllowedHosts:  []string{"blocked.example:15672"},
+			Logger:                   &log.NopLogger{},
+		}
+
+		err = conn.healthCheck(
+			context.Background(),
+			healthServer.URL,
+			"user",
+			"pass",
+			healthServer.Client(),
+			healthCheckURLConfig{
+				allowInsecure: true,
+				hasBasicAuth:  true,
+				allowedHosts:  []string{parsed.Host},
+			},
+			&log.NopLogger{},
+		)
+
+		assert.NoError(t, err)
 	})
 }
 
@@ -900,7 +1027,7 @@ func TestValidateHealthCheckURL(t *testing.T) {
 			Logger:         &log.NopLogger{},
 		}
 
-		normalized, err := validateHealthCheckURL(conn.HealthCheckURL)
+		normalized, err := validateHealthCheckURLWithConfig(conn.HealthCheckURL, healthCheckURLConfig{})
 
 		assert.NoError(t, err)
 		assert.Equal(t, "http://localhost:15672/api/health/checks/alarms", normalized)
@@ -909,7 +1036,7 @@ func TestValidateHealthCheckURL(t *testing.T) {
 	t.Run("preserves nested path and appends health endpoint", func(t *testing.T) {
 		t.Parallel()
 
-		normalized, err := validateHealthCheckURL("http://localhost:15672/custom/alerts")
+		normalized, err := validateHealthCheckURLWithConfig("http://localhost:15672/custom/alerts", healthCheckURLConfig{})
 
 		assert.NoError(t, err)
 		assert.Equal(t, "http://localhost:15672/custom/alerts/api/health/checks/alarms", normalized)
@@ -918,7 +1045,7 @@ func TestValidateHealthCheckURL(t *testing.T) {
 	t.Run("normalizes path with trailing slash", func(t *testing.T) {
 		t.Parallel()
 
-		normalized, err := validateHealthCheckURL("http://localhost:15672/custom/alerts/")
+		normalized, err := validateHealthCheckURLWithConfig("http://localhost:15672/custom/alerts/", healthCheckURLConfig{})
 
 		assert.NoError(t, err)
 		assert.Equal(t, "http://localhost:15672/custom/alerts/api/health/checks/alarms", normalized)
@@ -927,7 +1054,7 @@ func TestValidateHealthCheckURL(t *testing.T) {
 	t.Run("requires host", func(t *testing.T) {
 		t.Parallel()
 
-		normalized, err := validateHealthCheckURL("http:///api/health")
+		normalized, err := validateHealthCheckURLWithConfig("http:///api/health", healthCheckURLConfig{})
 
 		assert.Error(t, err)
 		assert.Empty(t, normalized)
@@ -936,7 +1063,7 @@ func TestValidateHealthCheckURL(t *testing.T) {
 	t.Run("rejects unsupported scheme", func(t *testing.T) {
 		t.Parallel()
 
-		normalized, err := validateHealthCheckURL("ftp://localhost:15672")
+		normalized, err := validateHealthCheckURLWithConfig("ftp://localhost:15672", healthCheckURLConfig{})
 
 		assert.Error(t, err)
 		assert.Empty(t, normalized)
@@ -945,10 +1072,129 @@ func TestValidateHealthCheckURL(t *testing.T) {
 	t.Run("rejects user credentials", func(t *testing.T) {
 		t.Parallel()
 
-		normalized, err := validateHealthCheckURL("http://user:pass@localhost:15672")
+		normalized, err := validateHealthCheckURLWithConfig("http://user:pass@localhost:15672", healthCheckURLConfig{})
 
 		assert.Error(t, err)
 		assert.Empty(t, normalized)
+	})
+
+	t.Run("rejects http with basic auth", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := validateHealthCheckURLWithConfig("http://localhost:15672", healthCheckURLConfig{
+			hasBasicAuth: true,
+		})
+		assert.ErrorIs(t, err, ErrInsecureHealthCheck)
+	})
+
+	t.Run("allows http with basic auth when opted in", func(t *testing.T) {
+		t.Parallel()
+
+		normalized, err := validateHealthCheckURLWithConfig("http://localhost:15672", healthCheckURLConfig{
+			hasBasicAuth:  true,
+			allowInsecure: true,
+		})
+		assert.NoError(t, err)
+		assert.Contains(t, normalized, "/api/health/checks/alarms")
+	})
+
+	t.Run("requires allowlist for https basic auth", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := validateHealthCheckURLWithConfig("https://rabbitmq:15671", healthCheckURLConfig{
+			hasBasicAuth: true,
+		})
+		assert.ErrorIs(t, err, ErrHealthCheckAllowedHostsRequired)
+	})
+
+	t.Run("allows https basic auth when host is derived from AMQP connection host", func(t *testing.T) {
+		t.Parallel()
+
+		normalized, err := validateHealthCheckURLWithConfig("https://rabbitmq:15671", healthCheckURLConfig{
+			hasBasicAuth: true,
+			allowedHosts: deriveAllowedHostsFromConnectionString("amqp://guest:guest@rabbitmq:5672"),
+		})
+		assert.NoError(t, err)
+		assert.Contains(t, normalized, "/api/health/checks/alarms")
+	})
+
+	t.Run("strict allowlist mode still requires explicit configured list", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := validateHealthCheckURLWithConfig("https://rabbitmq:15671", healthCheckURLConfig{
+			hasBasicAuth:        true,
+			derivedAllowedHosts: deriveAllowedHostsFromConnectionString("amqp://guest:guest@rabbitmq:5672"),
+			requireAllowedHosts: true,
+		})
+		assert.ErrorIs(t, err, ErrHealthCheckAllowedHostsRequired)
+	})
+
+	t.Run("does not enforce derived hosts when basic auth is not used", func(t *testing.T) {
+		t.Parallel()
+
+		normalized, err := validateHealthCheckURLWithConfig("https://management.rabbitmq:15671", healthCheckURLConfig{
+			derivedAllowedHosts: deriveAllowedHostsFromConnectionString("amqp://guest:guest@rabbitmq:5672"),
+		})
+		assert.NoError(t, err)
+		assert.Contains(t, normalized, "/api/health/checks/alarms")
+	})
+
+	t.Run("allows https basic auth without allowlist when explicitly insecure", func(t *testing.T) {
+		t.Parallel()
+
+		normalized, err := validateHealthCheckURLWithConfig("https://rabbitmq:15671", healthCheckURLConfig{
+			hasBasicAuth:  true,
+			allowInsecure: true,
+		})
+		assert.NoError(t, err)
+		assert.Contains(t, normalized, "/api/health/checks/alarms")
+	})
+
+	t.Run("rejects host not in allowlist", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := validateHealthCheckURLWithConfig("http://evil.example.com:15672", healthCheckURLConfig{
+			allowedHosts: []string{"localhost:15672", "rabbitmq:15672"},
+		})
+		assert.ErrorIs(t, err, ErrHealthCheckHostNotAllowed)
+	})
+
+	t.Run("requires allowlist when strict mode enabled", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := validateHealthCheckURLWithConfig("http://localhost:15672", healthCheckURLConfig{
+			requireAllowedHosts: true,
+		})
+		assert.ErrorIs(t, err, ErrHealthCheckAllowedHostsRequired)
+	})
+
+	t.Run("allows host in allowlist", func(t *testing.T) {
+		t.Parallel()
+
+		normalized, err := validateHealthCheckURLWithConfig("http://rabbitmq:15672", healthCheckURLConfig{
+			allowedHosts: []string{"localhost:15672", "rabbitmq:15672"},
+		})
+		assert.NoError(t, err)
+		assert.Contains(t, normalized, "/api/health/checks/alarms")
+	})
+
+	t.Run("allows host-only allowlist entries", func(t *testing.T) {
+		t.Parallel()
+
+		normalized, err := validateHealthCheckURLWithConfig("http://rabbitmq:15672", healthCheckURLConfig{
+			allowedHosts: []string{"rabbitmq"},
+		})
+		assert.NoError(t, err)
+		assert.Contains(t, normalized, "/api/health/checks/alarms")
+	})
+
+	t.Run("enforces port when allowlist entry includes port", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := validateHealthCheckURLWithConfig("http://rabbitmq:5672", healthCheckURLConfig{
+			allowedHosts: []string{"rabbitmq:15672"},
+		})
+		assert.ErrorIs(t, err, ErrHealthCheckHostNotAllowed)
 	})
 }
 
@@ -1121,6 +1367,223 @@ func TestBuildRabbitMQConnectionString(t *testing.T) {
 	}
 }
 
+func TestRabbitMQConnection_ChannelSnapshot(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil receiver returns nil", func(t *testing.T) {
+		t.Parallel()
+
+		var conn *RabbitMQConnection
+
+		assert.Nil(t, conn.ChannelSnapshot())
+	})
+
+	t.Run("nil channel returns nil", func(t *testing.T) {
+		t.Parallel()
+
+		conn := &RabbitMQConnection{}
+
+		assert.Nil(t, conn.ChannelSnapshot())
+	})
+
+	t.Run("returns current channel", func(t *testing.T) {
+		t.Parallel()
+
+		expected := &amqp.Channel{}
+		conn := &RabbitMQConnection{Channel: expected}
+
+		assert.Same(t, expected, conn.ChannelSnapshot())
+	})
+
+	t.Run("snapshot read is mutex protected", func(t *testing.T) {
+		t.Parallel()
+
+		conn := &RabbitMQConnection{Channel: &amqp.Channel{}}
+		conn.mu.Lock()
+
+		started := make(chan struct{}, 1)
+		readDone := make(chan struct{}, 1)
+
+		go func() {
+			started <- struct{}{}
+			_ = conn.ChannelSnapshot()
+			readDone <- struct{}{}
+		}()
+
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("ChannelSnapshot goroutine did not start")
+		}
+
+		select {
+		case <-readDone:
+			t.Fatal("ChannelSnapshot should block while the connection lock is held")
+		case <-time.After(250 * time.Millisecond):
+		}
+
+		conn.mu.Unlock()
+
+		select {
+		case <-readDone:
+		case <-time.After(time.Second):
+			t.Fatal("ChannelSnapshot did not resume after lock release")
+		}
+	})
+}
+
+func TestIsHostAllowed(t *testing.T) {
+	t.Parallel()
+
+	t.Run("allows CIDR ranges", func(t *testing.T) {
+		t.Parallel()
+
+		assert.True(t, isHostAllowed("10.10.1.7:15672", []string{"10.10.0.0/16"}))
+		assert.False(t, isHostAllowed("10.11.1.7:15672", []string{"10.10.0.0/16"}))
+	})
+
+	t.Run("normalizes ipv4 mapped ipv6", func(t *testing.T) {
+		t.Parallel()
+
+		assert.True(t, isHostAllowed("127.0.0.1:15672", []string{"::ffff:127.0.0.1"}))
+	})
+}
+
+func TestDeriveAllowedHostsFromConnectionString(t *testing.T) {
+	t.Parallel()
+
+	t.Run("derives host and host:port", func(t *testing.T) {
+		t.Parallel()
+
+		hosts := deriveAllowedHostsFromConnectionString("amqp://guest:guest@rabbitmq.internal:5672")
+		assert.Contains(t, hosts, "rabbitmq.internal:5672")
+		assert.Contains(t, hosts, "rabbitmq.internal")
+	})
+
+	t.Run("invalid connection string returns no hosts", func(t *testing.T) {
+		t.Parallel()
+
+		hosts := deriveAllowedHostsFromConnectionString("not-a-url")
+		assert.Empty(t, hosts)
+	})
+}
+
+func TestRedactURLCredentials(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name            string
+		message         string
+		expected        string
+		expectedContain []string
+		notContain      []string
+	}{
+		{
+			name:            "amqps scheme is redacted",
+			message:         "dial amqps://admin:s3cret@broker:5671/vhost failed",
+			expectedContain: []string{"amqps://admin:xxxxx@broker:5671/vhost"},
+			notContain:      []string{"s3cret"},
+		},
+		{
+			name:     "user-only URL remains unchanged",
+			message:  "dial amqp://guest@localhost:5672 failed",
+			expected: "dial amqp://guest@localhost:5672 failed",
+		},
+		{
+			name:            "url-encoded password is redacted",
+			message:         "dial amqp://admin:p%40ss%3Aword%2F123@broker:5672 failed",
+			expectedContain: []string{"amqp://admin:xxxxx@broker:5672"},
+			notContain:      []string{"p%40ss%3Aword%2F123"},
+		},
+		{
+			name:            "password with slash is redacted",
+			message:         "dial amqp://admin:pa/ss@broker:5672 failed",
+			expectedContain: []string{"amqp://admin:xxxxx@broker:5672"},
+			notContain:      []string{"pa/ss"},
+		},
+		{
+			name:            "password with literal at is redacted",
+			message:         "dial amqp://admin:p@ss@broker:5672 failed",
+			expectedContain: []string{"amqp://admin:xxxxx@broker:5672"},
+			notContain:      []string{"p@ss"},
+		},
+		{
+			name:            "multiple URLs are redacted",
+			message:         "upstream amqp://u1:p1@host1:5672 then amqps://u2:p2@host2:5671",
+			expectedContain: []string{"amqp://u1:xxxxx@host1:5672", "amqps://u2:xxxxx@host2:5671"},
+			notContain:      []string{"u1:p1", "u2:p2"},
+		},
+		{
+			name:            "ipv6 host is redacted",
+			message:         "dial amqp://guest:guest@[::1]:5672 failed",
+			expectedContain: []string{"amqp://guest:xxxxx@[::1]:5672"},
+			notContain:      []string{"guest:guest@[::1]"},
+		},
+		{
+			name:            "empty password is normalized to redacted placeholder",
+			message:         "dial amqp://user:@localhost:5672 failed",
+			expectedContain: []string{"amqp://user:xxxxx@localhost:5672"},
+			notContain:      []string{"user:@localhost"},
+		},
+		{
+			name:            "surrounding text and punctuation are preserved",
+			message:         "error details (amqp://user:secret@localhost:5672), retry later",
+			expectedContain: []string{"error details (amqp://user:xxxxx@localhost:5672), retry later"},
+			notContain:      []string{"user:secret@"},
+		},
+		{
+			name:            "multiple colons in userinfo are fully redacted",
+			message:         "dial amqp://user:name:secret@localhost:5672 failed",
+			expectedContain: []string{"amqp://user:xxxxx@localhost:5672"},
+			notContain:      []string{"secret", "user:name:secret"},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := redactURLCredentials(testCase.message)
+
+			if testCase.expected != "" {
+				assert.Equal(t, testCase.expected, got)
+			}
+
+			for _, expected := range testCase.expectedContain {
+				assert.Contains(t, got, expected)
+			}
+
+			for _, unwanted := range testCase.notContain {
+				assert.NotContains(t, got, unwanted)
+			}
+		})
+	}
+}
+
+func TestRedactURLCredentialsFallback(t *testing.T) {
+	t.Parallel()
+
+	t.Run("preserves at-sign in path while redacting userinfo", func(t *testing.T) {
+		t.Parallel()
+
+		token := "amqp://user:secret@host:5672/path@segment?key=value"
+
+		got := redactURLCredentialsFallback(token)
+
+		assert.Equal(t, "amqp://user:xxxxx@host:5672/path@segment?key=value", got)
+	})
+
+	t.Run("does not redact when at-sign appears only in path", func(t *testing.T) {
+		t.Parallel()
+
+		token := "amqp://host:5672/path@segment"
+
+		got := redactURLCredentialsFallback(token)
+
+		assert.Equal(t, token, got)
+	})
+}
+
 func TestSanitizeAMQPErr(t *testing.T) {
 	t.Parallel()
 
@@ -1144,7 +1607,7 @@ func TestSanitizeAMQPErr(t *testing.T) {
 		assert.Equal(t, "", got)
 	})
 
-	t.Run("unparseable connection string returns raw error", func(t *testing.T) {
+	t.Run("unparseable connection string uses fallback redaction pass", func(t *testing.T) {
 		t.Parallel()
 
 		err := errors.New("something went wrong")
@@ -1190,7 +1653,7 @@ func TestSanitizeAMQPErr(t *testing.T) {
 		assert.Contains(t, got, "xxxxx")
 	})
 
-	t.Run("empty connection string returns raw error", func(t *testing.T) {
+	t.Run("empty connection string without URL credentials returns unmodified error", func(t *testing.T) {
 		t.Parallel()
 
 		err := errors.New("something failed")
@@ -1198,6 +1661,28 @@ func TestSanitizeAMQPErr(t *testing.T) {
 		got := sanitizeAMQPErr(err, "")
 
 		assert.Equal(t, "something failed", got)
+	})
+
+	t.Run("empty connection string still redacts URL credentials from error", func(t *testing.T) {
+		t.Parallel()
+
+		err := errors.New("dial failed for amqp://guest:guest@localhost:5672")
+
+		got := sanitizeAMQPErr(err, "")
+
+		assert.NotContains(t, got, "guest:guest")
+		assert.Contains(t, got, "xxxxx")
+	})
+
+	t.Run("fallback redaction fully redacts multi-colon userinfo passwords", func(t *testing.T) {
+		t.Parallel()
+
+		err := errors.New("dial failed for amqp://user:name:secret@localhost:5672")
+
+		got := sanitizeAMQPErr(err, "")
+
+		assert.NotContains(t, got, "secret")
+		assert.Contains(t, got, "amqp://user:xxxxx@localhost:5672")
 	})
 }
 

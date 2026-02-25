@@ -48,8 +48,8 @@ go get github.com/LerianStudio/lib-uncommons/v2
 
 - `uncommons/postgres`: `Config`-based constructor (`New`), `Resolver(ctx)` for dbresolver access, `Primary()` for raw `*sql.DB`, `NewMigrator` for schema migrations, backoff-based lazy-connect
 - `uncommons/mongo`: `Config`-based client with functional options (`NewClient`), URI builder (`BuildURI`), `Client(ctx)`/`ResolveClient(ctx)` for access, `EnsureIndexes` (variadic), TLS support, credential clearing
-- `uncommons/redis`: topology-based `Config` (standalone/sentinel/cluster), GCP IAM auth with token refresh, distributed locking via `LockManager` interface (`NewRedisLockManager`, `LockHandle`), `SetPackageLogger` for diagnostics
-- `uncommons/rabbitmq`: connection/channel/health helpers for AMQP with `*Context()` variants, `HealthCheck() (bool, error)`, `Close()`/`CloseContext()`
+- `uncommons/redis`: topology-based `Config` (standalone/sentinel/cluster), GCP IAM auth with token refresh, distributed locking via `LockManager` interface (`NewRedisLockManager`, `LockHandle`), `SetPackageLogger` for diagnostics, TLS defaults to a TLS1.2 minimum floor with `AllowLegacyMinVersion` as an explicit temporary compatibility override
+- `uncommons/rabbitmq`: connection/channel/health helpers for AMQP with `*Context()` variants, `HealthCheck() (bool, error)`, `Close()`/`CloseContext()`, confirmable publisher with broker acks and auto-recovery, DLQ topology utilities, and health-check hardening (`AllowInsecureHealthCheck`, `HealthCheckAllowedHosts`, `RequireHealthCheckAllowedHosts`)
 
 ### HTTP and server utilities
 
@@ -70,6 +70,7 @@ go get github.com/LerianStudio/lib-uncommons/v2
 ### Domain and support packages
 
 - `uncommons/transaction`: intent-based transaction planning (`BuildIntentPlan`), balance eligibility validation (`ValidateBalanceEligibility`), posting flow (`ApplyPosting`), operation resolution (`ResolveOperation`), typed domain errors (`NewDomainError`)
+- `uncommons/outbox`: transactional outbox contracts, dispatcher, sanitizer, and PostgreSQL adapters for schema-per-tenant or column-per-tenant models (schema resolver requires tenant context by default; column migration uses composite key `(tenant_id, id)`)
 - `uncommons/crypto`: hashing (`GenerateHash`) and symmetric encryption (`InitializeCipher`/`Encrypt`/`Decrypt`) with credential-safe `fmt` output (`String()`/`GoString()` redact secrets)
 - `uncommons/jwt`: HS256/384/512 JWT signing (`Sign`), signature verification (`Parse`), combined signature + time-claim validation (`ParseAndValidate`), standalone time-claim validation (`ValidateTimeClaims`/`ValidateTimeClaimsAt`)
 - `uncommons/license`: license validation with functional options (`New(opts...)`, `WithLogger`), handler management (`SetHandler`), termination (`Terminate`/`TerminateWithError`/`TerminateSafe`)

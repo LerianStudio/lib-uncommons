@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +24,36 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type recordingLogger struct {
+	mu       sync.Mutex
+	warnings []string
+}
+
+func (logger *recordingLogger) Log(_ context.Context, level log.Level, msg string, _ ...log.Field) {
+	if level != log.LevelWarn {
+		return
+	}
+
+	logger.mu.Lock()
+	logger.warnings = append(logger.warnings, msg)
+	logger.mu.Unlock()
+}
+
+func (logger *recordingLogger) With(...log.Field) log.Logger { return logger }
+
+func (logger *recordingLogger) WithGroup(string) log.Logger { return logger }
+
+func (logger *recordingLogger) Enabled(log.Level) bool { return true }
+
+func (logger *recordingLogger) Sync(context.Context) error { return nil }
+
+func (logger *recordingLogger) warningMessages() []string {
+	logger.mu.Lock()
+	defer logger.mu.Unlock()
+
+	return append([]string(nil), logger.warnings...)
+}
 
 func newStandaloneConfig(addr string) Config {
 	return Config{
@@ -38,7 +69,11 @@ func TestClient_NewAndGetClient(t *testing.T) {
 
 	client, err := New(context.Background(), newStandaloneConfig(mr.Addr()))
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if closeErr := client.Close(); closeErr != nil {
+			t.Errorf("cleanup: client close: %v", closeErr)
+		}
+	})
 
 	redisClient, err := client.GetClient(context.Background())
 	require.NoError(t, err)
@@ -361,7 +396,11 @@ func TestClient_Connect_ReconnectClosesPreviousClient(t *testing.T) {
 
 	client, err := New(context.Background(), newStandaloneConfig(mr.Addr()))
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if closeErr := client.Close(); closeErr != nil {
+			t.Errorf("cleanup: client close: %v", closeErr)
+		}
+	})
 
 	firstClient, err := client.GetClient(context.Background())
 	require.NoError(t, err)
@@ -383,7 +422,11 @@ func TestClient_ReconnectFailure_PreservesOldClient(t *testing.T) {
 	// Connect a working standalone client (no IAM -- we test reconnect directly).
 	client, err := New(context.Background(), newStandaloneConfig(addr))
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if closeErr := client.Close(); closeErr != nil {
+			t.Errorf("cleanup: client close: %v", closeErr)
+		}
+	})
 
 	// Verify initial connectivity.
 	rdb, err := client.GetClient(context.Background())
@@ -512,7 +555,11 @@ func TestClient_ReconnectSuccess_SwapsClient(t *testing.T) {
 
 	client, err := New(context.Background(), newStandaloneConfig(mr.Addr()))
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if closeErr := client.Close(); closeErr != nil {
+			t.Errorf("cleanup: client close: %v", closeErr)
+		}
+	})
 
 	// Grab reference to the original underlying client.
 	rdb1, err := client.GetClient(context.Background())
@@ -752,7 +799,11 @@ func TestClient_GetClient_ReconnectsWhenNil(t *testing.T) {
 
 	client, err := New(context.Background(), newStandaloneConfig(mr.Addr()))
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() {
+		if closeErr := client.Close(); closeErr != nil {
+			t.Errorf("cleanup: client close: %v", closeErr)
+		}
+	})
 
 	// Simulate a nil internal client to exercise the reconnect-on-demand path.
 	client.mu.Lock()
@@ -761,7 +812,8 @@ func TestClient_GetClient_ReconnectsWhenNil(t *testing.T) {
 	client.mu.Unlock()
 
 	// Close the old client manually.
-	_ = old.Close()
+	require.NotNil(t, old)
+	require.NoError(t, old.Close())
 
 	// GetClient should reconnect.
 	rdb, err := client.GetClient(context.Background())
@@ -825,26 +877,102 @@ func TestNormalizeConnectionOptionsDefaults_PreservesExisting(t *testing.T) {
 
 func TestNormalizeTLSDefaults(t *testing.T) {
 	t.Run("nil config", func(t *testing.T) {
-		normalizeTLSDefaults(nil) // should not panic
+		upgraded, legacyAllowed := normalizeTLSDefaults(nil)
+		assert.False(t, upgraded)
+		assert.False(t, legacyAllowed)
 	})
 
 	t.Run("sets default min version", func(t *testing.T) {
 		cfg := &TLSConfig{}
-		normalizeTLSDefaults(cfg)
+		upgraded, legacyAllowed := normalizeTLSDefaults(cfg)
 		assert.Equal(t, uint16(tls.VersionTLS12), cfg.MinVersion)
+		assert.True(t, upgraded)
+		assert.False(t, legacyAllowed)
 	})
 
 	t.Run("preserves existing min version", func(t *testing.T) {
 		cfg := &TLSConfig{MinVersion: tls.VersionTLS13}
-		normalizeTLSDefaults(cfg)
+		upgraded, legacyAllowed := normalizeTLSDefaults(cfg)
 		assert.Equal(t, uint16(tls.VersionTLS13), cfg.MinVersion)
+		assert.False(t, upgraded)
+		assert.False(t, legacyAllowed)
 	})
 
-	t.Run("clamps insecure min version", func(t *testing.T) {
+	t.Run("enforces tls1.2 minimum floor", func(t *testing.T) {
 		cfg := &TLSConfig{MinVersion: tls.VersionTLS10}
-		normalizeTLSDefaults(cfg)
+		upgraded, legacyAllowed := normalizeTLSDefaults(cfg)
 		assert.Equal(t, uint16(tls.VersionTLS12), cfg.MinVersion)
+		assert.True(t, upgraded)
+		assert.False(t, legacyAllowed)
 	})
+
+	t.Run("allows explicit legacy min version opt in", func(t *testing.T) {
+		cfg := &TLSConfig{MinVersion: tls.VersionTLS10, AllowLegacyMinVersion: true}
+		upgraded, legacyAllowed := normalizeTLSDefaults(cfg)
+		assert.Equal(t, uint16(tls.VersionTLS10), cfg.MinVersion)
+		assert.False(t, upgraded)
+		assert.True(t, legacyAllowed)
+	})
+}
+
+func TestNormalizeConfig_TLSUpgradeLogsWarning(t *testing.T) {
+	validCert := base64.StdEncoding.EncodeToString(generateTestCertificatePEM(t))
+	logger := &recordingLogger{}
+
+	cfg, err := normalizeConfig(Config{
+		Topology: Topology{Standalone: &StandaloneTopology{Address: "127.0.0.1:6379"}},
+		TLS: &TLSConfig{
+			CACertBase64: validCert,
+			MinVersion:   tls.VersionTLS10,
+		},
+		Logger: logger,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, cfg.TLS)
+	assert.Equal(t, uint16(tls.VersionTLS12), cfg.TLS.MinVersion)
+
+	warnings := logger.warningMessages()
+	require.NotEmpty(t, warnings)
+	assert.Contains(t, warnings[0], "upgraded")
+}
+
+func TestNormalizeConfig_DefaultTLSMinVersionDoesNotLogWarning(t *testing.T) {
+	validCert := base64.StdEncoding.EncodeToString(generateTestCertificatePEM(t))
+	logger := &recordingLogger{}
+
+	cfg, err := normalizeConfig(Config{
+		Topology: Topology{Standalone: &StandaloneTopology{Address: "127.0.0.1:6379"}},
+		TLS: &TLSConfig{
+			CACertBase64: validCert,
+		},
+		Logger: logger,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, cfg.TLS)
+	assert.Equal(t, uint16(tls.VersionTLS12), cfg.TLS.MinVersion)
+	assert.Empty(t, logger.warningMessages())
+}
+
+func TestNormalizeConfig_LegacyTLSOptInLogsWarning(t *testing.T) {
+	validCert := base64.StdEncoding.EncodeToString(generateTestCertificatePEM(t))
+	logger := &recordingLogger{}
+
+	cfg, err := normalizeConfig(Config{
+		Topology: Topology{Standalone: &StandaloneTopology{Address: "127.0.0.1:6379"}},
+		TLS: &TLSConfig{
+			CACertBase64:          validCert,
+			MinVersion:            tls.VersionTLS10,
+			AllowLegacyMinVersion: true,
+		},
+		Logger: logger,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, cfg.TLS)
+	assert.Equal(t, uint16(tls.VersionTLS10), cfg.TLS.MinVersion)
+
+	warnings := logger.warningMessages()
+	require.NotEmpty(t, warnings)
+	assert.Contains(t, warnings[0], "retained")
 }
 
 func TestNormalizeGCPIAMDefaults(t *testing.T) {

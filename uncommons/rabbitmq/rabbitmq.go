@@ -8,7 +8,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -33,8 +35,8 @@ var connectionFailuresMetric = metrics.Metric{
 
 // RabbitMQConnection is a hub which deal with rabbitmq connections.
 type RabbitMQConnection struct {
-	mu                     sync.Mutex // protects connection and channel operations
-	ConnectionStringSource string     `json:"-"`
+	mu                     sync.RWMutex // protects connection and channel operations
+	ConnectionStringSource string       `json:"-"`
 	Connection             *amqp.Connection
 	Queue                  string
 	HealthCheckURL         string
@@ -65,6 +67,27 @@ type RabbitMQConnection struct {
 	// Without this flag, applyDefaults returns ErrInsecureTLS.
 	AllowInsecureTLS bool
 
+	// AllowInsecureHealthCheck must be set to true to explicitly acknowledge
+	// that basic auth credentials are sent over plain HTTP (not HTTPS).
+	// Without this flag, health check validation returns ErrInsecureHealthCheck.
+	AllowInsecureHealthCheck bool
+
+	// HealthCheckAllowedHosts restricts which hosts the health check URL may
+	// target. When non-empty, the health check URL's host (optionally host:port)
+	// must match one of the entries. This protects against SSRF via
+	// configuration injection.
+	// When empty, compatibility mode allows any host unless
+	// RequireHealthCheckAllowedHosts is true. For basic-auth health checks,
+	// derived hosts from AMQP settings are used as fallback enforcement.
+	HealthCheckAllowedHosts []string
+
+	// RequireHealthCheckAllowedHosts enforces a non-empty HealthCheckAllowedHosts
+	// list for every health check. Keep this false during compatibility rollout,
+	// then enable it to hard-fail unsafe configurations.
+	RequireHealthCheckAllowedHosts bool
+
+	warnMissingAllowlistOnce sync.Once
+
 	// Reconnect rate-limiting: prevents thundering-herd reconnect storms
 	// when the broker is down by enforcing exponential backoff between attempts.
 	lastReconnectAttempt time.Time
@@ -80,8 +103,39 @@ const reconnectBackoffCap = 30 * time.Second
 // without explicitly acknowledging the risk via AllowInsecureTLS.
 var ErrInsecureTLS = errors.New("rabbitmq health check HTTP client has TLS verification disabled — set AllowInsecureTLS to acknowledge this risk")
 
+// ErrInsecureHealthCheck is returned when the health check URL uses HTTP with basic auth
+// credentials without explicitly opting in via AllowInsecureHealthCheck.
+var ErrInsecureHealthCheck = errors.New("rabbitmq health check uses HTTP with basic auth credentials — set AllowInsecureHealthCheck to acknowledge this risk")
+
+// ErrHealthCheckHostNotAllowed is returned when the health check URL targets a host
+// not present in the HealthCheckAllowedHosts allowlist.
+var ErrHealthCheckHostNotAllowed = errors.New("rabbitmq health check host not in allowed list")
+
+// ErrHealthCheckAllowedHostsRequired is returned when strict allowlist mode is enabled
+// but no allowed hosts were configured.
+var ErrHealthCheckAllowedHostsRequired = errors.New("rabbitmq health check allowed hosts list is required")
+
 // ErrNilConnection is returned when a method is called on a nil RabbitMQConnection.
 var ErrNilConnection = errors.New("rabbitmq connection is nil")
+
+const redactedURLPassword = "xxxxx"
+
+// Best-effort URL matcher used for redaction on arbitrary error messages.
+// This intentionally differs from outbox's storage sanitizer because this path
+// optimizes for preserving operational error context while redacting credentials.
+var urlPattern = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s]+`)
+
+// ChannelSnapshot returns the current channel reference under connection lock.
+func (rc *RabbitMQConnection) ChannelSnapshot() *amqp.Channel {
+	if rc == nil {
+		return nil
+	}
+
+	rc.mu.RLock()
+	defer rc.mu.RUnlock()
+
+	return rc.Channel
+}
 
 // nilConnectionAssert fires a telemetry assertion for nil-receiver calls and returns ErrNilConnection.
 // The logger is intentionally nil here because this function is called on a nil *RabbitMQConnection
@@ -134,6 +188,16 @@ func (rc *RabbitMQConnection) ConnectContext(ctx context.Context) error {
 	healthCheckURL := rc.HealthCheckURL
 	healthUser := rc.User
 	healthPass := rc.Pass
+	configuredHosts := append([]string(nil), rc.HealthCheckAllowedHosts...)
+	derivedHosts := mergeAllowedHosts(deriveAllowedHostsFromConnectionString(connStr), deriveAllowedHostsFromHostPort(rc.Host, rc.Port)...)
+	healthPolicy := healthCheckURLConfig{
+		allowInsecure:       rc.AllowInsecureHealthCheck,
+		hasBasicAuth:        rc.User != "" || rc.Pass != "",
+		allowedHosts:        configuredHosts,
+		derivedAllowedHosts: derivedHosts,
+		allowlistConfigured: len(configuredHosts) > 0,
+		requireAllowedHosts: rc.RequireHealthCheckAllowedHosts,
+	}
 	healthClient := rc.healthHTTPClient
 	dialer := rc.dialerContext
 	channelFactory := rc.channelFactoryContext
@@ -166,7 +230,7 @@ func (rc *RabbitMQConnection) ConnectContext(ctx context.Context) error {
 		return fmt.Errorf("failed to open channel on rabbitmq: %w", err)
 	}
 
-	if ch == nil || !rc.healthCheck(ctx, healthCheckURL, healthUser, healthPass, healthClient, logger) {
+	if ch == nil {
 		rc.closeConnectionWith(conn, connCloser)
 
 		err = errors.New("can't connect rabbitmq")
@@ -176,6 +240,14 @@ func (rc *RabbitMQConnection) ConnectContext(ctx context.Context) error {
 		libOpentelemetry.HandleSpanError(span, "RabbitMQ health check failed", err)
 
 		return fmt.Errorf("rabbitmq health check failed: %w", err)
+	}
+
+	if healthErr := rc.healthCheck(ctx, healthCheckURL, healthUser, healthPass, healthClient, healthPolicy, logger); healthErr != nil {
+		rc.closeConnectionWith(conn, connCloser)
+
+		logger.Log(context.Background(), log.LevelError, "rabbitmq health check failed")
+
+		return fmt.Errorf("rabbitmq health check failed: %w", healthErr)
 	}
 
 	logger.Log(context.Background(), log.LevelInfo, "connected to rabbitmq")
@@ -424,22 +496,33 @@ func (rc *RabbitMQConnection) HealthCheckContext(ctx context.Context) (bool, err
 	span.SetAttributes(attribute.String(constant.AttrDBSystem, constant.DBSystemRabbitMQ))
 
 	rc.mu.Lock()
-
 	if err := rc.applyDefaults(); err != nil {
-		rc.logger().Log(context.Background(), log.LevelWarn, "rabbitmq apply defaults warning in health check", log.Err(err))
+		rc.mu.Unlock()
+
+		return false, err
 	}
 
 	healthURL := rc.HealthCheckURL
 	user := rc.User
 	pass := rc.Pass
+	configuredHosts := append([]string(nil), rc.HealthCheckAllowedHosts...)
+	derivedHosts := mergeAllowedHosts(
+		deriveAllowedHostsFromConnectionString(rc.ConnectionStringSource),
+		deriveAllowedHostsFromHostPort(rc.Host, rc.Port)...,
+	)
+	healthPolicy := healthCheckURLConfig{
+		allowInsecure:       rc.AllowInsecureHealthCheck,
+		hasBasicAuth:        rc.User != "" || rc.Pass != "",
+		allowedHosts:        configuredHosts,
+		derivedAllowedHosts: derivedHosts,
+		allowlistConfigured: len(configuredHosts) > 0,
+		requireAllowedHosts: rc.RequireHealthCheckAllowedHosts,
+	}
 	client := rc.healthHTTPClient
 	logger := rc.logger()
 	rc.mu.Unlock()
 
-	if !rc.healthCheck(ctx, healthURL, user, pass, client, logger) {
-		err := errors.New("rabbitmq health check failed")
-		libOpentelemetry.HandleSpanError(span, "RabbitMQ health check failed", err)
-
+	if err := rc.healthCheck(ctx, healthURL, user, pass, client, healthPolicy, logger); err != nil {
 		return false, err
 	}
 
@@ -448,7 +531,13 @@ func (rc *RabbitMQConnection) HealthCheckContext(ctx context.Context) (bool, err
 
 // healthCheck is the internal implementation that operates on pre-captured config values,
 // safe to call without holding the mutex.
-func (rc *RabbitMQConnection) healthCheck(ctx context.Context, rawHealthURL, user, pass string, client *http.Client, logger log.Logger) bool {
+func (rc *RabbitMQConnection) healthCheck(
+	ctx context.Context,
+	rawHealthURL, user, pass string,
+	client *http.Client,
+	policy healthCheckURLConfig,
+	logger log.Logger,
+) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -456,21 +545,35 @@ func (rc *RabbitMQConnection) healthCheck(ctx context.Context, rawHealthURL, use
 	if err := ctx.Err(); err != nil {
 		logger.Log(context.Background(), log.LevelError, "context canceled during rabbitmq health check", log.Err(err))
 
-		return false
+		return fmt.Errorf("rabbitmq health check context: %w", err)
 	}
 
-	healthURL, err := validateHealthCheckURL(rawHealthURL)
+	if policy.hasBasicAuth != (user != "" || pass != "") {
+		policy.hasBasicAuth = user != "" || pass != ""
+	}
+
+	if !policy.allowlistConfigured && !policy.requireAllowedHosts {
+		rc.warnMissingAllowlistOnce.Do(func() {
+			logger.Log(
+				context.Background(),
+				log.LevelWarn,
+				"rabbitmq health check explicit host allowlist is empty; compatibility mode may skip host validation. Configure HealthCheckAllowedHosts and set RequireHealthCheckAllowedHosts=true to enforce strict SSRF hardening",
+			)
+		})
+	}
+
+	healthURL, err := validateHealthCheckURLWithConfig(rawHealthURL, policy)
 	if err != nil {
 		logger.Log(context.Background(), log.LevelError, "invalid rabbitmq health check URL", log.Err(err))
 
-		return false
+		return err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
 	if err != nil {
 		logger.Log(context.Background(), log.LevelError, "failed to create rabbitmq health check request", log.Err(err))
 
-		return false
+		return fmt.Errorf("building rabbitmq health check request: %w", err)
 	}
 
 	req.SetBasicAuth(user, pass)
@@ -483,21 +586,29 @@ func (rc *RabbitMQConnection) healthCheck(ctx context.Context, rawHealthURL, use
 	if err != nil {
 		logger.Log(context.Background(), log.LevelError, "failed to execute rabbitmq health check request", log.Err(err))
 
-		return false
+		return fmt.Errorf("executing rabbitmq health check request: %w", err)
 	}
 	defer resp.Body.Close()
+
+	return parseHealthCheckResponse(resp, logger)
+}
+
+func parseHealthCheckResponse(resp *http.Response, logger log.Logger) error {
+	if resp == nil {
+		return errors.New("rabbitmq health check response is empty")
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		logger.Log(context.Background(), log.LevelError, "rabbitmq health check failed", log.String("status", resp.Status))
 
-		return false
+		return fmt.Errorf("rabbitmq health check status %q", resp.Status)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		logger.Log(context.Background(), log.LevelError, "failed to read rabbitmq health check response", log.Err(err))
 
-		return false
+		return fmt.Errorf("reading rabbitmq health check response: %w", err)
 	}
 
 	var result map[string]any
@@ -506,22 +617,22 @@ func (rc *RabbitMQConnection) healthCheck(ctx context.Context, rawHealthURL, use
 	if err != nil {
 		logger.Log(context.Background(), log.LevelError, "failed to parse rabbitmq health check response", log.Err(err))
 
-		return false
+		return fmt.Errorf("parsing rabbitmq health check response: %w", err)
 	}
 
 	if result == nil {
 		logger.Log(context.Background(), log.LevelError, "rabbitmq health check response is empty or null")
 
-		return false
+		return errors.New("rabbitmq health check response is empty")
 	}
 
 	if status, ok := result["status"].(string); ok && status == "ok" {
-		return true
+		return nil
 	}
 
 	logger.Log(context.Background(), log.LevelError, "rabbitmq is not healthy")
 
-	return false
+	return errors.New("rabbitmq is not healthy")
 }
 
 func (rc *RabbitMQConnection) applyDefaults() error {
@@ -733,16 +844,25 @@ func (rc *RabbitMQConnection) logger() log.Logger {
 	return rc.Logger
 }
 
-// validateHealthCheckURL validates the health check URL and appends the RabbitMQ health endpoint path
+// healthCheckURLConfig holds validation parameters for health check URL checking.
+type healthCheckURLConfig struct {
+	allowInsecure       bool
+	hasBasicAuth        bool
+	allowedHosts        []string
+	derivedAllowedHosts []string
+	allowlistConfigured bool
+	requireAllowedHosts bool
+}
+
+// validateHealthCheckURLWithConfig validates the health check URL and appends the RabbitMQ health endpoint path
 // if not already present. The HealthCheckURL should be the RabbitMQ management API base URL
 // (e.g., "http://host:15672" or "https://host:15672"), NOT the full health endpoint.
 // If the URL already ends with "/api/health/checks/alarms", it is returned as-is.
-//
-// Security note: this function does NOT restrict which hosts can be targeted.
-// The HealthCheckURL is assumed to come from trusted configuration (env vars, config files).
-// If your threat model requires protection against SSRF via configuration injection, consider
-// adding an allowlist of permitted hosts or IP ranges at the application layer.
-func validateHealthCheckURL(rawURL string) (string, error) {
+func validateHealthCheckURLWithConfig(rawURL string, cfg healthCheckURLConfig) (string, error) {
+	if !cfg.allowlistConfigured && len(cfg.allowedHosts) > 0 {
+		cfg.allowlistConfigured = true
+	}
+
 	healthURL := strings.TrimSpace(rawURL)
 	if healthURL == "" {
 		return "", errors.New("rabbitmq health check URL is empty")
@@ -765,6 +885,38 @@ func validateHealthCheckURL(rawURL string) (string, error) {
 		return "", errors.New("rabbitmq health check URL must not include user credentials")
 	}
 
+	// Reject plain HTTP when basic auth credentials will be sent.
+	if parsedURL.Scheme == "http" && cfg.hasBasicAuth && !cfg.allowInsecure {
+		return "", ErrInsecureHealthCheck
+	}
+
+	// Enforce explicit host allowlist in strict mode.
+	if cfg.requireAllowedHosts && (!cfg.allowlistConfigured || len(cfg.allowedHosts) == 0) {
+		return "", ErrHealthCheckAllowedHostsRequired
+	}
+
+	enforceHosts := cfg.allowlistConfigured
+	hostsToEnforce := cfg.allowedHosts
+
+	if cfg.hasBasicAuth && !cfg.allowInsecure {
+		switch {
+		case len(cfg.allowedHosts) > 0:
+			enforceHosts = true
+			hostsToEnforce = cfg.allowedHosts
+		case len(cfg.derivedAllowedHosts) > 0:
+			enforceHosts = true
+			hostsToEnforce = cfg.derivedAllowedHosts
+		default:
+			return "", ErrHealthCheckAllowedHostsRequired
+		}
+	}
+
+	if enforceHosts {
+		if !isHostAllowed(parsedURL.Host, hostsToEnforce) {
+			return "", fmt.Errorf("%w: %s", ErrHealthCheckHostNotAllowed, parsedURL.Host)
+		}
+	}
+
 	// Only append the health endpoint path if not already present.
 	const healthPath = "/api/health/checks/alarms"
 
@@ -774,6 +926,148 @@ func validateHealthCheckURL(rawURL string) (string, error) {
 	}
 
 	return normalized + healthPath, nil
+}
+
+func isHostAllowed(host string, allowedHosts []string) bool {
+	hostName, hostPort := splitHostPortOrHost(host)
+	targetAddr, targetIsIP := parseNormalizedAddr(hostName)
+
+	for _, allowed := range allowedHosts {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "" {
+			continue
+		}
+
+		allowedName, allowedPort := splitHostPortOrHost(allowed)
+		if !isAllowedHostMatch(hostName, targetAddr, targetIsIP, allowedName) {
+			continue
+		}
+
+		if allowedPort == "" || strings.EqualFold(hostPort, allowedPort) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isAllowedHostMatch(hostName string, hostAddr netip.Addr, hostIsIP bool, allowedName string) bool {
+	if prefix, ok := parseNormalizedPrefix(allowedName); ok {
+		return hostIsIP && prefix.Contains(hostAddr)
+	}
+
+	allowedAddr, allowedIsIP := parseNormalizedAddr(allowedName)
+
+	if hostIsIP && allowedIsIP {
+		return hostAddr == allowedAddr
+	}
+
+	if !hostIsIP && !allowedIsIP {
+		return strings.EqualFold(hostName, allowedName)
+	}
+
+	return false
+}
+
+func parseNormalizedAddr(value string) (netip.Addr, bool) {
+	trimmed := strings.Trim(strings.TrimSpace(value), "[]")
+	if trimmed == "" {
+		return netip.Addr{}, false
+	}
+
+	addr, err := netip.ParseAddr(trimmed)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+
+	return addr.Unmap(), true
+}
+
+func parseNormalizedPrefix(value string) (netip.Prefix, bool) {
+	trimmed := strings.Trim(strings.TrimSpace(value), "[]")
+	if trimmed == "" {
+		return netip.Prefix{}, false
+	}
+
+	prefix, err := netip.ParsePrefix(trimmed)
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+
+	return prefix.Masked(), true
+}
+
+func splitHostPortOrHost(value string) (string, string) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", ""
+	}
+
+	host, port, err := net.SplitHostPort(trimmed)
+	if err == nil {
+		return strings.Trim(host, "[]"), port
+	}
+
+	return strings.Trim(trimmed, "[]"), ""
+}
+
+func deriveAllowedHostsFromConnectionString(connectionString string) []string {
+	trimmed := strings.TrimSpace(connectionString)
+	if trimmed == "" {
+		return nil
+	}
+
+	parsedURL, err := url.Parse(trimmed)
+	if err != nil || parsedURL == nil || parsedURL.Host == "" {
+		return nil
+	}
+
+	hostName, _ := splitHostPortOrHost(parsedURL.Host)
+
+	return mergeAllowedHosts(nil, parsedURL.Host, hostName)
+}
+
+func deriveAllowedHostsFromHostPort(host, port string) []string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return nil
+	}
+
+	if strings.TrimSpace(port) == "" {
+		return mergeAllowedHosts(nil, host)
+	}
+
+	return mergeAllowedHosts(nil, net.JoinHostPort(host, port), host)
+}
+
+func mergeAllowedHosts(base []string, additional ...string) []string {
+	if len(base) == 0 && len(additional) == 0 {
+		return nil
+	}
+
+	merged := make([]string, 0, len(base)+len(additional))
+	seen := make(map[string]struct{}, len(base)+len(additional))
+
+	for _, host := range append(append([]string(nil), base...), additional...) {
+		trimmed := strings.TrimSpace(host)
+		if trimmed == "" {
+			continue
+		}
+
+		key := strings.ToLower(trimmed)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+
+		seen[key] = struct{}{}
+		merged = append(merged, trimmed)
+	}
+
+	if len(merged) == 0 {
+		return nil
+	}
+
+	return merged
 }
 
 // sanitizedError wraps an original error with a redacted message.
@@ -803,18 +1097,19 @@ func sanitizeAMQPErr(err error, connectionString string) string {
 		return ""
 	}
 
+	errMsg := err.Error()
+
 	if connectionString == "" {
-		return err.Error()
+		return redactURLCredentials(errMsg)
 	}
 
 	referenceURL, parseErr := url.Parse(connectionString)
 	if parseErr != nil {
-		return err.Error()
+		return redactURLCredentials(errMsg)
 	}
 
 	redactedURL := referenceURL.Redacted()
 
-	errMsg := err.Error()
 	if strings.Contains(errMsg, connectionString) {
 		errMsg = strings.ReplaceAll(errMsg, connectionString, redactedURL)
 	}
@@ -827,11 +1122,123 @@ func sanitizeAMQPErr(err error, connectionString string) string {
 	// contains the password in decoded form (e.g., URL-encoded special characters).
 	if referenceURL.User != nil {
 		if pass, ok := referenceURL.User.Password(); ok && pass != "" {
-			errMsg = strings.ReplaceAll(errMsg, pass, "xxxxx")
+			errMsg = strings.ReplaceAll(errMsg, pass, redactedURLPassword)
 		}
 	}
 
-	return errMsg
+	return redactURLCredentials(errMsg)
+}
+
+func redactURLCredentials(message string) string {
+	if message == "" {
+		return ""
+	}
+
+	return urlPattern.ReplaceAllStringFunc(message, redactURLCredentialsCandidate)
+}
+
+func redactURLCredentialsCandidate(candidate string) string {
+	core, suffix := splitTrailingURLPunctuation(candidate)
+
+	return redactURLCredentialToken(core) + suffix
+}
+
+func splitTrailingURLPunctuation(candidate string) (string, string) {
+	end := len(candidate)
+
+	for end > 0 {
+		switch candidate[end-1] {
+		case '.', ',', ';', ')', ']', '}', '"', '\'':
+			end--
+		default:
+			return candidate[:end], candidate[end:]
+		}
+	}
+
+	return "", candidate
+}
+
+func redactURLCredentialToken(token string) string {
+	if token == "" {
+		return ""
+	}
+
+	parsedURL, err := url.Parse(token)
+	if err == nil && parsedURL != nil && parsedURL.User != nil {
+		username := parsedURL.User.Username()
+		if _, hasPassword := parsedURL.User.Password(); hasPassword {
+			parsedURL.User = url.UserPassword(username, redactedURLPassword)
+
+			return parsedURL.String()
+		}
+
+		return token
+	}
+
+	return redactURLCredentialsFallback(token)
+}
+
+func redactURLCredentialsFallback(token string) string {
+	schemeSeparator := strings.Index(token, "://")
+	if schemeSeparator == -1 {
+		return token
+	}
+
+	rest := token[schemeSeparator+3:]
+	authorityEnd := len(rest)
+
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case '/', '?', '#':
+			authorityEnd = i
+			i = len(rest)
+		}
+	}
+
+	atIndex := strings.LastIndex(rest[:authorityEnd], "@")
+	if atIndex == -1 && authorityEnd < len(rest) {
+		candidate := rest[:authorityEnd]
+		if separator := strings.LastIndex(candidate, ":"); separator > 0 {
+			tail := candidate[separator+1:]
+			if tail != "" && !allDigits(tail) {
+				atIndex = strings.LastIndex(rest, "@")
+			}
+		}
+	}
+
+	if atIndex == -1 {
+		return token
+	}
+
+	userinfo := rest[:atIndex]
+	hostAndSuffix := rest[atIndex+1:]
+
+	if hostAndSuffix == "" {
+		return token
+	}
+
+	passwordSeparator := strings.Index(userinfo, ":")
+	if passwordSeparator == -1 {
+		return token
+	}
+
+	username := userinfo[:passwordSeparator]
+
+	return token[:schemeSeparator+3] + username + ":" + redactedURLPassword + "@" + hostAndSuffix
+}
+
+func allDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+
+	return true
 }
 
 // recordConnectionFailure increments the rabbitmq connection failure counter.
