@@ -107,8 +107,8 @@ func TestResolvePrimaryDB_ResolverFailure(t *testing.T) {
 	t.Parallel()
 
 	client, err := libPostgres.New(libPostgres.Config{
-		PrimaryDSN: "postgres://invalid:%zz@localhost:5432/postgres",
-		ReplicaDSN: "postgres://invalid:%zz@localhost:5432/postgres",
+		PrimaryDSN: "postgres://invalid:invalid@127.0.0.1:1/postgres",
+		ReplicaDSN: "postgres://invalid:invalid@127.0.0.1:1/postgres",
 	})
 	require.NoError(t, err)
 
