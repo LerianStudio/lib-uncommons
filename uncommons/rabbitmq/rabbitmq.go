@@ -859,40 +859,66 @@ type healthCheckURLConfig struct {
 // (e.g., "http://host:15672" or "https://host:15672"), NOT the full health endpoint.
 // If the URL already ends with "/api/health/checks/alarms", it is returned as-is.
 func validateHealthCheckURLWithConfig(rawURL string, cfg healthCheckURLConfig) (string, error) {
-	if !cfg.allowlistConfigured && len(cfg.allowedHosts) > 0 {
-		cfg.allowlistConfigured = true
-	}
+	cfg = normalizeHealthCheckURLConfig(cfg)
 
-	healthURL := strings.TrimSpace(rawURL)
-	if healthURL == "" {
-		return "", errors.New("rabbitmq health check URL is empty")
-	}
-
-	parsedURL, err := url.Parse(healthURL)
+	parsedURL, err := parseAndValidateHealthCheckBaseURL(rawURL, cfg)
 	if err != nil {
 		return "", err
 	}
 
+	enforceHosts, hostsToEnforce, err := resolveHealthCheckAllowedHosts(cfg)
+	if err != nil {
+		return "", err
+	}
+
+	if err := validateHealthCheckHostAllowlist(parsedURL.Host, enforceHosts, hostsToEnforce); err != nil {
+		return "", err
+	}
+
+	return normalizeHealthCheckEndpointPath(parsedURL), nil
+}
+
+func normalizeHealthCheckURLConfig(cfg healthCheckURLConfig) healthCheckURLConfig {
+	if !cfg.allowlistConfigured && len(cfg.allowedHosts) > 0 {
+		cfg.allowlistConfigured = true
+	}
+
+	return cfg
+}
+
+func parseAndValidateHealthCheckBaseURL(rawURL string, cfg healthCheckURLConfig) (*url.URL, error) {
+	healthURL := strings.TrimSpace(rawURL)
+	if healthURL == "" {
+		return nil, errors.New("rabbitmq health check URL is empty")
+	}
+
+	parsedURL, err := url.Parse(healthURL)
+	if err != nil {
+		return nil, err
+	}
+
 	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-		return "", errors.New("rabbitmq health check URL must use http or https")
+		return nil, errors.New("rabbitmq health check URL must use http or https")
 	}
 
 	if parsedURL.Host == "" {
-		return "", errors.New("rabbitmq health check URL must include a host")
+		return nil, errors.New("rabbitmq health check URL must include a host")
 	}
 
 	if parsedURL.User != nil {
-		return "", errors.New("rabbitmq health check URL must not include user credentials")
+		return nil, errors.New("rabbitmq health check URL must not include user credentials")
 	}
 
-	// Reject plain HTTP when basic auth credentials will be sent.
 	if parsedURL.Scheme == "http" && cfg.hasBasicAuth && !cfg.allowInsecure {
-		return "", ErrInsecureHealthCheck
+		return nil, ErrInsecureHealthCheck
 	}
 
-	// Enforce explicit host allowlist in strict mode.
+	return parsedURL, nil
+}
+
+func resolveHealthCheckAllowedHosts(cfg healthCheckURLConfig) (bool, []string, error) {
 	if cfg.requireAllowedHosts && (!cfg.allowlistConfigured || len(cfg.allowedHosts) == 0) {
-		return "", ErrHealthCheckAllowedHostsRequired
+		return false, nil, ErrHealthCheckAllowedHostsRequired
 	}
 
 	enforceHosts := cfg.allowlistConfigured
@@ -901,31 +927,38 @@ func validateHealthCheckURLWithConfig(rawURL string, cfg healthCheckURLConfig) (
 	if cfg.hasBasicAuth && !cfg.allowInsecure {
 		switch {
 		case len(cfg.allowedHosts) > 0:
-			enforceHosts = true
-			hostsToEnforce = cfg.allowedHosts
+			return true, cfg.allowedHosts, nil
 		case len(cfg.derivedAllowedHosts) > 0:
-			enforceHosts = true
-			hostsToEnforce = cfg.derivedAllowedHosts
+			return true, cfg.derivedAllowedHosts, nil
 		default:
-			return "", ErrHealthCheckAllowedHostsRequired
+			return false, nil, ErrHealthCheckAllowedHostsRequired
 		}
 	}
 
-	if enforceHosts {
-		if !isHostAllowed(parsedURL.Host, hostsToEnforce) {
-			return "", fmt.Errorf("%w: %s", ErrHealthCheckHostNotAllowed, parsedURL.Host)
-		}
+	return enforceHosts, hostsToEnforce, nil
+}
+
+func validateHealthCheckHostAllowlist(host string, enforceHosts bool, allowedHosts []string) error {
+	if !enforceHosts {
+		return nil
 	}
 
-	// Only append the health endpoint path if not already present.
+	if !isHostAllowed(host, allowedHosts) {
+		return fmt.Errorf("%w: %s", ErrHealthCheckHostNotAllowed, host)
+	}
+
+	return nil
+}
+
+func normalizeHealthCheckEndpointPath(parsedURL *url.URL) string {
 	const healthPath = "/api/health/checks/alarms"
 
 	normalized := strings.TrimSuffix(parsedURL.String(), "/")
 	if strings.HasSuffix(normalized, healthPath) {
-		return normalized, nil
+		return normalized
 	}
 
-	return normalized + healthPath, nil
+	return normalized + healthPath
 }
 
 func isHostAllowed(host string, allowedHosts []string) bool {
@@ -1060,6 +1093,7 @@ func mergeAllowedHosts(base []string, additional ...string) []string {
 		}
 
 		seen[key] = struct{}{}
+
 		merged = append(merged, trimmed)
 	}
 
