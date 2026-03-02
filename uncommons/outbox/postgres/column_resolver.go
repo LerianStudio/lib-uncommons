@@ -121,7 +121,6 @@ func (resolver *ColumnResolver) DiscoverTenants(ctx context.Context) ([]string, 
 
 		return resolver.queryTenants(ctx)
 	})
-
 	if err != nil {
 		return nil, err
 	}

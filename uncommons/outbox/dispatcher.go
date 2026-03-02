@@ -222,6 +222,7 @@ func (dispatcher *Dispatcher) Stop() {
 	dispatcher.stopOnce.Do(func() {
 		dispatcher.runStateMu.Lock()
 		cancel := dispatcher.cancelFunc
+
 		stop := dispatcher.stop
 		if stop == nil {
 			stop = make(chan struct{})

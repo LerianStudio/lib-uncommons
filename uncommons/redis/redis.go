@@ -808,10 +808,12 @@ func (c *Client) usesGCPIAM() bool {
 func normalizeConfig(cfg Config) (Config, error) {
 	normalizeLoggerDefault(&cfg)
 	normalizeConnectionOptionsDefaults(&cfg.Options)
+
 	originalTLSMinVersion := uint16(0)
 	if cfg.TLS != nil {
 		originalTLSMinVersion = cfg.TLS.MinVersion
 	}
+
 	tlsMinVersionUpgraded, legacyTLSAllowed := normalizeTLSDefaults(cfg.TLS)
 	normalizeGCPIAMDefaults(cfg.Auth.GCPIAM)
 
