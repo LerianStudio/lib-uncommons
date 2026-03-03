@@ -6,6 +6,7 @@ import (
 
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/tenantmanager/core"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetKey(t *testing.T) {
@@ -26,7 +27,38 @@ func TestGetKey(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.expected, GetKey(tt.tenantID, tt.key))
+
+			result, err := GetKey(tt.tenantID, tt.key)
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestGetKey_RejectsDelimiterInTenantID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		tenantID string
+	}{
+		{name: "colon in middle", tenantID: "tenant:123"},
+		{name: "colon at start", tenantID: ":tenant"},
+		{name: "colon at end", tenantID: "tenant:"},
+		{name: "multiple colons", tenantID: "a:b:c"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := GetKey(tt.tenantID, "orders")
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "must not contain delimiter character ':'")
+			assert.Empty(t, result)
 		})
 	}
 }
@@ -35,31 +67,82 @@ func TestGetKeyFromContext(t *testing.T) {
 	t.Parallel()
 
 	ctx := core.SetTenantIDInContext(context.Background(), "tenant-ctx")
-	assert.Equal(t, "tenant:tenant-ctx:orders", GetKeyFromContext(ctx, "orders"))
-	assert.Equal(t, "orders", GetKeyFromContext(context.Background(), "orders"))
-	assert.Equal(t, "orders", GetKeyFromContext(nil, "orders"))
+
+	result, err := GetKeyFromContext(ctx, "orders")
+	require.NoError(t, err)
+	assert.Equal(t, "tenant:tenant-ctx:orders", result)
+
+	result, err = GetKeyFromContext(context.Background(), "orders")
+	require.NoError(t, err)
+	assert.Equal(t, "orders", result)
+
+	result, err = GetKeyFromContext(nil, "orders")
+	require.NoError(t, err)
+	assert.Equal(t, "orders", result)
 }
 
 func TestGetPattern(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, "tenant:tenant-123:orders:*", GetPattern("tenant-123", "orders:*"))
-	assert.Equal(t, "orders:*", GetPattern("", "orders:*"))
+	result, err := GetPattern("tenant-123", "orders:*")
+	require.NoError(t, err)
+	assert.Equal(t, "tenant:tenant-123:orders:*", result)
+
+	result, err = GetPattern("", "orders:*")
+	require.NoError(t, err)
+	assert.Equal(t, "orders:*", result)
+}
+
+func TestGetPattern_RejectsDelimiterInTenantID(t *testing.T) {
+	t.Parallel()
+
+	result, err := GetPattern("tenant:123", "orders:*")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must not contain delimiter character ':'")
+	assert.Empty(t, result)
 }
 
 func TestGetPatternFromContext(t *testing.T) {
 	t.Parallel()
 
 	ctx := core.SetTenantIDInContext(context.Background(), "tenant-ctx")
-	assert.Equal(t, "tenant:tenant-ctx:orders:*", GetPatternFromContext(ctx, "orders:*"))
-	assert.Equal(t, "orders:*", GetPatternFromContext(context.Background(), "orders:*"))
-	assert.Equal(t, "orders:*", GetPatternFromContext(nil, "orders:*"))
+
+	result, err := GetPatternFromContext(ctx, "orders:*")
+	require.NoError(t, err)
+	assert.Equal(t, "tenant:tenant-ctx:orders:*", result)
+
+	result, err = GetPatternFromContext(context.Background(), "orders:*")
+	require.NoError(t, err)
+	assert.Equal(t, "orders:*", result)
+
+	result, err = GetPatternFromContext(nil, "orders:*")
+	require.NoError(t, err)
+	assert.Equal(t, "orders:*", result)
 }
 
 func TestStripTenantPrefix(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, "orders:1", StripTenantPrefix("tenant-123", "tenant:tenant-123:orders:1"))
-	assert.Equal(t, "orders:1", StripTenantPrefix("", "orders:1"))
-	assert.Equal(t, "tenant:other:orders:1", StripTenantPrefix("tenant-123", "tenant:other:orders:1"))
+	result, err := StripTenantPrefix("tenant-123", "tenant:tenant-123:orders:1")
+	require.NoError(t, err)
+	assert.Equal(t, "orders:1", result)
+
+	result, err = StripTenantPrefix("", "orders:1")
+	require.NoError(t, err)
+	assert.Equal(t, "orders:1", result)
+
+	result, err = StripTenantPrefix("tenant-123", "tenant:other:orders:1")
+	require.NoError(t, err)
+	assert.Equal(t, "tenant:other:orders:1", result)
+}
+
+func TestStripTenantPrefix_RejectsDelimiterInTenantID(t *testing.T) {
+	t.Parallel()
+
+	result, err := StripTenantPrefix("tenant:123", "tenant:tenant:123:orders:1")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must not contain delimiter character ':'")
+	assert.Empty(t, result)
 }
