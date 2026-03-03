@@ -55,12 +55,12 @@ func setupRabbitMQContainer(t *testing.T) (amqpURL string, mgmtURL string, clean
 // newTestConnection creates a RabbitMQConnection configured for integration testing.
 func newTestConnection(amqpURL, mgmtURL string) *RabbitMQConnection {
 	return &RabbitMQConnection{
-		ConnectionStringSource: amqpURL,
-		HealthCheckURL:         mgmtURL,
-		User:                   testRabbitMQUser,
-		Pass:                   testRabbitMQPass,
+		ConnectionStringSource:   amqpURL,
+		HealthCheckURL:           mgmtURL,
+		User:                     testRabbitMQUser,
+		Pass:                     testRabbitMQPass,
 		AllowInsecureHealthCheck: true,
-		Logger:                 log.NewNop(),
+		Logger:                   log.NewNop(),
 	}
 }
 
