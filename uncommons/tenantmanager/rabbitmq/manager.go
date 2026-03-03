@@ -14,13 +14,15 @@ import (
 	libOpentelemetry "github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/tenantmanager/client"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/tenantmanager/core"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/tenantmanager/internal/eviction"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/tenantmanager/internal/logcompat"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 // defaultIdleTimeout is the default duration before a tenant connection becomes
 // eligible for eviction when the pool exceeds the soft limit.
-const defaultIdleTimeout = 5 * time.Minute
+// Defined centrally in the eviction package; aliased here for local convenience.
+var defaultIdleTimeout = eviction.DefaultIdleTimeout
 
 // Manager manages RabbitMQ connections per tenant.
 // Each tenant has a dedicated vhost, user, and credentials stored in Tenant Manager.
@@ -107,7 +109,7 @@ func NewManager(c *client.Client, service string, opts ...Option) *Manager {
 // Creates a new connection if one doesn't exist or the existing one is closed.
 func (p *Manager) GetConnection(ctx context.Context, tenantID string) (*amqp.Connection, error) {
 	if tenantID == "" {
-		return nil, fmt.Errorf("tenant ID is required")
+		return nil, errors.New("tenant ID is required")
 	}
 
 	p.mu.RLock()
@@ -140,7 +142,7 @@ func (p *Manager) GetConnection(ctx context.Context, tenantID string) (*amqp.Con
 // createConnection fetches config from Tenant Manager and creates a RabbitMQ connection.
 func (p *Manager) createConnection(ctx context.Context, tenantID string) (*amqp.Connection, error) {
 	if p.client == nil {
-		return nil, fmt.Errorf("tenant manager client is required for multi-tenant connections")
+		return nil, errors.New("tenant manager client is required for multi-tenant connections")
 	}
 
 	baseLogger, tracer, _, _ := libCommons.NewTrackingFromContext(ctx)
@@ -215,52 +217,21 @@ func (p *Manager) createConnection(ctx context.Context, tenantID string) (*amqp.
 // the pool is allowed to grow beyond the soft limit.
 // Caller MUST hold p.mu write lock.
 func (p *Manager) evictLRU(logger log.Logger) {
-	compatLogger := logcompat.New(logger)
-
-	if p.maxConnections <= 0 || len(p.connections) < p.maxConnections {
+	candidateID, shouldEvict := eviction.FindLRUEvictionCandidate(
+		len(p.connections), p.maxConnections, p.lastAccessed, p.idleTimeout, logger,
+	)
+	if !shouldEvict {
 		return
 	}
 
-	now := time.Now()
-
-	idleTimeout := p.idleTimeout
-	if idleTimeout == 0 {
-		idleTimeout = defaultIdleTimeout
-	}
-
-	// Find the oldest connection that has been idle longer than the timeout
-	var oldestID string
-
-	var oldestTime time.Time
-
-	for id, t := range p.lastAccessed {
-		idleDuration := now.Sub(t)
-		if idleDuration < idleTimeout {
-			continue // still active, skip
-		}
-
-		if oldestID == "" || t.Before(oldestTime) {
-			oldestID = id
-			oldestTime = t
-		}
-	}
-
-	if oldestID == "" {
-		// All connections are active (used within idle timeout)
-		// Allow pool to grow beyond soft limit
-		return
-	}
-
-	// Evict the idle connection
-	if conn, ok := p.connections[oldestID]; ok {
+	// Manager-specific cleanup: close the AMQP connection and remove from maps.
+	if conn, ok := p.connections[candidateID]; ok {
 		if conn != nil && !conn.IsClosed() {
 			_ = conn.Close()
 		}
 
-		delete(p.connections, oldestID)
-		delete(p.lastAccessed, oldestID)
-
-		compatLogger.Infof("LRU evicted idle rabbitmq connection for tenant %s (idle for %s)", oldestID, now.Sub(oldestTime))
+		delete(p.connections, candidateID)
+		delete(p.lastAccessed, candidateID)
 	}
 }
 
@@ -336,6 +307,12 @@ func (p *Manager) ApplyConnectionSettings(_ string, _ *core.TenantConfig) {
 }
 
 // Stats returns connection statistics.
+//
+// ActiveConnections counts connections that are not closed.
+// Unlike Postgres/Mongo which use recency-based idle timeout to determine
+// whether a connection is "active", RabbitMQ checks actual connection liveness
+// because AMQP connections are long-lived and do not have a meaningful
+// "last accessed" recency signal for activity classification.
 func (p *Manager) Stats() Stats {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
