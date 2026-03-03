@@ -11,7 +11,10 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-const callerSkipFrames = 1
+const (
+	callerSkipFrames = 1
+	encodingConsole  = "console"
+)
 
 // Environment controls the baseline logger profile.
 type Environment string
@@ -113,7 +116,7 @@ func buildConfigByEnvironment(environment Environment) zap.Config {
 		cfg.Encoding = encoding
 		cfg.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 
-		if encoding == "console" {
+		if encoding == encodingConsole {
 			cfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 		}
 
@@ -129,13 +132,13 @@ func buildConfigByEnvironment(environment Environment) zap.Config {
 
 func resolveEncoding(environment Environment) string {
 	if enc := strings.TrimSpace(os.Getenv("LOG_ENCODING")); enc != "" {
-		if enc == "json" || enc == "console" {
+		if enc == "json" || enc == encodingConsole {
 			return enc
 		}
 	}
 
 	if environment == EnvironmentDevelopment || environment == EnvironmentLocal {
-		return "console"
+		return encodingConsole
 	}
 
 	return "json"
