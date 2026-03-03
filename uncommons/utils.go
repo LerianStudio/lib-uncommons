@@ -171,16 +171,16 @@ func MergeMaps(source, target map[string]any) map[string]any {
 
 // SyscmdI abstracts command execution for testing and composition.
 type SyscmdI interface {
-	ExecCmd(name string, arg ...string) ([]byte, error)
+	ExecCmd(ctx context.Context, name string, arg ...string) ([]byte, error)
 }
 
 // Syscmd is the default SyscmdI implementation backed by os/exec.
 type Syscmd struct{}
 
 // ExecCmd runs a command and returns its stdout bytes.
-func (r *Syscmd) ExecCmd(name string, arg ...string) ([]byte, error) {
-	// #nosec G204 -- arguments are passed directly to exec.Command (no shell interpretation); callers are responsible for input validation
-	return exec.Command(name, arg...).Output()
+func (r *Syscmd) ExecCmd(ctx context.Context, name string, arg ...string) ([]byte, error) {
+	// #nosec G204 -- arguments are passed directly to exec.CommandContext (no shell interpretation); callers are responsible for input validation
+	return exec.CommandContext(ctx, name, arg...).Output()
 }
 
 // GetCPUUsage reads the current CPU usage and records it through the MetricsFactory gauge.
