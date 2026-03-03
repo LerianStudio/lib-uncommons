@@ -11,6 +11,7 @@ import (
 type tenantIDContextKey string
 
 // TenantIDContextKey stores tenant id used by outbox multi-tenant operations.
+//
 // Deprecated: use tenantmanager/core.ContextWithTenantID and tenantmanager/core.GetTenantIDFromContext.
 // This constant will be removed in v3.0.
 const TenantIDContextKey tenantIDContextKey = "outbox.tenant_id"
