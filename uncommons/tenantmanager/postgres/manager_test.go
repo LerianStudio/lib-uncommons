@@ -19,6 +19,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// mustNewTestClient creates a test client or fails the test immediately.
+// Centralises the repeated client.NewClient + error-check boilerplate.
+func mustNewTestClient(t testing.TB, baseURL string) *client.Client {
+	t.Helper()
+	c, err := client.NewClient(baseURL, testutil.NewMockLogger())
+	require.NoError(t, err)
+	return c
+}
+
 // pingableDB implements dbresolver.DB with configurable PingContext behavior
 // for testing connection health check logic.
 type pingableDB struct {
@@ -77,7 +86,7 @@ func (t *trackingDB) MaxIdleConns() int32   { return atomic.LoadInt32(&t.maxIdle
 
 func TestNewManager(t *testing.T) {
 	t.Run("creates manager with client and service", func(t *testing.T) {
-		c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+		c := mustNewTestClient(t, "http://localhost:8080")
 		manager := NewManager(c, "ledger")
 
 		assert.NotNil(t, manager)
@@ -87,7 +96,7 @@ func TestNewManager(t *testing.T) {
 }
 
 func TestManager_GetConnection_NoTenantID(t *testing.T) {
-	c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+	c := mustNewTestClient(t, "http://localhost:8080")
 	manager := NewManager(c, "ledger")
 
 	_, err := manager.GetConnection(context.Background(), "")
@@ -97,7 +106,7 @@ func TestManager_GetConnection_NoTenantID(t *testing.T) {
 }
 
 func TestManager_Close(t *testing.T) {
-	c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+	c := mustNewTestClient(t, "http://localhost:8080")
 	manager := NewManager(c, "ledger")
 
 	err := manager.Close(context.Background())
@@ -107,7 +116,7 @@ func TestManager_Close(t *testing.T) {
 }
 
 func TestManager_GetConnection_ManagerClosed(t *testing.T) {
-	c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+	c := mustNewTestClient(t, "http://localhost:8080")
 	manager := NewManager(c, "ledger")
 	manager.Close(context.Background())
 
@@ -156,7 +165,7 @@ func TestBuildConnectionString(t *testing.T) {
 			expected: "postgres://user:pass@localhost:5432/testdb?options=-csearch_path%3Dtenant_abc&sslmode=disable",
 		},
 		{
-			name: "defaults sslmode to disable when empty",
+			name: "defaults sslmode to prefer when empty",
 			cfg: &core.PostgreSQLConfig{
 				Host:     "localhost",
 				Port:     5432,
@@ -164,7 +173,7 @@ func TestBuildConnectionString(t *testing.T) {
 				Password: "pass",
 				Database: "testdb",
 			},
-			expected: "postgres://user:pass@localhost:5432/testdb?sslmode=disable",
+			expected: "postgres://user:pass@localhost:5432/testdb?sslmode=prefer",
 		},
 		{
 			name: "uses provided sslmode",
@@ -376,7 +385,7 @@ func TestBuildConnectionStrings_PrimaryAndReplica(t *testing.T) {
 
 func TestManager_GetConnection_HealthyCache(t *testing.T) {
 	t.Run("returns cached connection when ping succeeds", func(t *testing.T) {
-		c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+		c := mustNewTestClient(t, "http://localhost:8080")
 		manager := NewManager(c, "ledger")
 
 		// Pre-populate cache with a healthy connection
@@ -404,7 +413,7 @@ func TestManager_GetConnection_UnhealthyCacheEvicts(t *testing.T) {
 		}))
 		defer server.Close()
 
-		tmClient, _ := client.NewClient(server.URL, testutil.NewMockLogger())
+		tmClient := mustNewTestClient(t, server.URL)
 		manager := NewManager(tmClient, "ledger", WithLogger(testutil.NewMockLogger()))
 
 		// Pre-populate cache with an unhealthy connection (simulates auth failure after credential rotation)
@@ -444,7 +453,7 @@ func TestManager_GetConnection_SuspendedTenant(t *testing.T) {
 		}))
 		defer server.Close()
 
-		tmClient, _ := client.NewClient(server.URL, testutil.NewMockLogger())
+		tmClient := mustNewTestClient(t, server.URL)
 		manager := NewManager(tmClient, "ledger", WithLogger(testutil.NewMockLogger()))
 
 		_, err := manager.GetConnection(context.Background(), "tenant-123")
@@ -461,7 +470,7 @@ func TestManager_GetConnection_SuspendedTenant(t *testing.T) {
 
 func TestManager_GetConnection_NilConnectionDB(t *testing.T) {
 	t.Run("returns cached connection when ConnectionDB is nil without ping", func(t *testing.T) {
-		c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+		c := mustNewTestClient(t, "http://localhost:8080")
 		manager := NewManager(c, "ledger")
 
 		// Pre-populate cache with a connection that has nil ConnectionDB
@@ -560,7 +569,7 @@ func TestManager_EvictLRU(t *testing.T) {
 				opts = append(opts, WithIdleTimeout(tt.idleTimeout))
 			}
 
-			c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+			c := mustNewTestClient(t, "http://localhost:8080")
 			manager := NewManager(c, "ledger", opts...)
 
 			// Pre-populate pool with connections
@@ -623,7 +632,7 @@ func TestManager_EvictLRU(t *testing.T) {
 func TestManager_PoolGrowsBeyondSoftLimit_WhenAllActive(t *testing.T) {
 	t.Parallel()
 
-	c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+	c := mustNewTestClient(t, "http://localhost:8080")
 	manager := NewManager(c, "ledger",
 		WithLogger(testutil.NewMockLogger()),
 		WithMaxTenantPools(2),
@@ -688,7 +697,7 @@ func TestManager_WithIdleTimeout_Option(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+			c := mustNewTestClient(t, "http://localhost:8080")
 			manager := NewManager(c, "ledger",
 				WithIdleTimeout(tt.idleTimeout),
 			)
@@ -701,7 +710,7 @@ func TestManager_WithIdleTimeout_Option(t *testing.T) {
 func TestManager_LRU_LastAccessedUpdatedOnCacheHit(t *testing.T) {
 	t.Parallel()
 
-	c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+	c := mustNewTestClient(t, "http://localhost:8080")
 	manager := NewManager(c, "ledger",
 		WithLogger(testutil.NewMockLogger()),
 		WithMaxTenantPools(5),
@@ -738,7 +747,7 @@ func TestManager_LRU_LastAccessedUpdatedOnCacheHit(t *testing.T) {
 func TestManager_CloseConnection_CleansUpLastAccessed(t *testing.T) {
 	t.Parallel()
 
-	c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+	c := mustNewTestClient(t, "http://localhost:8080")
 	manager := NewManager(c, "ledger",
 		WithLogger(testutil.NewMockLogger()),
 	)
@@ -791,7 +800,7 @@ func TestManager_WithMaxTenantPools_Option(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+			c := mustNewTestClient(t, "http://localhost:8080")
 			manager := NewManager(c, "ledger",
 				WithMaxTenantPools(tt.maxConnections),
 			)
@@ -804,7 +813,7 @@ func TestManager_WithMaxTenantPools_Option(t *testing.T) {
 func TestManager_Stats_IncludesMaxConnections(t *testing.T) {
 	t.Parallel()
 
-	c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+	c := mustNewTestClient(t, "http://localhost:8080")
 	manager := NewManager(c, "ledger",
 		WithMaxTenantPools(50),
 	)
@@ -851,7 +860,7 @@ func TestManager_WithSettingsCheckInterval_Option(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+			c := mustNewTestClient(t, "http://localhost:8080")
 			manager := NewManager(c, "ledger",
 				WithSettingsCheckInterval(tt.interval),
 			)
@@ -864,7 +873,7 @@ func TestManager_WithSettingsCheckInterval_Option(t *testing.T) {
 func TestManager_DefaultSettingsCheckInterval(t *testing.T) {
 	t.Parallel()
 
-	c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+	c := mustNewTestClient(t, "http://localhost:8080")
 	manager := NewManager(c, "ledger")
 
 	assert.Equal(t, defaultSettingsCheckInterval, manager.settingsCheckInterval,
@@ -896,7 +905,7 @@ func TestManager_GetConnection_RevalidatesSettingsAfterInterval(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tmClient, _ := client.NewClient(server.URL, testutil.NewMockLogger())
+	tmClient := mustNewTestClient(t, server.URL)
 	manager := NewManager(tmClient, "ledger",
 		WithLogger(testutil.NewMockLogger()),
 		WithModule("onboarding"),
@@ -951,7 +960,7 @@ func TestManager_GetConnection_DoesNotRevalidateBeforeInterval(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tmClient, _ := client.NewClient(server.URL, testutil.NewMockLogger())
+	tmClient := mustNewTestClient(t, server.URL)
 	manager := NewManager(tmClient, "ledger",
 		WithLogger(testutil.NewMockLogger()),
 		WithModule("onboarding"),
@@ -995,7 +1004,7 @@ func TestManager_GetConnection_FailedRevalidationDoesNotBreakConnection(t *testi
 	}))
 	defer server.Close()
 
-	tmClient, _ := client.NewClient(server.URL, testutil.NewMockLogger())
+	tmClient := mustNewTestClient(t, server.URL)
 	manager := NewManager(tmClient, "ledger",
 		WithLogger(testutil.NewMockLogger()),
 		WithModule("onboarding"),
@@ -1031,7 +1040,7 @@ func TestManager_GetConnection_FailedRevalidationDoesNotBreakConnection(t *testi
 func TestManager_CloseConnection_CleansUpLastSettingsCheck(t *testing.T) {
 	t.Parallel()
 
-	c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+	c := mustNewTestClient(t, "http://localhost:8080")
 	manager := NewManager(c, "ledger",
 		WithLogger(testutil.NewMockLogger()),
 	)
@@ -1065,7 +1074,7 @@ func TestManager_CloseConnection_CleansUpLastSettingsCheck(t *testing.T) {
 func TestManager_Close_CleansUpLastSettingsCheck(t *testing.T) {
 	t.Parallel()
 
-	c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+	c := mustNewTestClient(t, "http://localhost:8080")
 	manager := NewManager(c, "ledger",
 		WithLogger(testutil.NewMockLogger()),
 	)
@@ -1094,7 +1103,7 @@ func TestManager_Close_CleansUpLastSettingsCheck(t *testing.T) {
 func TestManager_ApplyConnectionSettings_LogsValues(t *testing.T) {
 	t.Parallel()
 
-	c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+	c := mustNewTestClient(t, "http://localhost:8080")
 
 	// Use a capturing logger to verify that ApplyConnectionSettings logs when it applies values
 	capLogger := testutil.NewCapturingLogger()
@@ -1150,7 +1159,7 @@ func TestManager_GetConnection_DisabledRevalidation_WithZero(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tmClient, _ := client.NewClient(server.URL, testutil.NewMockLogger())
+	tmClient := mustNewTestClient(t, server.URL)
 	manager := NewManager(tmClient, "ledger",
 		WithLogger(testutil.NewMockLogger()),
 		WithModule("onboarding"),
@@ -1210,7 +1219,7 @@ func TestManager_GetConnection_DisabledRevalidation_WithNegative(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tmClient, _ := client.NewClient(server.URL, testutil.NewMockLogger())
+	tmClient := mustNewTestClient(t, server.URL)
 	manager := NewManager(tmClient, "payment",
 		WithLogger(testutil.NewMockLogger()),
 		WithModule("payment"),
@@ -1372,7 +1381,7 @@ func TestManager_ApplyConnectionSettings(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+			c := mustNewTestClient(t, "http://localhost:8080")
 			manager := NewManager(c, "ledger",
 				WithModule(tt.module),
 				WithLogger(testutil.NewMockLogger()),
@@ -1409,7 +1418,7 @@ func TestManager_ApplyConnectionSettings(t *testing.T) {
 func TestManager_Stats_ActiveConnections(t *testing.T) {
 	t.Parallel()
 
-	c, _ := client.NewClient("http://localhost:8080", testutil.NewMockLogger())
+	c := mustNewTestClient(t, "http://localhost:8080")
 	manager := NewManager(c, "ledger")
 
 	// Pre-populate with connections and mark them as recently accessed
@@ -1471,7 +1480,8 @@ func TestManager_RevalidateSettings_EvictsSuspendedTenant(t *testing.T) {
 			defer server.Close()
 
 			capLogger := testutil.NewCapturingLogger()
-			tmClient, _ := client.NewClient(server.URL, capLogger)
+			tmClient, err := client.NewClient(server.URL, capLogger)
+			require.NoError(t, err)
 			manager := NewManager(tmClient, "ledger",
 				WithLogger(capLogger),
 				WithSettingsCheckInterval(1*time.Millisecond),

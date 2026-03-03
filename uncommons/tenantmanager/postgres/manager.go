@@ -18,6 +18,7 @@ import (
 	libPostgres "github.com/LerianStudio/lib-uncommons/v2/uncommons/postgres"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/tenantmanager/client"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/tenantmanager/core"
+	"github.com/LerianStudio/lib-uncommons/v2/uncommons/tenantmanager/internal/eviction"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/tenantmanager/internal/logcompat"
 	"github.com/bxcodec/dbresolver/v2"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -66,7 +67,8 @@ const defaultMaxAllowedIdleConns = 50
 // defaultIdleTimeout is the default duration before a tenant connection becomes
 // eligible for eviction. Connections accessed within this window are considered
 // active and will not be evicted, allowing the pool to grow beyond maxConnections.
-const defaultIdleTimeout = 5 * time.Minute
+// Defined centrally in the eviction package; aliased here for local convenience.
+var defaultIdleTimeout = eviction.DefaultIdleTimeout
 
 // Manager manages PostgreSQL database connections per tenant.
 // It fetches credentials from Tenant Manager and caches connections.
@@ -108,22 +110,22 @@ type Manager struct {
 type PostgresConnection struct {
 	// Adapter type used by tenant-manager package; keep fields aligned with
 	// tenant-manager migration contract and upstream lib-commons adapter semantics.
-	ConnectionStringPrimary string
-	ConnectionStringReplica string
-	PrimaryDBName           string
-	ReplicaDBName           string
-	MaxOpenConnections      int
-	MaxIdleConnections      int
-	SkipMigrations          bool
-	Logger                  libLog.Logger
-	ConnectionDB            *dbresolver.DB
+	ConnectionStringPrimary string         `json:"-"` // contains credentials, must not be serialized
+	ConnectionStringReplica string         `json:"-"` // contains credentials, must not be serialized
+	PrimaryDBName           string         `json:"primaryDBName,omitempty"`
+	ReplicaDBName           string         `json:"replicaDBName,omitempty"`
+	MaxOpenConnections      int            `json:"maxOpenConnections,omitempty"`
+	MaxIdleConnections      int            `json:"maxIdleConnections,omitempty"`
+	SkipMigrations          bool           `json:"skipMigrations,omitempty"`
+	Logger                  libLog.Logger  `json:"-"`
+	ConnectionDB            *dbresolver.DB `json:"-"`
 
 	client *libPostgres.Client
 }
 
 func (c *PostgresConnection) Connect() error {
 	if c == nil {
-		return fmt.Errorf("postgres connection is nil")
+		return errors.New("postgres connection is nil")
 	}
 
 	pgClient, err := libPostgres.New(libPostgres.Config{
@@ -154,7 +156,7 @@ func (c *PostgresConnection) Connect() error {
 
 func (c *PostgresConnection) GetDB() (dbresolver.DB, error) {
 	if c == nil || c.ConnectionDB == nil {
-		return nil, fmt.Errorf("postgres resolver not initialized")
+		return nil, errors.New("postgres resolver not initialized")
 	}
 
 	return *c.ConnectionDB, nil
@@ -260,6 +262,7 @@ func NewManager(c *client.Client, service string, opts ...Option) *Manager {
 	p := &Manager{
 		client:                c,
 		service:               service,
+		logger:                logcompat.New(nil),
 		connections:           make(map[string]*PostgresConnection),
 		lastAccessed:          make(map[string]time.Time),
 		lastSettingsCheck:     make(map[string]time.Time),
@@ -284,7 +287,7 @@ func NewManager(c *client.Client, service string, opts ...Option) *Manager {
 // one is created with fresh credentials from the Tenant Manager.
 func (p *Manager) GetConnection(ctx context.Context, tenantID string) (*PostgresConnection, error) {
 	if tenantID == "" {
-		return nil, fmt.Errorf("tenant ID is required")
+		return nil, errors.New("tenant ID is required")
 	}
 
 	p.mu.RLock()
@@ -300,14 +303,18 @@ func (p *Manager) GetConnection(ctx context.Context, tenantID string) (*Postgres
 		// Validate cached connection is still healthy (e.g., credentials may have changed)
 		if conn.ConnectionDB != nil {
 			pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
-			defer cancel()
 
-			if pingErr := (*conn.ConnectionDB).PingContext(pingCtx); pingErr != nil {
+			pingErr := (*conn.ConnectionDB).PingContext(pingCtx)
+			cancel() // Release timer immediately; we no longer need the ping context.
+
+			if pingErr != nil {
 				if p.logger != nil {
 					p.logger.WarnCtx(ctx, fmt.Sprintf("cached postgres connection unhealthy for tenant %s, reconnecting: %v", tenantID, pingErr))
 				}
 
-				_ = p.CloseConnection(ctx, tenantID)
+				if closeErr := p.CloseConnection(ctx, tenantID); closeErr != nil && p.logger != nil {
+					p.logger.WarnCtx(ctx, fmt.Sprintf("failed to close stale postgres connection for tenant %s: %v", tenantID, closeErr))
+				}
 
 				// Fall through to create a new connection with fresh credentials
 				return p.createConnection(ctx, tenantID)
@@ -318,6 +325,14 @@ func (p *Manager) GetConnection(ctx context.Context, tenantID string) (*Postgres
 		now := time.Now()
 
 		p.mu.Lock()
+
+		// TOCTOU re-check: connection may have been evicted while we were pinging.
+		if _, stillExists := p.connections[tenantID]; !stillExists {
+			p.mu.Unlock()
+			// Connection was evicted while we were pinging; create fresh.
+			return p.createConnection(ctx, tenantID)
+		}
+
 		p.lastAccessed[tenantID] = now
 
 		// Only revalidate if settingsCheckInterval > 0 (means revalidation is enabled)
@@ -394,7 +409,7 @@ func (p *Manager) revalidatePoolSettings(tenantID string) {
 // createConnection fetches config from Tenant Manager and creates a connection.
 func (p *Manager) createConnection(ctx context.Context, tenantID string) (*PostgresConnection, error) {
 	if p.client == nil {
-		return nil, fmt.Errorf("tenant manager client is required for multi-tenant connections")
+		return nil, errors.New("tenant manager client is required for multi-tenant connections")
 	}
 
 	baseLogger, tracer, _, _ := libCommons.NewTrackingFromContext(ctx)
@@ -535,7 +550,7 @@ func (p *Manager) buildTenantPostgresConnection(
 	}
 
 	if config.IsSchemaMode() && pgConfig.Schema == "" {
-		logger.ErrorCtx(ctx, fmt.Sprintf("schema mode requires schema in config for tenant %s", tenantID))
+		logger.ErrorCtx(ctx, "schema mode requires schema in config for tenant "+tenantID)
 
 		return nil, fmt.Errorf("schema mode requires schema in config for tenant %s", tenantID)
 	}
@@ -618,6 +633,43 @@ func (p *Manager) resolveReplicaConnection(
 	return replicaConnStr, pgReplicaConfig.Database, nil
 }
 
+// resolveConnectionSettingsFromConfig extracts connection settings from the tenant config,
+// checking module-level settings first, then top-level for backward compatibility.
+func (p *Manager) resolveConnectionSettingsFromConfig(config *core.TenantConfig) *core.ConnectionSettings {
+	if config == nil {
+		return nil
+	}
+
+	if p.module != "" && config.Databases != nil {
+		if db, ok := config.Databases[p.module]; ok && db.ConnectionSettings != nil {
+			return db.ConnectionSettings
+		}
+	}
+
+	return config.ConnectionSettings
+}
+
+// clampPoolSettings enforces connection pool limits set by WithConnectionLimitCaps.
+func (p *Manager) clampPoolSettings(maxOpen, maxIdle int, tenantID string, logger *logcompat.Logger) (int, int) {
+	if p.maxAllowedOpenConns > 0 && maxOpen > p.maxAllowedOpenConns {
+		if logger != nil {
+			logger.Warnf("clamping maxOpenConns for tenant %s module %s from %d to %d", tenantID, p.module, maxOpen, p.maxAllowedOpenConns)
+		}
+
+		maxOpen = p.maxAllowedOpenConns
+	}
+
+	if p.maxAllowedIdleConns > 0 && maxIdle > p.maxAllowedIdleConns {
+		if logger != nil {
+			logger.Warnf("clamping maxIdleConns for tenant %s module %s from %d to %d", tenantID, p.module, maxIdle, p.maxAllowedIdleConns)
+		}
+
+		maxIdle = p.maxAllowedIdleConns
+	}
+
+	return maxOpen, maxIdle
+}
+
 // resolveConnectionPoolSettings determines the effective maxOpen and maxIdle connection
 // settings for a tenant. It checks module-level settings first (new format), then falls
 // back to top-level settings (legacy), and finally uses global defaults.
@@ -625,20 +677,7 @@ func (p *Manager) resolveConnectionPoolSettings(config *core.TenantConfig, tenan
 	maxOpen = p.maxOpenConns
 	maxIdle = p.maxIdleConns
 
-	// Apply per-module connection pool settings from Tenant Manager (overrides global defaults).
-	// First check module-level settings (new format), then fall back to top-level settings (legacy).
-	var connSettings *core.ConnectionSettings
-
-	if p.module != "" {
-		if db, ok := config.Databases[p.module]; ok && db.ConnectionSettings != nil {
-			connSettings = db.ConnectionSettings
-		}
-	}
-
-	// Fall back to top-level ConnectionSettings for backward compatibility with older data
-	if connSettings == nil && config.ConnectionSettings != nil {
-		connSettings = config.ConnectionSettings
-	}
+	connSettings := p.resolveConnectionSettingsFromConfig(config)
 
 	if connSettings != nil {
 		if connSettings.MaxOpenConns > 0 {
@@ -652,15 +691,7 @@ func (p *Manager) resolveConnectionPoolSettings(config *core.TenantConfig, tenan
 		}
 	}
 
-	if p.maxAllowedOpenConns > 0 && maxOpen > p.maxAllowedOpenConns {
-		logger.Warnf("clamping maxOpenConns for tenant %s module %s from %d to %d", tenantID, p.module, maxOpen, p.maxAllowedOpenConns)
-		maxOpen = p.maxAllowedOpenConns
-	}
-
-	if p.maxAllowedIdleConns > 0 && maxIdle > p.maxAllowedIdleConns {
-		logger.Warnf("clamping maxIdleConns for tenant %s module %s from %d to %d", tenantID, p.module, maxIdle, p.maxAllowedIdleConns)
-		maxIdle = p.maxAllowedIdleConns
-	}
+	maxOpen, maxIdle = p.clampPoolSettings(maxOpen, maxIdle, tenantID, logger)
 
 	return maxOpen, maxIdle
 }
@@ -671,53 +702,22 @@ func (p *Manager) resolveConnectionPoolSettings(config *core.TenantConfig, tenan
 // the pool is allowed to grow beyond the soft limit.
 // Caller MUST hold p.mu write lock.
 func (p *Manager) evictLRU(_ context.Context, logger libLog.Logger) {
-	compatLogger := logcompat.New(logger)
-
-	if p.maxConnections <= 0 || len(p.connections) < p.maxConnections {
+	candidateID, shouldEvict := eviction.FindLRUEvictionCandidate(
+		len(p.connections), p.maxConnections, p.lastAccessed, p.idleTimeout, logger,
+	)
+	if !shouldEvict {
 		return
 	}
 
-	now := time.Now()
-
-	idleTimeout := p.idleTimeout
-	if idleTimeout == 0 {
-		idleTimeout = defaultIdleTimeout
-	}
-
-	// Find the oldest connection that has been idle longer than the timeout
-	var oldestID string
-
-	var oldestTime time.Time
-
-	for id, t := range p.lastAccessed {
-		idleDuration := now.Sub(t)
-		if idleDuration < idleTimeout {
-			continue // still active, skip
-		}
-
-		if oldestID == "" || t.Before(oldestTime) {
-			oldestID = id
-			oldestTime = t
-		}
-	}
-
-	if oldestID == "" {
-		// All connections are active (used within idle timeout)
-		// Allow pool to grow beyond soft limit
-		return
-	}
-
-	// Evict the idle connection
-	if conn, ok := p.connections[oldestID]; ok {
+	// Manager-specific cleanup: close the postgres connection and remove from all maps.
+	if conn, ok := p.connections[candidateID]; ok {
 		if conn.ConnectionDB != nil {
 			_ = (*conn.ConnectionDB).Close()
 		}
 
-		delete(p.connections, oldestID)
-		delete(p.lastAccessed, oldestID)
-		delete(p.lastSettingsCheck, oldestID)
-
-		compatLogger.Infof("LRU evicted idle postgres connection for tenant %s (idle for %s)", oldestID, now.Sub(oldestTime))
+		delete(p.connections, candidateID)
+		delete(p.lastAccessed, candidateID)
+		delete(p.lastSettingsCheck, candidateID)
 	}
 }
 
@@ -808,7 +808,7 @@ func (p *Manager) Stats() Stats {
 	activeCount := 0
 
 	for id := range p.connections {
-		if t, ok := p.lastAccessed[id]; ok && now.Sub(t) <= idleTimeout {
+		if t, ok := p.lastAccessed[id]; ok && now.Sub(t) < idleTimeout {
 			activeCount++
 		}
 	}
@@ -829,7 +829,7 @@ var validSchemaPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 func buildConnectionString(cfg *core.PostgreSQLConfig) (string, error) {
 	sslmode := cfg.SSLMode
 	if sslmode == "" {
-		sslmode = "disable"
+		sslmode = "prefer"
 	}
 
 	connURL := &url.URL{
@@ -871,46 +871,36 @@ func buildConnectionString(cfg *core.PostgreSQLConfig) (string, error) {
 // so this method only applies to PostgreSQL connections.
 func (p *Manager) ApplyConnectionSettings(tenantID string, config *core.TenantConfig) {
 	p.mu.RLock()
-	conn, ok := p.connections[tenantID]
-	p.mu.RUnlock()
 
+	conn, ok := p.connections[tenantID]
 	if !ok || conn == nil || conn.ConnectionDB == nil {
+		p.mu.RUnlock()
 		return // no cached connection, settings will be applied on next creation
 	}
 
-	// Resolve connection settings: module-level first, then top-level fallback
-	var connSettings *core.ConnectionSettings
-
-	if p.module != "" {
-		if config.Databases != nil {
-			if db, ok := config.Databases[p.module]; ok && db.ConnectionSettings != nil {
-				connSettings = db.ConnectionSettings
-			}
-		}
-	}
-
-	// Fall back to top-level ConnectionSettings for backward compatibility
-	if connSettings == nil && config.ConnectionSettings != nil {
-		connSettings = config.ConnectionSettings
-	}
-
+	connSettings := p.resolveConnectionSettingsFromConfig(config)
 	if connSettings == nil {
+		p.mu.RUnlock()
 		return // no settings to apply
 	}
 
-	if p.logger != nil {
-		p.logger.Infof("applying connection settings for tenant %s module %s: maxOpenConns=%d, maxIdleConns=%d",
-			tenantID, p.module, connSettings.MaxOpenConns, connSettings.MaxIdleConns)
-	}
-
+	maxOpen := connSettings.MaxOpenConns
+	maxIdle := connSettings.MaxIdleConns
 	db := *conn.ConnectionDB
+	p.mu.RUnlock() // Release before thread-safe sql.DB operations
 
-	if connSettings.MaxOpenConns > 0 {
-		db.SetMaxOpenConns(connSettings.MaxOpenConns)
+	compatLogger := logcompat.New(p.logger.Base())
+	maxOpen, maxIdle = p.clampPoolSettings(maxOpen, maxIdle, tenantID, compatLogger)
+
+	compatLogger.Infof("applying connection settings for tenant %s module %s: maxOpenConns=%d, maxIdleConns=%d",
+		tenantID, p.module, maxOpen, maxIdle)
+
+	if maxOpen > 0 {
+		db.SetMaxOpenConns(maxOpen)
 	}
 
-	if connSettings.MaxIdleConns > 0 {
-		db.SetMaxIdleConns(connSettings.MaxIdleConns)
+	if maxIdle > 0 {
+		db.SetMaxIdleConns(maxIdle)
 	}
 }
 
