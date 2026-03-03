@@ -395,16 +395,16 @@ func TestFindLRUEvictionCandidate_TableDriven(t *testing.T) {
 			expectedOK:  false,
 		},
 		{
-			name:            "boundary: idle duration exactly at timeout is not evicted",
+			name:            "boundary: idle duration well under timeout is not evicted",
 			connectionCount: 1,
 			maxConnections:  1,
 			lastAccessed: map[string]time.Time{
-				// The entry is exactly idleTimeout old. Since the check is
-				// `idleDuration < idleTimeout` (strictly less-than), an entry
-				// whose idle time equals the timeout IS eligible. However, due
-				// to clock drift between time.Now() in the test and in the
-				// function, we test slightly under to prove "not idle" behavior.
-				"t1": now.Add(-idleTimeout + time.Millisecond),
+				// The eviction check uses `idleDuration < idleTimeout` (strictly
+				// less-than), so entries whose idle time equals the timeout ARE
+				// eligible. We place the entry comfortably under the threshold
+				// (1 second buffer) to avoid clock drift between the test's
+				// `now` and FindLRUEvictionCandidate's internal time.Now().
+				"t1": now.Add(-idleTimeout + time.Second),
 			},
 			idleTimeout: idleTimeout,
 			expectedID:  "",
