@@ -237,11 +237,7 @@ func WithMaxTenantPools(maxSize int) Option {
 // Default: 30 seconds (defaultSettingsCheckInterval).
 func WithSettingsCheckInterval(d time.Duration) Option {
 	return func(p *Manager) {
-		if d <= 0 {
-			p.settingsCheckInterval = 0
-		} else {
-			p.settingsCheckInterval = d
-		}
+		p.settingsCheckInterval = max(d, 0)
 	}
 }
 
@@ -305,6 +301,7 @@ func (p *Manager) GetConnection(ctx context.Context, tenantID string) (*Postgres
 			pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
 
 			pingErr := (*conn.ConnectionDB).PingContext(pingCtx)
+
 			cancel() // Release timer immediately; we no longer need the ping context.
 
 			if pingErr != nil {
@@ -346,13 +343,9 @@ func (p *Manager) GetConnection(ctx context.Context, tenantID string) (*Postgres
 		p.mu.Unlock()
 
 		if shouldRevalidate {
-			p.revalidateWG.Add(1)
-
-			go func() {
-				defer p.revalidateWG.Done()
-
+			p.revalidateWG.Go(func() { //#nosec G118 -- intentional: revalidatePoolSettings creates its own timeout context; must not use request-scoped context as this outlives the request
 				p.revalidatePoolSettings(tenantID)
-			}() //#nosec G118 -- intentional: revalidatePoolSettings creates its own timeout context; must not use request-scoped context as this outlives the request
+			})
 		}
 
 		return conn, nil
@@ -887,6 +880,7 @@ func (p *Manager) ApplyConnectionSettings(tenantID string, config *core.TenantCo
 	maxOpen := connSettings.MaxOpenConns
 	maxIdle := connSettings.MaxIdleConns
 	db := *conn.ConnectionDB
+
 	p.mu.RUnlock() // Release before thread-safe sql.DB operations
 
 	compatLogger := logcompat.New(p.logger.Base())
