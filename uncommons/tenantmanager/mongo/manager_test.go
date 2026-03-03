@@ -466,6 +466,53 @@ func TestManager_ApplyConnectionSettings(t *testing.T) {
 }
 
 func TestBuildMongoURI(t *testing.T) {
+	t.Run("rejects empty host when URI not provided", func(t *testing.T) {
+		cfg := &core.MongoDBConfig{
+			Port:     27017,
+			Database: "testdb",
+		}
+
+		_, err := buildMongoURI(cfg, nil)
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "mongo host is required")
+	})
+
+	t.Run("rejects zero port when URI not provided", func(t *testing.T) {
+		cfg := &core.MongoDBConfig{
+			Host:     "localhost",
+			Database: "testdb",
+		}
+
+		_, err := buildMongoURI(cfg, nil)
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "mongo port is required")
+	})
+
+	t.Run("rejects both empty host and zero port when URI not provided", func(t *testing.T) {
+		cfg := &core.MongoDBConfig{
+			Database: "testdb",
+		}
+
+		_, err := buildMongoURI(cfg, nil)
+
+		require.Error(t, err)
+		// Host is checked first
+		assert.Contains(t, err.Error(), "mongo host is required")
+	})
+
+	t.Run("allows empty host and port when URI is provided", func(t *testing.T) {
+		cfg := &core.MongoDBConfig{
+			URI: "mongodb://custom-uri",
+		}
+
+		uri, err := buildMongoURI(cfg, nil)
+
+		require.NoError(t, err)
+		assert.Equal(t, "mongodb://custom-uri", uri)
+	})
+
 	t.Run("returns URI when provided", func(t *testing.T) {
 		cfg := &core.MongoDBConfig{
 			URI: "mongodb://custom-uri",
