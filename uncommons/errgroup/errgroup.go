@@ -58,10 +58,7 @@ func WithContext(ctx context.Context) (*Group, context.Context) {
 // by a goroutine is recorded and triggers cancellation of the group context.
 // Callers must not mutate shared state without synchronization.
 func (grp *Group) Go(fn func() error) {
-	grp.wg.Add(1)
-
-	go func() {
-		defer grp.wg.Done()
+	grp.wg.Go(func() {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				runtime.HandlePanicValue(grp.effectiveCtx(), grp.logger, recovered, "errgroup", "group.Go")
@@ -83,7 +80,7 @@ func (grp *Group) Go(fn func() error) {
 				}
 			})
 		}
-	}()
+	})
 }
 
 // Wait blocks until all goroutines in the Group have completed.
