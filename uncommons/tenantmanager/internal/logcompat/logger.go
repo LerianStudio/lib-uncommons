@@ -27,6 +27,10 @@ func (l *Logger) WithFields(kv ...any) *Logger {
 	return &Logger{base: l.base.With(toFields(kv...)...)}
 }
 
+func (l *Logger) enabled(level liblog.Level) bool {
+	return l != nil && l.base.Enabled(level)
+}
+
 func (l *Logger) log(ctx context.Context, level liblog.Level, msg string) {
 	if l == nil {
 		return
@@ -40,48 +44,117 @@ func (l *Logger) log(ctx context.Context, level liblog.Level, msg string) {
 }
 
 func (l *Logger) InfoCtx(ctx context.Context, args ...any) {
+	if !l.enabled(liblog.LevelInfo) {
+		return
+	}
+
 	l.log(ctx, liblog.LevelInfo, fmt.Sprint(args...))
 }
+
 func (l *Logger) WarnCtx(ctx context.Context, args ...any) {
+	if !l.enabled(liblog.LevelWarn) {
+		return
+	}
+
 	l.log(ctx, liblog.LevelWarn, fmt.Sprint(args...))
 }
+
 func (l *Logger) ErrorCtx(ctx context.Context, args ...any) {
+	if !l.enabled(liblog.LevelError) {
+		return
+	}
+
 	l.log(ctx, liblog.LevelError, fmt.Sprint(args...))
 }
+
 func (l *Logger) InfofCtx(ctx context.Context, f string, args ...any) {
+	if !l.enabled(liblog.LevelInfo) {
+		return
+	}
+
 	l.log(ctx, liblog.LevelInfo, fmt.Sprintf(f, args...))
 }
+
 func (l *Logger) WarnfCtx(ctx context.Context, f string, args ...any) {
+	if !l.enabled(liblog.LevelWarn) {
+		return
+	}
+
 	l.log(ctx, liblog.LevelWarn, fmt.Sprintf(f, args...))
 }
+
 func (l *Logger) ErrorfCtx(ctx context.Context, f string, args ...any) {
+	if !l.enabled(liblog.LevelError) {
+		return
+	}
+
 	l.log(ctx, liblog.LevelError, fmt.Sprintf(f, args...))
 }
 
 func (l *Logger) Info(args ...any) {
+	if !l.enabled(liblog.LevelInfo) {
+		return
+	}
+
 	l.log(context.Background(), liblog.LevelInfo, fmt.Sprint(args...))
 }
+
 func (l *Logger) Warn(args ...any) {
+	if !l.enabled(liblog.LevelWarn) {
+		return
+	}
+
 	l.log(context.Background(), liblog.LevelWarn, fmt.Sprint(args...))
 }
+
 func (l *Logger) Error(args ...any) {
+	if !l.enabled(liblog.LevelError) {
+		return
+	}
+
 	l.log(context.Background(), liblog.LevelError, fmt.Sprint(args...))
 }
+
 func (l *Logger) Debug(args ...any) {
+	if !l.enabled(liblog.LevelDebug) {
+		return
+	}
+
 	l.log(context.Background(), liblog.LevelDebug, fmt.Sprint(args...))
 }
+
 func (l *Logger) Infof(f string, args ...any) {
+	if !l.enabled(liblog.LevelInfo) {
+		return
+	}
+
 	l.log(context.Background(), liblog.LevelInfo, fmt.Sprintf(f, args...))
 }
+
 func (l *Logger) Warnf(f string, args ...any) {
+	if !l.enabled(liblog.LevelWarn) {
+		return
+	}
+
 	l.log(context.Background(), liblog.LevelWarn, fmt.Sprintf(f, args...))
 }
+
 func (l *Logger) Errorf(f string, args ...any) {
+	if !l.enabled(liblog.LevelError) {
+		return
+	}
+
 	l.log(context.Background(), liblog.LevelError, fmt.Sprintf(f, args...))
 }
+
 func (l *Logger) Debugf(f string, args ...any) {
+	if !l.enabled(liblog.LevelDebug) {
+		return
+	}
+
 	l.log(context.Background(), liblog.LevelDebug, fmt.Sprintf(f, args...))
 }
+
 func (l *Logger) Sync() error {
 	if l == nil || l.base == nil {
 		return nil

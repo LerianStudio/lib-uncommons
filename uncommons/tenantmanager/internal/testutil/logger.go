@@ -15,19 +15,10 @@ import (
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 )
 
-// MockLogger is a no-op implementation of log.Logger for unit tests.
-// It discards all log output, allowing tests to focus on business logic.
-type MockLogger struct{}
-
-func (m *MockLogger) Log(_ context.Context, _ log.Level, _ string, _ ...log.Field) {}
-func (m *MockLogger) With(_ ...log.Field) log.Logger                               { return m }
-func (m *MockLogger) WithGroup(_ string) log.Logger                                { return m }
-func (m *MockLogger) Enabled(_ log.Level) bool                                     { return true }
-func (m *MockLogger) Sync(_ context.Context) error                                 { return nil }
-
-// NewMockLogger returns a new no-op MockLogger that satisfies log.Logger.
+// NewMockLogger returns a no-op logger that satisfies log.Logger.
+// It delegates to log.NewNop() to avoid duplicating the standard no-op implementation.
 func NewMockLogger() log.Logger {
-	return &MockLogger{}
+	return log.NewNop()
 }
 
 // CapturingLogger implements log.Logger and captures log messages for assertion.
