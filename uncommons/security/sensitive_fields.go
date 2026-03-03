@@ -3,6 +3,7 @@ package security
 import (
 	"maps"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"unicode"
@@ -196,10 +197,8 @@ func IsSensitiveField(fieldName string) bool {
 
 	for _, sensitive := range defaultSensitiveFields {
 		if shortSensitiveTokens[sensitive] {
-			for _, token := range tokens {
-				if token == sensitive {
-					return true
-				}
+			if slices.Contains(tokens, sensitive) {
+				return true
 			}
 		} else {
 			if matchesWordBoundary(normalized, sensitive) {

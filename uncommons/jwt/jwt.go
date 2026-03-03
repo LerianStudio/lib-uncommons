@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"slices"
 	"strings"
 	"time"
 )
@@ -226,13 +227,7 @@ func Sign(claims MapClaims, algorithm string, secret []byte) (string, error) {
 }
 
 func isAllowed(alg string, allowed []string) bool {
-	for _, a := range allowed {
-		if a == alg {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(allowed, alg)
 }
 
 func hashForAlgorithm(alg string) (func() hash.Hash, error) {
