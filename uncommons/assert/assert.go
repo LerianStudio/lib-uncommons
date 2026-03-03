@@ -300,7 +300,7 @@ func formatLogMessage(msg, details string, stack []byte) string {
 
 	if len(stack) > 0 {
 		sb.WriteString("\nstack trace:\n")
-		sb.WriteString(string(stack))
+		sb.Write(stack)
 	}
 
 	return sb.String()

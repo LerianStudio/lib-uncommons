@@ -62,7 +62,7 @@ func CamelToSnakeCase(str string) string {
 
 			buffer.WriteRune(unicode.ToLower(character))
 		} else {
-			buffer.WriteString(string(character))
+			buffer.WriteRune(character)
 		}
 	}
 
