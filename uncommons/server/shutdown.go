@@ -268,7 +268,7 @@ func (sm *ServerManager) startServers() {
 			func(_ context.Context) {
 				sm.logger.Log(context.Background(), log.LevelInfo, "starting gRPC server", log.String("address", sm.grpcAddress))
 
-				listener, err := net.Listen("tcp", sm.grpcAddress)
+				listener, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", sm.grpcAddress)
 				if err != nil {
 					sm.logger.Log(context.Background(), log.LevelError, "failed to listen on gRPC address", log.Err(err))
 
