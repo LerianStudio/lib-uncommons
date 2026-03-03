@@ -131,7 +131,7 @@ type Auth struct {
 
 // StaticPasswordAuth authenticates using a static password.
 type StaticPasswordAuth struct {
-	Password string
+	Password string // #nosec G117 -- field is redacted via String() and GoString() methods
 }
 
 // String returns a redacted representation to prevent accidental credential logging.

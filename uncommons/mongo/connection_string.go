@@ -24,7 +24,7 @@ var (
 type URIConfig struct {
 	Scheme   string
 	Username string
-	Password string
+	Password string // #nosec G117 -- builder struct for one-time URI construction; password encoded via url.UserPassword()
 	Host     string
 	Port     string
 	Database string

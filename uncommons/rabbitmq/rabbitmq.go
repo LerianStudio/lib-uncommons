@@ -582,6 +582,7 @@ func (rc *RabbitMQConnection) healthCheck(
 		client = &http.Client{Timeout: defaultRabbitMQHealthCheckTimeout}
 	}
 
+	// #nosec G704 -- URL is validated via validateHealthCheckURLWithConfig before request; host allowlist and IP safety checks prevent SSRF
 	resp, err := client.Do(req)
 	if err != nil {
 		logger.Log(context.Background(), log.LevelError, "failed to execute rabbitmq health check request", log.Err(err))

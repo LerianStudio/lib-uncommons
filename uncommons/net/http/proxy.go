@@ -122,6 +122,7 @@ func ServeReverseProxy(target string, policy ReverseProxyPolicy, res http.Respon
 	req.Header.Set(constant.HeaderForwardedHost, req.Host)
 	req.Host = targetURL.Host
 
+	// #nosec G704 -- target validated via validateProxyTarget with scheme/host allowlists and IP safety; ssrfSafeTransport re-validates resolved IPs at connection time
 	proxy.ServeHTTP(res, req)
 
 	return nil

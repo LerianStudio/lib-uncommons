@@ -115,7 +115,7 @@ func (resolver *SchemaResolver) ApplyTenant(ctx context.Context, tx *sql.Tx, ten
 		return errors.New("invalid tenant id format")
 	}
 
-	query := "SET LOCAL search_path TO " + quoteIdentifier(tenantID) + ", public"
+	query := "SET LOCAL search_path TO " + quoteIdentifier(tenantID) + ", public" // #nosec G202 -- tenantID is UUID-validated; quoteIdentifier escapes the identifier
 	if _, err := tx.ExecContext(ctx, query); err != nil {
 		return fmt.Errorf("set search_path: %w", err)
 	}

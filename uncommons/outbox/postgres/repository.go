@@ -180,7 +180,7 @@ func (repo *Repository) GetByID(ctx context.Context, id uuid.UUID) (*outbox.Outb
 
 	result, err := withTenantTxOrExisting(repo, ctx, nil, func(tx *sql.Tx) (*outbox.OutboxEvent, error) {
 		table := quoteIdentifierPath(repo.tableName)
-		query := "SELECT " + outboxColumns + " FROM " + table + " WHERE id = $1"
+		query := "SELECT " + outboxColumns + " FROM " + table + " WHERE id = $1" // #nosec G202 -- table name validated at construction via validateIdentifierPath; quoteIdentifierPath escapes identifiers
 
 		tenantID, tenantErr := repo.tenantIDFromContext(ctx)
 		if tenantErr != nil {
@@ -254,7 +254,7 @@ func (repo *Repository) create(
 	result, err := withTenantTxOrExisting(repo, ctx, tx, func(execTx *sql.Tx) (*outbox.OutboxEvent, error) {
 		createValues := normalizedCreateValues(event, time.Now().UTC())
 		table := quoteIdentifierPath(repo.tableName)
-		query := "INSERT INTO " + table +
+		query := "INSERT INTO " + table + // #nosec G202 -- table name validated at construction; quoteIdentifierPath escapes identifiers
 			" (id, event_type, aggregate_id, payload, status, attempts, published_at, last_error, created_at, updated_at"
 
 		args := []any{
@@ -486,7 +486,7 @@ func (repo *Repository) MarkPublished(ctx context.Context, id uuid.UUID, publish
 
 	_, err := withTenantTxOrExisting(repo, ctx, nil, func(tx *sql.Tx) (struct{}, error) {
 		table := quoteIdentifierPath(repo.tableName)
-		query := "UPDATE " + table + " SET status = $1::outbox_event_status, published_at = $2, updated_at = $3 " +
+		query := "UPDATE " + table + " SET status = $1::outbox_event_status, published_at = $2, updated_at = $3 " + // #nosec G202 -- table name validated at construction; quoteIdentifierPath escapes identifiers
 			"WHERE id = $4 AND status = $5::outbox_event_status"
 
 		tenantID, tenantErr := repo.tenantIDFromContext(ctx)
@@ -562,7 +562,7 @@ func (repo *Repository) MarkFailed(ctx context.Context, id uuid.UUID, errMsg str
 
 	_, err := withTenantTxOrExisting(repo, ctx, nil, func(tx *sql.Tx) (struct{}, error) {
 		table := quoteIdentifierPath(repo.tableName)
-		query := "UPDATE " + table + " SET " +
+		query := "UPDATE " + table + " SET " + // #nosec G202 -- table name validated at construction; quoteIdentifierPath escapes identifiers
 			"status = CASE WHEN attempts + 1 >= $1 THEN $2 ELSE $3 END::outbox_event_status, " +
 			"attempts = attempts + 1, " +
 			"last_error = CASE WHEN attempts + 1 >= $1 THEN $4 ELSE $5 END, " +
@@ -823,7 +823,7 @@ func (repo *Repository) MarkInvalid(ctx context.Context, id uuid.UUID, errMsg st
 
 	_, err := withTenantTxOrExisting(repo, ctx, nil, func(tx *sql.Tx) (struct{}, error) {
 		table := quoteIdentifierPath(repo.tableName)
-		query := "UPDATE " + table + " SET status = $1::outbox_event_status, last_error = $2, updated_at = $3 " +
+		query := "UPDATE " + table + " SET status = $1::outbox_event_status, last_error = $2, updated_at = $3 " + // #nosec G202 -- table name validated at construction; quoteIdentifierPath escapes identifiers
 			"WHERE id = $4 AND status = $5::outbox_event_status"
 
 		tenantID, tenantErr := repo.tenantIDFromContext(ctx)
@@ -1025,7 +1025,7 @@ func (repo *Repository) markEventsWithStatus(
 	}
 
 	table := quoteIdentifierPath(repo.tableName)
-	query := "UPDATE " + table +
+	query := "UPDATE " + table + // #nosec G202 -- table name validated at construction; quoteIdentifierPath escapes identifiers
 		" SET status = $1::outbox_event_status, updated_at = $2 WHERE id = ANY($3::uuid[]) AND status = $4::outbox_event_status"
 
 	filter, filterArgs, filterErr := repo.tenantFilterClause(5, tenantID)
@@ -1069,7 +1069,7 @@ func (repo *Repository) markStuckEventsReprocessing(
 	// transaction commits. Keeping PROCESSING narrows duplicate publication windows
 	// to later stuck-recovery cycles.
 	table := quoteIdentifierPath(repo.tableName)
-	query := "UPDATE " + table +
+	query := "UPDATE " + table + // #nosec G202 -- table name validated at construction; quoteIdentifierPath escapes identifiers
 		" SET status = $1::outbox_event_status, attempts = attempts + 1, updated_at = $2 " +
 		"WHERE id = ANY($3::uuid[]) AND status = $4::outbox_event_status"
 
@@ -1109,7 +1109,7 @@ func (repo *Repository) markStuckEventsInvalid(
 	}
 
 	table := quoteIdentifierPath(repo.tableName)
-	query := "UPDATE " + table +
+	query := "UPDATE " + table + // #nosec G202 -- table name validated at construction; quoteIdentifierPath escapes identifiers
 		" SET status = $1::outbox_event_status, attempts = attempts + 1, " +
 		"last_error = $2, updated_at = $3 WHERE id = ANY($4::uuid[]) AND status = $5::outbox_event_status"
 
