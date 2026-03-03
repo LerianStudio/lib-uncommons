@@ -36,7 +36,7 @@ const (
 // Schedule represents a parsed cron schedule capable of computing
 // the next execution time after a given reference time.
 type Schedule interface {
-	Next(time.Time) (time.Time, error)
+	Next(t time.Time) (time.Time, error)
 }
 
 type schedule struct {
@@ -111,7 +111,7 @@ func (sched *schedule) Next(from time.Time) (time.Time, error) {
 	candidate = time.Date(candidate.Year(), candidate.Month(), candidate.Day(), candidate.Hour(), candidate.Minute(), 0, 0, time.UTC)
 
 	const maxIterations = 366 * 24 * 60
-	for i := 0; i < maxIterations; i++ {
+	for range maxIterations {
 		if !slices.Contains(sched.months, int(candidate.Month())) {
 			candidate = time.Date(candidate.Year(), candidate.Month()+1, 1, 0, 0, 0, 0, time.UTC)
 
@@ -147,8 +147,7 @@ func (sched *schedule) Next(from time.Time) (time.Time, error) {
 func parseField(field string, minVal, maxVal int) ([]int, error) {
 	var result []int
 
-	parts := strings.Split(field, ",")
-	for _, part := range parts {
+	for part := range strings.SplitSeq(field, ",") {
 		vals, err := parsePart(part, minVal, maxVal)
 		if err != nil {
 			return nil, err

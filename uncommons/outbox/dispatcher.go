@@ -852,7 +852,7 @@ func (dispatcher *Dispatcher) publishEventWithRetry(ctx context.Context, event *
 
 	var lastErr error
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := range maxAttempts {
 		err := dispatcher.publishEvent(ctx, event)
 		if err == nil {
 			return nil

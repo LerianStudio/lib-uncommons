@@ -109,7 +109,7 @@ func SetConfigFromEnvVars(s any) error {
 	}
 
 	e := t.Elem()
-	for i := 0; i < e.NumField(); i++ {
+	for i := range e.NumField() {
 		f := e.Field(i)
 		if tag, ok := f.Tag.Lookup("env"); ok {
 			values := strings.Split(tag, ",")
