@@ -3,10 +3,10 @@ package middleware
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 
 	libCommons "github.com/LerianStudio/lib-uncommons/v2/uncommons"
+	liblog "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
 	libHTTP "github.com/LerianStudio/lib-uncommons/v2/uncommons/net/http"
 	libOpentelemetry "github.com/LerianStudio/lib-uncommons/v2/uncommons/opentelemetry"
 	"github.com/LerianStudio/lib-uncommons/v2/uncommons/tenantmanager/core"
@@ -128,7 +128,7 @@ func (m *TenantMiddleware) WithTenantDB(c *fiber.Ctx) error {
 	// hasUpstreamAuthAssertion() enforces that contract and fails closed when missing.
 	token, _, err := new(jwt.Parser).ParseUnverified(accessToken, jwt.MapClaims{})
 	if err != nil {
-		logger.ErrorCtx(ctx, fmt.Sprintf("failed to parse JWT token: %v", err))
+		logger.Base().Log(ctx, liblog.LevelError, "failed to parse JWT token", liblog.Err(err))
 		libOpentelemetry.HandleSpanBusinessErrorEvent(span, "failed to parse token", err)
 
 		return unauthorizedError(c, "INVALID_TOKEN", "Failed to parse authorization token")
@@ -153,7 +153,17 @@ func (m *TenantMiddleware) WithTenantDB(c *fiber.Ctx) error {
 		return unauthorizedError(c, "MISSING_TENANT", "tenantId is required in JWT token")
 	}
 
-	logger.InfofCtx(ctx, "tenant context resolved: tenantID=%s", tenantID)
+	if !core.IsValidTenantID(tenantID) {
+		logger.Base().Log(ctx, liblog.LevelError, "invalid tenantId format in JWT",
+			liblog.String("tenant_id", tenantID))
+		libOpentelemetry.HandleSpanBusinessErrorEvent(span, "invalid tenantId format",
+			core.ErrInvalidTenantClaims)
+
+		return unauthorizedError(c, "INVALID_TENANT", "tenantId has invalid format")
+	}
+
+	logger.Base().Log(ctx, liblog.LevelInfo, "tenant context resolved",
+		liblog.String("tenant_id", tenantID))
 
 	// Store tenant ID in context
 	ctx = core.ContextWithTenantID(ctx, tenantID)
@@ -164,14 +174,16 @@ func (m *TenantMiddleware) WithTenantDB(c *fiber.Ctx) error {
 		if err != nil {
 			var suspErr *core.TenantSuspendedError
 			if errors.As(err, &suspErr) {
-				logger.WarnfCtx(ctx, "tenant service is %s: tenantID=%s", suspErr.Status, tenantID)
+				logger.Base().Log(ctx, liblog.LevelWarn, "tenant service suspended",
+					liblog.String("status", suspErr.Status),
+					liblog.String("tenant_id", tenantID))
 				libOpentelemetry.HandleSpanBusinessErrorEvent(span, "tenant service suspended", err)
 
 				return forbiddenError(c, "0131", "Service Suspended",
-					fmt.Sprintf("tenant service is %s", suspErr.Status))
+					"tenant service is "+suspErr.Status)
 			}
 
-			logger.ErrorCtx(ctx, fmt.Sprintf("failed to get tenant PostgreSQL connection: %v", err))
+			logger.Base().Log(ctx, liblog.LevelError, "failed to get tenant PostgreSQL connection", liblog.Err(err))
 			libOpentelemetry.HandleSpanError(span, "failed to get tenant PostgreSQL connection", err)
 
 			return internalServerError(c, "TENANT_DB_ERROR", "Failed to resolve tenant database")
@@ -180,7 +192,7 @@ func (m *TenantMiddleware) WithTenantDB(c *fiber.Ctx) error {
 		// Get the database connection from PostgresConnection
 		db, err := conn.GetDB()
 		if err != nil {
-			logger.ErrorCtx(ctx, fmt.Sprintf("failed to get database from PostgreSQL connection: %v", err))
+			logger.Base().Log(ctx, liblog.LevelError, "failed to get database from PostgreSQL connection", liblog.Err(err))
 			libOpentelemetry.HandleSpanError(span, "failed to get database from PostgreSQL connection", err)
 
 			return internalServerError(c, "TENANT_DB_ERROR", "Failed to get tenant database connection")
@@ -196,14 +208,16 @@ func (m *TenantMiddleware) WithTenantDB(c *fiber.Ctx) error {
 		if err != nil {
 			var suspErr *core.TenantSuspendedError
 			if errors.As(err, &suspErr) {
-				logger.WarnfCtx(ctx, "tenant service is %s: tenantID=%s", suspErr.Status, tenantID)
+				logger.Base().Log(ctx, liblog.LevelWarn, "tenant service suspended",
+					liblog.String("status", suspErr.Status),
+					liblog.String("tenant_id", tenantID))
 				libOpentelemetry.HandleSpanBusinessErrorEvent(span, "tenant service suspended", err)
 
 				return forbiddenError(c, "0131", "Service Suspended",
-					fmt.Sprintf("tenant service is %s", suspErr.Status))
+					"tenant service is "+suspErr.Status)
 			}
 
-			logger.ErrorCtx(ctx, fmt.Sprintf("failed to get tenant MongoDB connection: %v", err))
+			logger.Base().Log(ctx, liblog.LevelError, "failed to get tenant MongoDB connection", liblog.Err(err))
 			libOpentelemetry.HandleSpanError(span, "failed to get tenant MongoDB connection", err)
 
 			return internalServerError(c, "TENANT_MONGO_ERROR", "Failed to resolve tenant MongoDB database")
@@ -218,6 +232,9 @@ func (m *TenantMiddleware) WithTenantDB(c *fiber.Ctx) error {
 	return c.Next()
 }
 
+// hasUpstreamAuthAssertion verifies that upstream auth middleware has run
+// by checking the server-side local value. HTTP headers are NOT checked
+// as they are spoofable by clients.
 func hasUpstreamAuthAssertion(c *fiber.Ctx) bool {
 	if c == nil {
 		return false
@@ -227,7 +244,7 @@ func hasUpstreamAuthAssertion(c *fiber.Ctx) bool {
 		return true
 	}
 
-	return c.Get("X-User-ID") != ""
+	return false
 }
 
 // forbiddenError sends an HTTP 403 Forbidden response.

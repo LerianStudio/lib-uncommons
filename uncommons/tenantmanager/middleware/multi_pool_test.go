@@ -24,8 +24,10 @@ import (
 
 // newMultiPoolTestManagers creates postgres and mongo Managers backed by a test
 // client that has a non-nil client (so IsMultiTenant() returns true).
-func newMultiPoolTestManagers(url string) (*tmpostgres.Manager, *tmmongo.Manager) {
-	c, _ := client.NewClient(url, nil)
+func newMultiPoolTestManagers(t testing.TB, url string) (*tmpostgres.Manager, *tmmongo.Manager) {
+	t.Helper()
+	c, err := client.NewClient(url, nil)
+	require.NoError(t, err)
 	return tmpostgres.NewManager(c, "ledger"), tmmongo.NewManager(c, "ledger")
 }
 
@@ -89,7 +91,7 @@ func TestNewMultiPoolMiddleware(t *testing.T) {
 	t.Run("creates enabled middleware when route has multi-tenant PG pool", func(t *testing.T) {
 		t.Parallel()
 
-		pgPool, mongoPool := newMultiPoolTestManagers("http://localhost:8080")
+		pgPool, mongoPool := newMultiPoolTestManagers(t, "http://localhost:8080")
 
 		mid := NewMultiPoolMiddleware(
 			WithRoute([]string{"/v1/transactions"}, "transaction", pgPool, mongoPool),
@@ -105,7 +107,7 @@ func TestNewMultiPoolMiddleware(t *testing.T) {
 	t.Run("creates enabled middleware when default route has multi-tenant PG pool", func(t *testing.T) {
 		t.Parallel()
 
-		pgPool, mongoPool := newMultiPoolTestManagers("http://localhost:8080")
+		pgPool, mongoPool := newMultiPoolTestManagers(t, "http://localhost:8080")
 
 		mid := NewMultiPoolMiddleware(
 			WithDefaultRoute("ledger", pgPool, mongoPool),
@@ -134,7 +136,7 @@ func TestNewMultiPoolMiddleware(t *testing.T) {
 	t.Run("applies all options correctly", func(t *testing.T) {
 		t.Parallel()
 
-		pgPool, mongoPool := newMultiPoolTestManagers("http://localhost:8080")
+		pgPool, mongoPool := newMultiPoolTestManagers(t, "http://localhost:8080")
 		trigger := &mockConsumerTrigger{}
 		mapper := func(_ *fiber.Ctx, _ error, _ string) error { return nil }
 
@@ -161,7 +163,7 @@ func TestNewMultiPoolMiddleware(t *testing.T) {
 func TestMultiPoolMiddleware_matchRoute(t *testing.T) {
 	t.Parallel()
 
-	pgPool, mongoPool := newMultiPoolTestManagers("http://localhost:8080")
+	pgPool, mongoPool := newMultiPoolTestManagers(t, "http://localhost:8080")
 
 	mid := NewMultiPoolMiddleware(
 		WithRoute([]string{"/v1/transactions", "/v1/tx"}, "transaction", pgPool, mongoPool),
@@ -221,7 +223,7 @@ func TestMultiPoolMiddleware_matchRoute(t *testing.T) {
 func TestMultiPoolMiddleware_matchRoute_NoDefault(t *testing.T) {
 	t.Parallel()
 
-	pgPool, _ := newMultiPoolTestManagers("http://localhost:8080")
+	pgPool, _ := newMultiPoolTestManagers(t, "http://localhost:8080")
 
 	mid := NewMultiPoolMiddleware(
 		WithRoute([]string{"/v1/transactions"}, "transaction", pgPool, nil),
@@ -297,7 +299,7 @@ func TestMultiPoolMiddleware_Enabled(t *testing.T) {
 	t.Run("returns true when route has multi-tenant pool", func(t *testing.T) {
 		t.Parallel()
 
-		pgPool, _ := newMultiPoolTestManagers("http://localhost:8080")
+		pgPool, _ := newMultiPoolTestManagers(t, "http://localhost:8080")
 
 		mid := NewMultiPoolMiddleware(
 			WithRoute([]string{"/v1/test"}, "test", pgPool, nil),
@@ -322,7 +324,7 @@ func TestMultiPoolMiddleware_Enabled(t *testing.T) {
 		t.Parallel()
 
 		singlePG, _ := newSingleTenantManagers()
-		multiPG, _ := newMultiPoolTestManagers("http://localhost:8080")
+		multiPG, _ := newMultiPoolTestManagers(t, "http://localhost:8080")
 
 		mid := NewMultiPoolMiddleware(
 			WithRoute([]string{"/v1/test"}, "test", singlePG, nil),
@@ -336,7 +338,7 @@ func TestMultiPoolMiddleware_Enabled(t *testing.T) {
 func TestMultiPoolMiddleware_WithTenantDB_PublicPath(t *testing.T) {
 	t.Parallel()
 
-	pgPool, _ := newMultiPoolTestManagers("http://localhost:8080")
+	pgPool, _ := newMultiPoolTestManagers(t, "http://localhost:8080")
 
 	mid := NewMultiPoolMiddleware(
 		WithRoute([]string{"/v1/transactions"}, "transaction", pgPool, nil),
@@ -366,7 +368,7 @@ func TestMultiPoolMiddleware_WithTenantDB_PublicPath(t *testing.T) {
 func TestMultiPoolMiddleware_WithTenantDB_NoMatchingRoute(t *testing.T) {
 	t.Parallel()
 
-	pgPool, _ := newMultiPoolTestManagers("http://localhost:8080")
+	pgPool, _ := newMultiPoolTestManagers(t, "http://localhost:8080")
 
 	// No default route, so unmatched paths pass through
 	mid := NewMultiPoolMiddleware(
@@ -425,7 +427,7 @@ func TestMultiPoolMiddleware_WithTenantDB_SingleTenantBypass(t *testing.T) {
 func TestMultiPoolMiddleware_WithTenantDB_MissingToken(t *testing.T) {
 	t.Parallel()
 
-	pgPool, _ := newMultiPoolTestManagers("http://localhost:8080")
+	pgPool, _ := newMultiPoolTestManagers(t, "http://localhost:8080")
 
 	mid := NewMultiPoolMiddleware(
 		WithRoute([]string{"/v1/transactions"}, "transaction", pgPool, nil),
@@ -455,13 +457,14 @@ func TestMultiPoolMiddleware_WithTenantDB_MissingToken(t *testing.T) {
 func TestMultiPoolMiddleware_WithTenantDB_InvalidToken(t *testing.T) {
 	t.Parallel()
 
-	pgPool, _ := newMultiPoolTestManagers("http://localhost:8080")
+	pgPool, _ := newMultiPoolTestManagers(t, "http://localhost:8080")
 
 	mid := NewMultiPoolMiddleware(
 		WithRoute([]string{"/v1/transactions"}, "transaction", pgPool, nil),
 	)
 
 	app := fiber.New()
+	app.Use(simulateAuthMiddleware("user-123"))
 	app.Use(mid.WithTenantDB)
 	app.Get("/v1/transactions", func(c *fiber.Ctx) error {
 		return c.SendString("ok")
@@ -469,7 +472,6 @@ func TestMultiPoolMiddleware_WithTenantDB_InvalidToken(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/transactions", nil)
 	req.Header.Set("Authorization", "Bearer not-a-valid-jwt")
-	req.Header.Set("X-User-ID", "user-123")
 
 	resp, err := app.Test(req, -1)
 	require.NoError(t, err)
@@ -487,18 +489,19 @@ func TestMultiPoolMiddleware_WithTenantDB_InvalidToken(t *testing.T) {
 func TestMultiPoolMiddleware_WithTenantDB_MissingTenantID(t *testing.T) {
 	t.Parallel()
 
-	pgPool, _ := newMultiPoolTestManagers("http://localhost:8080")
+	pgPool, _ := newMultiPoolTestManagers(t, "http://localhost:8080")
 
 	mid := NewMultiPoolMiddleware(
 		WithRoute([]string{"/v1/transactions"}, "transaction", pgPool, nil),
 	)
 
-	token := buildTestJWT(map[string]any{
+	token := buildTestJWT(t, map[string]any{
 		"sub":   "user-123",
 		"email": "test@example.com",
 	})
 
 	app := fiber.New()
+	app.Use(simulateAuthMiddleware("user-123"))
 	app.Use(mid.WithTenantDB)
 	app.Get("/v1/transactions", func(c *fiber.Ctx) error {
 		return c.SendString("ok")
@@ -506,7 +509,6 @@ func TestMultiPoolMiddleware_WithTenantDB_MissingTenantID(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/transactions", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("X-User-ID", "user-123")
 
 	resp, err := app.Test(req, -1)
 	require.NoError(t, err)
@@ -524,7 +526,7 @@ func TestMultiPoolMiddleware_WithTenantDB_MissingTenantID(t *testing.T) {
 func TestMultiPoolMiddleware_WithTenantDB_ErrorMapperDelegation(t *testing.T) {
 	t.Parallel()
 
-	pgPool, _ := newMultiPoolTestManagers("http://localhost:8080")
+	pgPool, _ := newMultiPoolTestManagers(t, "http://localhost:8080")
 
 	customMapperCalled := false
 	customMapper := func(c *fiber.Ctx, _ error, _ string) error {
@@ -577,7 +579,7 @@ func TestMultiPoolMiddleware_WithTenantDB_ConsumerTrigger(t *testing.T) {
 	}))
 	defer server.Close()
 
-	pgPool, _ := newMultiPoolTestManagers(server.URL)
+	pgPool, _ := newMultiPoolTestManagers(t, server.URL)
 	trigger := &mockConsumerTrigger{}
 
 	mid := NewMultiPoolMiddleware(
@@ -585,12 +587,13 @@ func TestMultiPoolMiddleware_WithTenantDB_ConsumerTrigger(t *testing.T) {
 		WithConsumerTrigger(trigger),
 	)
 
-	token := buildTestJWT(map[string]any{
+	token := buildTestJWT(t, map[string]any{
 		"sub":      "user-123",
 		"tenantId": "tenant-abc",
 	})
 
 	app := fiber.New()
+	app.Use(simulateAuthMiddleware("user-123"))
 	app.Use(mid.WithTenantDB)
 	app.Get("/v1/transactions", func(c *fiber.Ctx) error {
 		return c.SendString("ok")
@@ -598,7 +601,6 @@ func TestMultiPoolMiddleware_WithTenantDB_ConsumerTrigger(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/transactions", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("X-User-ID", "user-123")
 
 	resp, err := app.Test(req, -1)
 	require.NoError(t, err)
@@ -622,19 +624,20 @@ func TestMultiPoolMiddleware_WithTenantDB_DefaultRouteMatching(t *testing.T) {
 	}))
 	defer server.Close()
 
-	pgPool, _ := newMultiPoolTestManagers(server.URL)
+	pgPool, _ := newMultiPoolTestManagers(t, server.URL)
 
 	mid := NewMultiPoolMiddleware(
 		WithRoute([]string{"/v1/transactions"}, "transaction", pgPool, nil),
 		WithDefaultRoute("ledger", pgPool, nil),
 	)
 
-	token := buildTestJWT(map[string]any{
+	token := buildTestJWT(t, map[string]any{
 		"sub":      "user-123",
 		"tenantId": "tenant-abc",
 	})
 
 	app := fiber.New()
+	app.Use(simulateAuthMiddleware("user-123"))
 	app.Use(mid.WithTenantDB)
 	app.Get("/v1/unknown", func(c *fiber.Ctx) error {
 		return c.SendString("ok")
@@ -642,7 +645,6 @@ func TestMultiPoolMiddleware_WithTenantDB_DefaultRouteMatching(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/unknown", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("X-User-ID", "user-123")
 
 	resp, err := app.Test(req, -1)
 	require.NoError(t, err)
@@ -655,13 +657,19 @@ func TestMultiPoolMiddleware_WithTenantDB_DefaultRouteMatching(t *testing.T) {
 	assert.NotEqual(t, http.StatusOK, resp.StatusCode)
 }
 
-func TestMultiPoolMiddleware_WithTenantDB_TenantIDInjected(t *testing.T) {
+func TestMultiPoolMiddleware_WithTenantDB_PGFailureBlocksHandler(t *testing.T) {
 	t.Parallel()
 
-	// Use a middleware where pgPool IsMultiTenant() is true but we bypass
-	// the actual PG resolution by setting pgPool to nil on the route manually.
-	// Instead, create a middleware struct directly to test context injection.
-	pgPool, _ := newMultiPoolTestManagers("http://localhost:8080")
+	// The middleware injects the tenant ID into context (step 6 in WithTenantDB)
+	// BEFORE attempting PG resolution (step 8). However, on PG resolution failure
+	// the middleware returns an error without calling c.Next(), so the downstream
+	// handler is never reached and cannot observe the injected tenant ID.
+	//
+	// This test validates the observable behavior: JWT parsing succeeds and the
+	// middleware reaches PG resolution (returning 503), but the handler is NOT
+	// called because the PG connection cannot be established without a real
+	// Tenant Manager backend.
+	pgPool, _ := newMultiPoolTestManagers(t, "http://localhost:8080")
 
 	mid := &MultiPoolMiddleware{
 		routes: []*PoolRoute{
@@ -674,36 +682,35 @@ func TestMultiPoolMiddleware_WithTenantDB_TenantIDInjected(t *testing.T) {
 		enabled: true,
 	}
 
-	token := buildTestJWT(map[string]any{
+	token := buildTestJWT(t, map[string]any{
 		"sub":      "user-123",
 		"tenantId": "tenant-xyz",
 	})
 
-	var capturedTenantID string
+	handlerCalled := false
 
 	app := fiber.New()
+	app.Use(simulateAuthMiddleware("user-123"))
 	app.Use(mid.WithTenantDB)
 	app.Get("/v1/test", func(c *fiber.Ctx) error {
-		capturedTenantID = core.GetTenantIDFromContext(c.UserContext())
+		handlerCalled = true
 		return c.SendString("ok")
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("X-User-ID", "user-123")
 
 	resp, err := app.Test(req, -1)
 	require.NoError(t, err)
 
 	defer resp.Body.Close()
 
-	// The PG connection will fail, but we can verify the tenant ID was extracted.
-	// Even on error, the tenant was resolved from the JWT.
-	// If we got a non-200, it means the flow reached PG resolution which is fine.
-	// We check the tenantID was captured if the handler was called.
-	if resp.StatusCode == http.StatusOK {
-		assert.Equal(t, "tenant-xyz", capturedTenantID)
-	}
+	// PG resolution fails (no real Tenant Manager), so the middleware returns
+	// a service-unavailable error and the handler is never reached.
+	assert.NotEqual(t, http.StatusOK, resp.StatusCode,
+		"expected non-200 because PG resolution fails without a real Tenant Manager")
+	assert.False(t, handlerCalled,
+		"handler should not be called when PG resolution fails")
 }
 
 func TestMultiPoolMiddleware_mapDefaultError(t *testing.T) {
@@ -797,6 +804,7 @@ func TestMultiPoolMiddleware_extractTenantID(t *testing.T) {
 		t.Parallel()
 
 		app := fiber.New()
+		app.Use(simulateAuthMiddleware("user-123"))
 		app.Get("/test", func(c *fiber.Ctx) error {
 			_, err := mid.extractTenantID(c)
 			assert.Error(t, err)
@@ -806,7 +814,6 @@ func TestMultiPoolMiddleware_extractTenantID(t *testing.T) {
 		})
 
 		req := httptest.NewRequest(http.MethodGet, "/test", nil)
-		req.Header.Set("X-User-ID", "user-123")
 
 		resp, err := app.Test(req, -1)
 		require.NoError(t, err)
@@ -818,6 +825,7 @@ func TestMultiPoolMiddleware_extractTenantID(t *testing.T) {
 		t.Parallel()
 
 		app := fiber.New()
+		app.Use(simulateAuthMiddleware("user-123"))
 		app.Get("/test", func(c *fiber.Ctx) error {
 			_, err := mid.extractTenantID(c)
 			assert.Error(t, err)
@@ -828,7 +836,6 @@ func TestMultiPoolMiddleware_extractTenantID(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodGet, "/test", nil)
 		req.Header.Set("Authorization", "Bearer not-valid")
-		req.Header.Set("X-User-ID", "user-123")
 
 		resp, err := app.Test(req, -1)
 		require.NoError(t, err)
@@ -839,11 +846,12 @@ func TestMultiPoolMiddleware_extractTenantID(t *testing.T) {
 	t.Run("returns error when tenantId claim is missing", func(t *testing.T) {
 		t.Parallel()
 
-		token := buildTestJWT(map[string]any{
+		token := buildTestJWT(t, map[string]any{
 			"sub": "user-123",
 		})
 
 		app := fiber.New()
+		app.Use(simulateAuthMiddleware("user-123"))
 		app.Get("/test", func(c *fiber.Ctx) error {
 			_, err := mid.extractTenantID(c)
 			assert.Error(t, err)
@@ -854,7 +862,6 @@ func TestMultiPoolMiddleware_extractTenantID(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodGet, "/test", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("X-User-ID", "user-123")
 
 		resp, err := app.Test(req, -1)
 		require.NoError(t, err)
@@ -865,12 +872,13 @@ func TestMultiPoolMiddleware_extractTenantID(t *testing.T) {
 	t.Run("returns tenant ID from valid token", func(t *testing.T) {
 		t.Parallel()
 
-		token := buildTestJWT(map[string]any{
+		token := buildTestJWT(t, map[string]any{
 			"sub":      "user-123",
 			"tenantId": "tenant-abc",
 		})
 
 		app := fiber.New()
+		app.Use(simulateAuthMiddleware("user-123"))
 		app.Get("/test", func(c *fiber.Ctx) error {
 			tenantID, err := mid.extractTenantID(c)
 			assert.NoError(t, err)
@@ -881,7 +889,6 @@ func TestMultiPoolMiddleware_extractTenantID(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodGet, "/test", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("X-User-ID", "user-123")
 
 		resp, err := app.Test(req, -1)
 		require.NoError(t, err)
@@ -904,8 +911,8 @@ func TestMultiPoolMiddleware_WithTenantDB_CrossModuleInjection(t *testing.T) {
 	}))
 	defer server.Close()
 
-	pgPoolA, _ := newMultiPoolTestManagers(server.URL)
-	pgPoolB, _ := newMultiPoolTestManagers(server.URL)
+	pgPoolA, _ := newMultiPoolTestManagers(t, server.URL)
+	pgPoolB, _ := newMultiPoolTestManagers(t, server.URL)
 
 	mid := NewMultiPoolMiddleware(
 		WithRoute([]string{"/v1/transactions"}, "transaction", pgPoolA, nil),
@@ -916,12 +923,13 @@ func TestMultiPoolMiddleware_WithTenantDB_CrossModuleInjection(t *testing.T) {
 	assert.True(t, mid.crossModule, "crossModule flag should be set")
 	assert.Len(t, mid.routes, 2)
 
-	token := buildTestJWT(map[string]any{
+	token := buildTestJWT(t, map[string]any{
 		"sub":      "user-123",
 		"tenantId": "tenant-abc",
 	})
 
 	app := fiber.New()
+	app.Use(simulateAuthMiddleware("user-123"))
 	app.Use(mid.WithTenantDB)
 	app.Get("/v1/transactions", func(c *fiber.Ctx) error {
 		return c.SendString("ok")
@@ -929,7 +937,6 @@ func TestMultiPoolMiddleware_WithTenantDB_CrossModuleInjection(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/transactions", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("X-User-ID", "user-123")
 
 	resp, err := app.Test(req, -1)
 	require.NoError(t, err)
@@ -945,7 +952,7 @@ func TestMultiPoolMiddleware_WithTenantDB_CrossModuleInjection(t *testing.T) {
 func TestWithRoute(t *testing.T) {
 	t.Parallel()
 
-	pgPool, mongoPool := newMultiPoolTestManagers("http://localhost:8080")
+	pgPool, mongoPool := newMultiPoolTestManagers(t, "http://localhost:8080")
 
 	mid := &MultiPoolMiddleware{}
 	opt := WithRoute([]string{"/v1/test", "/v1/test2"}, "test-module", pgPool, mongoPool)
@@ -961,7 +968,7 @@ func TestWithRoute(t *testing.T) {
 func TestWithDefaultRoute(t *testing.T) {
 	t.Parallel()
 
-	pgPool, mongoPool := newMultiPoolTestManagers("http://localhost:8080")
+	pgPool, mongoPool := newMultiPoolTestManagers(t, "http://localhost:8080")
 
 	mid := &MultiPoolMiddleware{}
 	opt := WithDefaultRoute("default-module", pgPool, mongoPool)

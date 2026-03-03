@@ -20,8 +20,10 @@ import (
 // newTestManagers creates a postgres and mongo Manager backed by a test client.
 // Centralises the repeated client.NewClient + NewManager boilerplate so each
 // sub-test only declares what is unique to its scenario.
-func newTestManagers() (*tmpostgres.Manager, *tmmongo.Manager) {
-	c, _ := client.NewClient("http://localhost:8080", nil)
+func newTestManagers(t testing.TB) (*tmpostgres.Manager, *tmmongo.Manager) {
+	t.Helper()
+	c, err := client.NewClient("http://localhost:8080", nil)
+	require.NoError(t, err)
 	return tmpostgres.NewManager(c, "ledger"), tmmongo.NewManager(c, "ledger")
 }
 
@@ -36,7 +38,7 @@ func TestNewTenantMiddleware(t *testing.T) {
 	})
 
 	t.Run("creates enabled middleware with PostgreSQL only", func(t *testing.T) {
-		pgManager, _ := newTestManagers()
+		pgManager, _ := newTestManagers(t)
 
 		middleware := NewTenantMiddleware(WithPostgresManager(pgManager))
 
@@ -47,7 +49,7 @@ func TestNewTenantMiddleware(t *testing.T) {
 	})
 
 	t.Run("creates enabled middleware with MongoDB only", func(t *testing.T) {
-		_, mongoManager := newTestManagers()
+		_, mongoManager := newTestManagers(t)
 
 		middleware := NewTenantMiddleware(WithMongoManager(mongoManager))
 
@@ -58,7 +60,7 @@ func TestNewTenantMiddleware(t *testing.T) {
 	})
 
 	t.Run("creates middleware with both PostgreSQL and MongoDB managers", func(t *testing.T) {
-		pgManager, mongoManager := newTestManagers()
+		pgManager, mongoManager := newTestManagers(t)
 
 		middleware := NewTenantMiddleware(
 			WithPostgresManager(pgManager),
@@ -74,7 +76,7 @@ func TestNewTenantMiddleware(t *testing.T) {
 
 func TestWithPostgresManager(t *testing.T) {
 	t.Run("sets postgres manager on middleware", func(t *testing.T) {
-		pgManager, _ := newTestManagers()
+		pgManager, _ := newTestManagers(t)
 
 		middleware := NewTenantMiddleware()
 		assert.Nil(t, middleware.postgres)
@@ -89,7 +91,7 @@ func TestWithPostgresManager(t *testing.T) {
 	})
 
 	t.Run("enables middleware when postgres manager is set", func(t *testing.T) {
-		pgManager, _ := newTestManagers()
+		pgManager, _ := newTestManagers(t)
 
 		middleware := &TenantMiddleware{}
 		assert.False(t, middleware.enabled)
@@ -103,7 +105,7 @@ func TestWithPostgresManager(t *testing.T) {
 
 func TestWithMongoManager(t *testing.T) {
 	t.Run("sets mongo manager on middleware", func(t *testing.T) {
-		_, mongoManager := newTestManagers()
+		_, mongoManager := newTestManagers(t)
 
 		middleware := NewTenantMiddleware()
 		assert.Nil(t, middleware.mongo)
@@ -118,7 +120,7 @@ func TestWithMongoManager(t *testing.T) {
 	})
 
 	t.Run("enables middleware when mongo manager is set", func(t *testing.T) {
-		_, mongoManager := newTestManagers()
+		_, mongoManager := newTestManagers(t)
 
 		middleware := &TenantMiddleware{}
 		assert.False(t, middleware.enabled)
@@ -137,21 +139,21 @@ func TestTenantMiddleware_Enabled(t *testing.T) {
 	})
 
 	t.Run("returns true when only PostgreSQL manager is set", func(t *testing.T) {
-		pgManager, _ := newTestManagers()
+		pgManager, _ := newTestManagers(t)
 
 		middleware := NewTenantMiddleware(WithPostgresManager(pgManager))
 		assert.True(t, middleware.Enabled())
 	})
 
 	t.Run("returns true when only MongoDB manager is set", func(t *testing.T) {
-		_, mongoManager := newTestManagers()
+		_, mongoManager := newTestManagers(t)
 
 		middleware := NewTenantMiddleware(WithMongoManager(mongoManager))
 		assert.True(t, middleware.Enabled())
 	})
 
 	t.Run("returns true when both managers are set", func(t *testing.T) {
-		pgManager, mongoManager := newTestManagers()
+		pgManager, mongoManager := newTestManagers(t)
 
 		middleware := NewTenantMiddleware(
 			WithPostgresManager(pgManager),
@@ -164,18 +166,30 @@ func TestTenantMiddleware_Enabled(t *testing.T) {
 // buildTestJWT constructs a minimal unsigned JWT token string from the given claims.
 // The token is not cryptographically signed (signature is empty), which is acceptable
 // because the middleware uses ParseUnverified (lib-auth already validated the token).
-func buildTestJWT(claims map[string]any) string {
+func buildTestJWT(t testing.TB, claims map[string]any) string {
+	t.Helper()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
 
-	payload, _ := json.Marshal(claims)
+	payload, err := json.Marshal(claims)
+	require.NoError(t, err)
 	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
 
 	return header + "." + encodedPayload + "."
 }
 
+// simulateAuthMiddleware returns a Fiber handler that sets c.Locals("user_id")
+// to simulate upstream lib-auth middleware having validated the request.
+// hasUpstreamAuthAssertion checks c.Locals("user_id"), not HTTP headers.
+func simulateAuthMiddleware(userID string) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		c.Locals("user_id", userID)
+		return c.Next()
+	}
+}
+
 func TestTenantMiddleware_WithTenantDB(t *testing.T) {
 	t.Run("no Authorization header returns 401", func(t *testing.T) {
-		pgManager, _ := newTestManagers()
+		pgManager, _ := newTestManagers(t)
 
 		middleware := NewTenantMiddleware(WithPostgresManager(pgManager))
 
@@ -198,11 +212,12 @@ func TestTenantMiddleware_WithTenantDB(t *testing.T) {
 	})
 
 	t.Run("malformed JWT returns 401", func(t *testing.T) {
-		_, mongoManager := newTestManagers()
+		_, mongoManager := newTestManagers(t)
 
 		middleware := NewTenantMiddleware(WithMongoManager(mongoManager))
 
 		app := fiber.New()
+		app.Use(simulateAuthMiddleware("user-123"))
 		app.Use(middleware.WithTenantDB)
 		app.Get("/test", func(c *fiber.Ctx) error {
 			return c.SendString("ok")
@@ -210,7 +225,6 @@ func TestTenantMiddleware_WithTenantDB(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodGet, "/test", nil)
 		req.Header.Set("Authorization", "Bearer not-a-valid-jwt")
-		req.Header.Set("X-User-ID", "user-123")
 		resp, err := app.Test(req, -1)
 		require.NoError(t, err)
 		defer resp.Body.Close()
@@ -223,16 +237,17 @@ func TestTenantMiddleware_WithTenantDB(t *testing.T) {
 	})
 
 	t.Run("valid JWT missing tenantId claim returns 401", func(t *testing.T) {
-		pgManager, _ := newTestManagers()
+		pgManager, _ := newTestManagers(t)
 
 		middleware := NewTenantMiddleware(WithPostgresManager(pgManager))
 
-		token := buildTestJWT(map[string]any{
+		token := buildTestJWT(t, map[string]any{
 			"sub":   "user-123",
 			"email": "test@example.com",
 		})
 
 		app := fiber.New()
+		app.Use(simulateAuthMiddleware("user-123"))
 		app.Use(middleware.WithTenantDB)
 		app.Get("/test", func(c *fiber.Ctx) error {
 			return c.SendString("ok")
@@ -240,7 +255,6 @@ func TestTenantMiddleware_WithTenantDB(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodGet, "/test", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("X-User-ID", "user-123")
 		resp, err := app.Test(req, -1)
 		require.NoError(t, err)
 		defer resp.Body.Close()
@@ -258,7 +272,7 @@ func TestTenantMiddleware_WithTenantDB(t *testing.T) {
 		// DB resolution and proceeds to c.Next() after JWT parsing.
 		middleware := &TenantMiddleware{enabled: true}
 
-		token := buildTestJWT(map[string]any{
+		token := buildTestJWT(t, map[string]any{
 			"sub":      "user-123",
 			"tenantId": "tenant-abc",
 		})
@@ -267,6 +281,7 @@ func TestTenantMiddleware_WithTenantDB(t *testing.T) {
 		nextCalled := false
 
 		app := fiber.New()
+		app.Use(simulateAuthMiddleware("user-123"))
 		app.Use(middleware.WithTenantDB)
 		app.Get("/test", func(c *fiber.Ctx) error {
 			nextCalled = true
@@ -276,7 +291,6 @@ func TestTenantMiddleware_WithTenantDB(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodGet, "/test", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("X-User-ID", "user-123")
 		resp, err := app.Test(req, -1)
 		require.NoError(t, err)
 		defer resp.Body.Close()

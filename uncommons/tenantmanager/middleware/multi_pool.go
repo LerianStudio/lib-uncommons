@@ -181,9 +181,14 @@ func (m *MultiPoolMiddleware) WithTenantDB(c *fiber.Ctx) error {
 	}
 
 	// Step 4: Extract context + telemetry
-	ctx := libOpentelemetry.ExtractHTTPContext(context.Background(), c)
+	baseCtx := c.UserContext()
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+
+	ctx := libOpentelemetry.ExtractHTTPContext(baseCtx, c)
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = baseCtx
 	}
 
 	baseLogger, tracer, _, _ := libCommons.NewTrackingFromContext(ctx)
@@ -308,6 +313,10 @@ func (m *MultiPoolMiddleware) extractTenantID(c *fiber.Ctx) (string, error) {
 	tenantID, _ := claims["tenantId"].(string)
 	if tenantID == "" {
 		return "", core.ErrMissingTenantIDClaim
+	}
+
+	if !core.IsValidTenantID(tenantID) {
+		return "", core.ErrInvalidTenantClaims
 	}
 
 	return tenantID, nil
@@ -438,7 +447,7 @@ func (m *MultiPoolMiddleware) mapDefaultError(c *fiber.Ctx, err error, tenantID 
 		return c.Status(http.StatusNotFound).JSON(fiber.Map{
 			"code":    "TENANT_NOT_FOUND",
 			"title":   "Tenant Not Found",
-			"message": fmt.Sprintf("tenant not found: %s", tenantID),
+			"message": "tenant not found: " + tenantID,
 		})
 	}
 
@@ -446,7 +455,7 @@ func (m *MultiPoolMiddleware) mapDefaultError(c *fiber.Ctx, err error, tenantID 
 	var suspErr *core.TenantSuspendedError
 	if errors.As(err, &suspErr) {
 		return forbiddenError(c, "0131", "Service Suspended",
-			fmt.Sprintf("tenant service is %s", suspErr.Status))
+			"tenant service is "+suspErr.Status)
 	}
 
 	// Manager closed or service not configured -> 503
