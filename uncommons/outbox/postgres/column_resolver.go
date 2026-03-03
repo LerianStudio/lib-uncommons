@@ -119,13 +119,20 @@ func (resolver *ColumnResolver) DiscoverTenants(ctx context.Context) ([]string, 
 			return cached, nil
 		}
 
-		return resolver.queryTenants(ctx)
+		// Use a context that inherits values but not cancellation,
+		// so first caller's timeout doesn't cascade to coalesced callers.
+		sfCtx := context.WithoutCancel(ctx)
+
+		return resolver.queryTenants(sfCtx)
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	tenants, _ := result.([]string)
+	tenants, ok := result.([]string)
+	if !ok {
+		return nil, fmt.Errorf("unexpected type from singleflight: got %T, expected []string", result)
+	}
 
 	return tenants, nil
 }
@@ -139,7 +146,7 @@ func (resolver *ColumnResolver) queryTenants(ctx context.Context) ([]string, err
 	table := quoteIdentifierPath(resolver.tableName)
 	column := quoteIdentifier(resolver.tenantColumn)
 
-	query := "SELECT DISTINCT " + column + " FROM " + table +
+	query := "SELECT DISTINCT " + column + " FROM " + table + // #nosec G202 -- table/column names validated at construction via validateIdentifier/validateIdentifierPath; quote functions escape identifiers
 		" WHERE status IN ($1, $2, $3) AND " + column + " IS NOT NULL ORDER BY " + column
 
 	rows, err := db.QueryContext(
