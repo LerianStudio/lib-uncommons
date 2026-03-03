@@ -3,9 +3,11 @@ package consumer
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	"math/rand/v2"
+	"maps"
 	"sync"
 	"time"
 
@@ -761,9 +763,7 @@ func (c *MultiTenantConsumer) superviseTenantQueues(ctx context.Context, tenantI
 	c.mu.RLock()
 
 	handlers := make(map[string]HandlerFunc, len(c.handlers))
-	for queue, handler := range c.handlers {
-		handlers[queue] = handler
-	}
+	maps.Copy(handlers, c.handlers)
 
 	c.mu.RUnlock()
 
@@ -1004,7 +1004,7 @@ const maxRetryBeforeDegraded = 3
 // Base sequence: 5s, 10s, 20s, 40s, 40s, ... (before jitter).
 func backoffDelay(retryCount int) time.Duration {
 	delay := initialBackoff
-	for i := 0; i < retryCount; i++ {
+	for range retryCount {
 		delay *= 2
 		if delay > maxBackoff {
 			delay = maxBackoff
@@ -1013,8 +1013,13 @@ func backoffDelay(retryCount int) time.Duration {
 		}
 	}
 
-	// Apply +/-25% jitter: multiply by a random factor in [0.75, 1.25)
-	jitter := 0.75 + rand.Float64()*0.5
+	// Apply +/-25% jitter: multiply by a random factor in [0.75, 1.25).
+	// Uses crypto/rand to satisfy gosec G404.
+	var b [8]byte
+
+	_, _ = crand.Read(b[:])
+
+	jitter := 0.75 + float64(binary.LittleEndian.Uint64(b[:]))/(1<<64)*0.5
 
 	return time.Duration(float64(delay) * jitter)
 }
@@ -1022,7 +1027,13 @@ func backoffDelay(retryCount int) time.Duration {
 // getRetryState returns the retry state entry for a tenant, creating one if it does not exist.
 func (c *MultiTenantConsumer) getRetryState(tenantID string) *retryStateEntry {
 	entry, _ := c.retryState.LoadOrStore(tenantID, &retryStateEntry{})
-	return entry.(*retryStateEntry)
+
+	val, ok := entry.(*retryStateEntry)
+	if !ok {
+		return &retryStateEntry{}
+	}
+
+	return val
 }
 
 // resetRetryState resets the retry counter and degraded flag for a tenant after a successful connection.
@@ -1064,7 +1075,11 @@ func (c *MultiTenantConsumer) ensureConsumerStarted(ctx context.Context, tenantI
 
 	// Slow path: acquire per-tenant mutex for double-check locking
 	lockVal, _ := c.consumerLocks.LoadOrStore(tenantID, &sync.Mutex{})
-	tenantMu := lockVal.(*sync.Mutex)
+
+	tenantMu, ok := lockVal.(*sync.Mutex)
+	if !ok {
+		return
+	}
 
 	tenantMu.Lock()
 	defer tenantMu.Unlock()
@@ -1083,10 +1098,12 @@ func (c *MultiTenantConsumer) ensureConsumerStarted(ctx context.Context, tenantI
 	// Use stored parentCtx if available (from Run()), otherwise use the provided ctx.
 	// Protected by c.mu.RLock because Run() writes parentCtx concurrently.
 	c.mu.RLock()
+
 	startCtx := ctx
 	if c.parentCtx != nil {
 		startCtx = c.parentCtx
 	}
+
 	c.mu.RUnlock()
 
 	logger.InfofCtx(ctx, "on-demand consumer start for tenant: %s", tenantID)
