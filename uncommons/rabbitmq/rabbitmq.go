@@ -306,10 +306,7 @@ func (rc *RabbitMQConnection) snapshotEnsureChannelState() (ensureChannelSnapsho
 	// Rate-limit reconnect attempts: if we've failed recently, enforce a
 	// minimum delay before the next attempt to prevent reconnect storms.
 	if needConnection && rc.reconnectAttempts > 0 {
-		delay := backoff.ExponentialWithJitter(500*time.Millisecond, rc.reconnectAttempts)
-		if delay > reconnectBackoffCap {
-			delay = reconnectBackoffCap
-		}
+		delay := min(backoff.ExponentialWithJitter(500*time.Millisecond, rc.reconnectAttempts), reconnectBackoffCap)
 
 		if elapsed := time.Since(rc.lastReconnectAttempt); elapsed < delay {
 			return ensureChannelSnapshot{}, fmt.Errorf("rabbitmq ensure channel: rate-limited (next attempt in %s)", delay-elapsed)
@@ -1252,12 +1249,10 @@ func redactURLCredentialsFallback(token string) string {
 		return token
 	}
 
-	passwordSeparator := strings.Index(userinfo, ":")
-	if passwordSeparator == -1 {
+	username, _, found := strings.Cut(userinfo, ":")
+	if !found {
 		return token
 	}
-
-	username := userinfo[:passwordSeparator]
 
 	return token[:schemeSeparator+3] + username + ":" + redactedURLPassword + "@" + hostAndSuffix
 }
@@ -1267,7 +1262,7 @@ func allDigits(value string) bool {
 		return false
 	}
 
-	for i := 0; i < len(value); i++ {
+	for i := range len(value) {
 		if value[i] < '0' || value[i] > '9' {
 			return false
 		}
