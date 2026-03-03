@@ -316,13 +316,14 @@ func getBodyObfuscatedString(c *fiber.Ctx, bodyBytes []byte) string {
 
 	var obfuscatedBody string
 
-	if strings.Contains(contentType, "application/json") {
+	switch {
+	case strings.Contains(contentType, "application/json"):
 		obfuscatedBody = handleJSONBody(bodyBytes)
-	} else if strings.Contains(contentType, "application/x-www-form-urlencoded") {
+	case strings.Contains(contentType, "application/x-www-form-urlencoded"):
 		obfuscatedBody = handleURLEncodedBody(bodyBytes)
-	} else if strings.Contains(contentType, "multipart/form-data") {
+	case strings.Contains(contentType, "multipart/form-data"):
 		obfuscatedBody = handleMultipartBody(c)
-	} else {
+	default:
 		obfuscatedBody = string(bodyBytes)
 	}
 
