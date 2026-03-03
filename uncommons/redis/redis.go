@@ -306,10 +306,7 @@ func (c *Client) GetClient(ctx context.Context) (redis.UniversalClient, error) {
 	// Rate-limit reconnect attempts: if we've failed recently, enforce a
 	// minimum delay before the next attempt to avoid hammering the server.
 	if c.reconnectAttempts > 0 {
-		delay := backoff.ExponentialWithJitter(500*time.Millisecond, c.reconnectAttempts)
-		if delay > reconnectBackoffCap {
-			delay = reconnectBackoffCap
-		}
+		delay := min(backoff.ExponentialWithJitter(500*time.Millisecond, c.reconnectAttempts), reconnectBackoffCap)
 
 		if elapsed := time.Since(c.lastReconnectAttempt); elapsed < delay {
 			return nil, fmt.Errorf("redis reconnect: rate-limited (next attempt in %s)", delay-elapsed)
@@ -642,10 +639,7 @@ func (c *Client) refreshTokenLoop(ctx context.Context) {
 			// with sub-millisecond intervals produce proportionally small delays.
 			consecutiveFailures++
 
-			delay := backoff.ExponentialWithJitter(auth.RefreshCheckInterval, consecutiveFailures)
-			if delay > reconnectBackoffCap {
-				delay = reconnectBackoffCap
-			}
+			delay := min(backoff.ExponentialWithJitter(auth.RefreshCheckInterval, consecutiveFailures), reconnectBackoffCap)
 
 			if err := backoff.WaitContext(ctx, delay); err != nil {
 				return

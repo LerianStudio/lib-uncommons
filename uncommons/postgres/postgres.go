@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -402,10 +403,7 @@ func (c *Client) Resolver(ctx context.Context) (dbresolver.DB, error) {
 	// Rate-limit lazy-connect retries: if previous attempts failed recently,
 	// enforce a minimum delay before the next attempt to prevent reconnect storms.
 	if c.connectAttempts > 0 {
-		delay := backoff.ExponentialWithJitter(1*time.Second, c.connectAttempts)
-		if delay > connectBackoffCap {
-			delay = connectBackoffCap
-		}
+		delay := min(backoff.ExponentialWithJitter(1*time.Second, c.connectAttempts), connectBackoffCap)
 
 		if elapsed := time.Since(c.lastConnectAttempt); elapsed < delay {
 			return nil, fmt.Errorf("postgres resolver: rate-limited (next attempt in %s)", delay-elapsed)
@@ -717,12 +715,8 @@ func sanitizeSensitiveString(s string) string {
 
 func sanitizePath(path string) (string, error) {
 	cleaned := filepath.Clean(path)
-	parts := strings.Split(cleaned, string(filepath.Separator))
-
-	for _, part := range parts {
-		if part == ".." {
-			return "", fmt.Errorf("invalid migrations path: %q", path)
-		}
+	if slices.Contains(strings.Split(cleaned, string(filepath.Separator)), "..") {
+		return "", fmt.Errorf("invalid migrations path: %q", path)
 	}
 
 	absPath, err := filepath.Abs(cleaned)

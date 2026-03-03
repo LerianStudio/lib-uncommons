@@ -358,10 +358,7 @@ func (c *Client) ResolveClient(ctx context.Context) (*mongo.Client, error) {
 	// Rate-limit lazy-connect retries: if previous attempts failed recently,
 	// enforce a minimum delay before the next attempt to prevent reconnect storms.
 	if c.connectAttempts > 0 {
-		delay := backoff.ExponentialWithJitter(1*time.Second, c.connectAttempts)
-		if delay > connectBackoffCap {
-			delay = connectBackoffCap
-		}
+		delay := min(backoff.ExponentialWithJitter(1*time.Second, c.connectAttempts), connectBackoffCap)
 
 		if elapsed := time.Since(c.lastConnectAttempt); elapsed < delay {
 			return nil, fmt.Errorf("mongo resolve_client: rate-limited (next attempt in %s)", delay-elapsed)
