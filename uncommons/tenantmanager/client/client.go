@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	libCommons "github.com/LerianStudio/lib-uncommons/v2/uncommons"
 	libLog "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
@@ -206,6 +207,26 @@ func isServerError(statusCode int) bool {
 	return statusCode >= http.StatusInternalServerError
 }
 
+// truncateBody returns the body as a string, truncated to maxLen bytes with a
+// "...(truncated)" suffix if the body exceeds maxLen. This prevents large
+// response bodies from being logged or included in error messages.
+// The truncation point is adjusted to the last valid UTF-8 rune boundary
+// to avoid splitting multi-byte characters.
+func truncateBody(body []byte, maxLen int) string {
+	if len(body) <= maxLen {
+		return string(body)
+	}
+
+	// Find the last valid rune boundary at or before maxLen to avoid
+	// splitting multi-byte UTF-8 sequences.
+	truncated := body[:maxLen]
+	for len(truncated) > 0 && !utf8.Valid(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+
+	return string(truncated) + "...(truncated)"
+}
+
 // GetTenantConfig fetches tenant configuration from the Tenant Manager API.
 // The API endpoint is: GET {baseURL}/tenants/{tenantID}/services/{service}/settings
 // Returns the fully resolved tenant configuration with database credentials.
@@ -315,7 +336,7 @@ func (c *Client) GetTenantConfig(ctx context.Context, tenantID, service string) 
 			}
 		}
 
-		return nil, fmt.Errorf("tenant service access denied: %s", string(body))
+		return nil, fmt.Errorf("tenant service access denied for tenant %s", tenantID)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -326,11 +347,11 @@ func (c *Client) GetTenantConfig(ctx context.Context, tenantID, service string) 
 
 		logger.Log(ctx, libLog.LevelError, "tenant manager returned error",
 			libLog.Int("status", resp.StatusCode),
-			libLog.String("body", string(body)),
+			libLog.String("body", truncateBody(body, 512)),
 		)
 		libOpentelemetry.HandleSpanError(span, "Tenant Manager returned error", fmt.Errorf("status %d", resp.StatusCode))
 
-		return nil, fmt.Errorf("tenant manager returned status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("tenant manager returned status %d for tenant %s", resp.StatusCode, tenantID)
 	}
 
 	// Parse response
@@ -424,11 +445,11 @@ func (c *Client) GetActiveTenantsByService(ctx context.Context, service string) 
 
 		logger.Log(ctx, libLog.LevelError, "tenant manager returned error",
 			libLog.Int("status", resp.StatusCode),
-			libLog.String("body", string(body)),
+			libLog.String("body", truncateBody(body, 512)),
 		)
 		libOpentelemetry.HandleSpanError(span, "Tenant Manager returned error", fmt.Errorf("status %d", resp.StatusCode))
 
-		return nil, fmt.Errorf("tenant manager returned status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("tenant manager returned status %d for service %s", resp.StatusCode, service)
 	}
 
 	// Parse response

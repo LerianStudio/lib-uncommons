@@ -99,6 +99,56 @@ func TestNewClient(t *testing.T) {
 	})
 }
 
+func TestNewClient_ValidationErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		baseURL   string
+		expectErr bool
+	}{
+		{
+			name:      "empty baseURL returns error",
+			baseURL:   "",
+			expectErr: true,
+		},
+		{
+			name:      "URL without scheme returns error",
+			baseURL:   "localhost:8080",
+			expectErr: true,
+		},
+		{
+			name:      "URL without host returns error",
+			baseURL:   "http://",
+			expectErr: true,
+		},
+		{
+			name:      "invalid URL syntax returns error",
+			baseURL:   "://bad-url",
+			expectErr: true,
+		},
+		{
+			name:      "nil logger succeeds with default nop logger",
+			baseURL:   "http://localhost:8080",
+			expectErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Pass nil logger to also verify the nil-logger defaulting path
+			client, err := NewClient(tt.baseURL, nil)
+
+			if tt.expectErr {
+				assert.Error(t, err)
+				assert.Nil(t, client)
+				assert.Contains(t, err.Error(), "invalid tenant manager baseURL")
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, client)
+			}
+		})
+	}
+}
+
 func TestClient_GetTenantConfig(t *testing.T) {
 	t.Run("successful response", func(t *testing.T) {
 		config := newTestTenantConfig()
@@ -511,6 +561,36 @@ func TestClient_CircuitBreaker_DisabledByDefault(t *testing.T) {
 
 	assert.Equal(t, cbClosed, client.cbState, "circuit breaker should remain closed when disabled")
 	assert.Equal(t, 0, client.cbFailures, "failures should not be counted when circuit breaker is disabled")
+}
+
+func TestClient_GetActiveTenantsByService_Success(t *testing.T) {
+	tenants := []*TenantSummary{
+		{ID: "tenant-1", Name: "Acme Corp", Status: "active"},
+		{ID: "tenant-2", Name: "Globex Inc", Status: "active"},
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/tenants/active", r.URL.Path)
+		assert.Equal(t, "ledger", r.URL.Query().Get("service"))
+
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(tenants))
+	}))
+	defer server.Close()
+
+	client := mustNewClient(t, server.URL)
+	ctx := context.Background()
+
+	result, err := client.GetActiveTenantsByService(ctx, "ledger")
+
+	require.NoError(t, err)
+	require.Len(t, result, 2)
+	assert.Equal(t, "tenant-1", result[0].ID)
+	assert.Equal(t, "Acme Corp", result[0].Name)
+	assert.Equal(t, "active", result[0].Status)
+	assert.Equal(t, "tenant-2", result[1].ID)
+	assert.Equal(t, "Globex Inc", result[1].Name)
+	assert.Equal(t, "active", result[1].Status)
 }
 
 func TestClient_CircuitBreaker_GetActiveTenantsByService(t *testing.T) {
