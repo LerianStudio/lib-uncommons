@@ -591,11 +591,11 @@ func (p *Manager) IsMultiTenant() bool {
 // characters through tenant-supplied configuration values.
 func buildMongoURI(cfg *core.MongoDBConfig, logger *logcompat.Logger) (string, error) {
 	if cfg.URI == "" && cfg.Host == "" {
-		return "", fmt.Errorf("mongo host is required when URI is not provided")
+		return "", errors.New("mongo host is required when URI is not provided")
 	}
 
 	if cfg.URI == "" && cfg.Port == 0 {
-		return "", fmt.Errorf("mongo port is required when URI is not provided")
+		return "", errors.New("mongo port is required when URI is not provided")
 	}
 
 	if cfg.URI != "" {
