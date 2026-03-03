@@ -511,6 +511,7 @@ Recommended rollout:
 | Behavior | v2 |
 |----------|-----|
 | Schema resolver tenant enforcement | `SchemaResolver` now requires tenant context by default. Use `WithAllowEmptyTenant()` only for explicit public-schema/single-tenant flows. |
+| Schema resolver tenant ID validation | `SchemaResolver.ApplyTenant` and `NewSchemaResolver` now trim whitespace from tenant IDs **and** validate them as UUIDs. Previously, whitespace was silently accepted. In v2, whitespace is trimmed but non-UUID values are rejected with an error (`"invalid tenant id format"` from `ApplyTenant`, `ErrDefaultTenantIDInvalid` from `NewSchemaResolver`). Callers must ensure tenant IDs passed to outbox functions are valid UUIDs — any code using non-UUID tenant identifiers (e.g., plain strings or slugs) will break. |
 | Column migration primary key | `migrations/column/000001_outbox_events_column.up.sql` uses composite primary key `(tenant_id, id)` to avoid cross-tenant key coupling. |
 
 ---
@@ -757,6 +758,102 @@ Field list expanded with additional financial and PII identifiers.
 - `(*Group).Wait() error` -- wait and return first error
 - `(*Group).SetLogger(logger)` -- configure logger for panic recovery diagnostics
 - Sentinel error: `ErrPanicRecovered`
+
+### uncommons/tenantmanager
+
+The `tenantmanager` package tree provides multi-tenant connection management, migrated from lib-commons/v3.
+
+#### New packages
+
+| Package | Purpose |
+|---------|---------|
+| `tenantmanager/core` | Shared types (`TenantConfig`), context helpers (`ContextWithTenantID`, `GetTenantIDFromContext`), error types |
+| `tenantmanager/client` | HTTP client for Tenant Manager API with circuit breaker and caching |
+| `tenantmanager/consumer` | `MultiTenantConsumer` — goroutine-per-tenant lifecycle management |
+| `tenantmanager/middleware` | Fiber middleware for tenant extraction (`TenantMiddleware`) and multi-pool routing (`MultiPoolMiddleware`) |
+| `tenantmanager/postgres` | `Manager` — per-tenant PostgreSQL connection pool management with LRU eviction |
+| `tenantmanager/mongo` | `Manager` — per-tenant MongoDB connection management with LRU eviction |
+| `tenantmanager/rabbitmq` | `Manager` — per-tenant RabbitMQ connection management |
+| `tenantmanager/s3` | Tenant-scoped S3 object storage key prefixing |
+| `tenantmanager/valkey` | Tenant-scoped Redis/Valkey key prefixing |
+
+#### Breaking changes
+
+**1. Removed `NewMultiTenantConsumer`**
+
+| v1 / v2 (previous) | v2 (current) |
+|---|---|
+| `consumer.NewMultiTenantConsumer(cfg, logger) *MultiTenantConsumer` | removed; use `consumer.NewMultiTenantConsumerWithError(cfg, logger) (*MultiTenantConsumer, error)` |
+
+The deprecated panicking constructor has been removed. `NewMultiTenantConsumerWithError` returns an error on invalid configuration instead of calling `panic()`.
+
+**2. S3 function signature changes**
+
+Three S3 functions now return `(string, error)` instead of `string` to support delimiter validation:
+
+| v2 (previous) | v2 (current) |
+|---|---|
+| `s3.GetObjectStorageKey(tenantID, key) string` | `s3.GetObjectStorageKey(tenantID, key) (string, error)` |
+| `s3.GetObjectStorageKeyForTenant(ctx, key) string` | `s3.GetObjectStorageKeyForTenant(ctx, key) (string, error)` |
+| `s3.StripObjectStoragePrefix(tenantID, prefixedKey) string` | `s3.StripObjectStoragePrefix(tenantID, prefixedKey) (string, error)` |
+
+**3. Valkey function signature changes**
+
+Five Valkey functions now return `(string, error)` instead of `string` to support delimiter validation:
+
+| v2 (previous) | v2 (current) |
+|---|---|
+| `valkey.GetKey(tenantID, key) string` | `valkey.GetKey(tenantID, key) (string, error)` |
+| `valkey.GetKeyFromContext(ctx, key) string` | `valkey.GetKeyFromContext(ctx, key) (string, error)` |
+| `valkey.GetPattern(tenantID, pattern) string` | `valkey.GetPattern(tenantID, pattern) (string, error)` |
+| `valkey.GetPatternFromContext(ctx, pattern) string` | `valkey.GetPatternFromContext(ctx, pattern) (string, error)` |
+| `valkey.StripTenantPrefix(tenantID, prefixedKey) string` | `valkey.StripTenantPrefix(tenantID, prefixedKey) (string, error)` |
+
+**4. `hasUpstreamAuthAssertion` behavioral change**
+
+| Behavior | v2 |
+|----------|-----|
+| Auth assertion via HTTP header | The middleware no longer checks the `X-User-ID` HTTP header for auth assertion (headers are client-spoofable). Only `c.Locals("user_id")` set by upstream lib-auth middleware is checked. |
+
+**Migration note:** Applications relying on the `X-User-ID` header for auth assertion must ensure upstream auth middleware sets the Fiber local `user_id` value instead. The header path was removed because HTTP headers are client-spoofable and cannot be trusted for authorization decisions.
+
+**5. PostgreSQL SSL default changed**
+
+| Behavior | v2 (previous) | v2 (current) |
+|----------|---|---|
+| `buildConnectionString` SSL mode | `sslmode=disable` | `sslmode=prefer` |
+
+Connections will now attempt TLS when available with graceful fallback to plaintext. Set `SSLMode: "disable"` explicitly in `PostgreSQLConfig` to restore the previous behavior.
+
+**6. Tenant ID format validation**
+
+| Behavior | v2 |
+|----------|-----|
+| Tenant ID format | Middleware and consumer now validate tenant IDs against `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` with a 256-character limit. |
+
+Tenant IDs containing dots, spaces, or special characters will be rejected. This applies to both `TenantMiddleware` and `MultiTenantConsumer` tenant lifecycle management.
+
+**7. `WorkersPerQueue` default changed**
+
+| Config field | v2 (previous) | v2 (current) |
+|---|---|---|
+| `DefaultMultiTenantConfig().WorkersPerQueue` | `1` | `0` |
+
+The field is reserved for future use and currently a no-op.
+
+**8. Client error message format**
+
+| Behavior | v2 |
+|----------|-----|
+| Error messages from tenant manager HTTP client | No longer include raw response body content. Response bodies are now logged separately via `truncateBody` for security. |
+
+**Migration note:** Any error-message parsing that relied on response body content embedded in the error string will no longer match. Use structured logging output to inspect response bodies.
+
+#### Behavioral changes in outbox/tenant.go
+
+- `ContextWithTenantID` now writes to both the new `core.tenantIDKey` context key AND the legacy `TenantIDContextKey` for backward compatibility.
+- `TenantIDFromContext` reads the new `core.tenantIDKey` first, then falls back to the legacy key.
+- Tenant IDs with leading/trailing whitespace are now **rejected** (v1 behavior was to silently trim). Callers must pre-trim tenant IDs.
 
 ---
 
