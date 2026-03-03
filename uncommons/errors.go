@@ -1,6 +1,7 @@
 package uncommons
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -70,8 +71,8 @@ func ValidateBusinessError(err error, entityType string, args ...any) error {
 		},
 	}
 	if mappedError, found := errorMap[err]; found {
-		response, ok := mappedError.(Response)
-		if !ok {
+		var response Response
+		if !errors.As(mappedError, &response) {
 			return mappedError
 		}
 
