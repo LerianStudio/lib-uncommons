@@ -19,7 +19,7 @@ func TestMultiTenantConsumer_Run_CloseStopsSyncLoop(t *testing.T) {
 	// Populate Redis so fetchTenantIDs succeeds during discovery
 	mr.SAdd(testActiveTenantsKey, "tenant-001")
 
-	consumer := NewMultiTenantConsumer(
+	consumer := mustNewConsumer(t,
 		dummyRabbitMQManager(),
 		redisClient,
 		MultiTenantConfig{
@@ -66,7 +66,7 @@ func TestMultiTenantConsumer_Run_CancelAndCloseNoLeak(t *testing.T) {
 	// Populate Redis so fetchTenantIDs succeeds during discovery
 	mr.SAdd(testActiveTenantsKey, "tenant-001")
 
-	consumer := NewMultiTenantConsumer(
+	consumer := mustNewConsumer(t,
 		dummyRabbitMQManager(),
 		redisClient,
 		MultiTenantConfig{

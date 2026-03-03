@@ -3,10 +3,14 @@ package consumer
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"regexp"
+	"math/rand/v2"
 	"sync"
 	"time"
+
+	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/redis/go-redis/v9"
 
 	libCommons "github.com/LerianStudio/lib-uncommons/v2/uncommons"
 	libLog "github.com/LerianStudio/lib-uncommons/v2/uncommons/log"
@@ -17,22 +21,13 @@ import (
 	tmmongo "github.com/LerianStudio/lib-uncommons/v2/uncommons/tenantmanager/mongo"
 	tmpostgres "github.com/LerianStudio/lib-uncommons/v2/uncommons/tenantmanager/postgres"
 	tmrabbitmq "github.com/LerianStudio/lib-uncommons/v2/uncommons/tenantmanager/rabbitmq"
-	amqp "github.com/rabbitmq/amqp091-go"
-	"github.com/redis/go-redis/v9"
 )
-
-// maxTenantIDLength is the maximum allowed length for a tenant ID.
-const maxTenantIDLength = 256
 
 // absentSyncsBeforeRemoval is the number of consecutive syncs a tenant can be
 // missing from the fetched list before it is removed from knownTenants and
 // any active consumer is stopped. Prevents transient incomplete fetches from
 // purging tenants immediately.
 const absentSyncsBeforeRemoval = 3
-
-// validTenantIDPattern enforces a character whitelist for tenant IDs.
-// Only alphanumeric characters, hyphens, and underscores are allowed.
-var validTenantIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
 // buildActiveTenantsKey returns an environment+service segmented Redis key for active tenants.
 // The key format is always: "tenant-manager:tenants:active:{env}:{service}"
@@ -53,7 +48,7 @@ type MultiTenantConfig struct {
 
 	// WorkersPerQueue is reserved for future use. It is currently not implemented
 	// and has no effect on consumer behavior. Each queue runs a single consumer goroutine.
-	// Default: 1
+	// Setting this field is a no-op; it is retained only for backward compatibility.
 	//
 	// Deprecated: This field is not yet implemented. Setting it has no effect.
 	WorkersPerQueue int
@@ -88,7 +83,6 @@ type MultiTenantConfig struct {
 func DefaultMultiTenantConfig() MultiTenantConfig {
 	return MultiTenantConfig{
 		SyncInterval:     30 * time.Second,
-		WorkersPerQueue:  1,
 		PrefetchCount:    10,
 		DiscoveryTimeout: 500 * time.Millisecond,
 	}
@@ -200,7 +194,7 @@ type MultiTenantConsumer struct {
 	syncLoopCancel context.CancelFunc
 }
 
-// NewMultiTenantConsumer creates a new MultiTenantConsumer.
+// NewMultiTenantConsumerWithError creates a new MultiTenantConsumer.
 // Parameters:
 //   - rabbitmq: RabbitMQ connection manager for tenant vhosts (must not be nil)
 //   - redisClient: Redis client for tenant cache access (must not be nil)
@@ -208,7 +202,7 @@ type MultiTenantConsumer struct {
 //   - logger: Logger for operational logging
 //   - opts: Optional configuration options (e.g., WithPostgresManager, WithMongoManager)
 //
-// Panics if rabbitmq or redisClient is nil, as they are required for core functionality.
+// Returns an error if rabbitmq or redisClient is nil, as they are required for core functionality.
 func NewMultiTenantConsumerWithError(
 	rabbitmq *tmrabbitmq.Manager,
 	redisClient redis.UniversalClient,
@@ -217,11 +211,11 @@ func NewMultiTenantConsumerWithError(
 	opts ...Option,
 ) (*MultiTenantConsumer, error) {
 	if rabbitmq == nil {
-		return nil, fmt.Errorf("consumer.NewMultiTenantConsumer: rabbitmq must not be nil")
+		return nil, errors.New("consumer.NewMultiTenantConsumerWithError: rabbitmq must not be nil")
 	}
 
 	if redisClient == nil {
-		return nil, fmt.Errorf("consumer.NewMultiTenantConsumer: redisClient must not be nil")
+		return nil, errors.New("consumer.NewMultiTenantConsumerWithError: redisClient must not be nil")
 	}
 
 	// Guard against nil logger to prevent panics downstream
@@ -232,10 +226,6 @@ func NewMultiTenantConsumerWithError(
 	// Apply defaults
 	if config.SyncInterval <= 0 {
 		config.SyncInterval = 30 * time.Second
-	}
-
-	if config.WorkersPerQueue == 0 {
-		config.WorkersPerQueue = 1
 	}
 
 	if config.PrefetchCount == 0 {
@@ -262,30 +252,19 @@ func NewMultiTenantConsumerWithError(
 	if config.MultiTenantURL != "" {
 		pmClient, err := client.NewClient(config.MultiTenantURL, consumer.logger.Base())
 		if err != nil {
-			return nil, fmt.Errorf("consumer.NewMultiTenantConsumer: invalid MultiTenantURL: %w", err)
+			return nil, fmt.Errorf("consumer.NewMultiTenantConsumerWithError: invalid MultiTenantURL: %w", err)
 		}
 
 		consumer.pmClient = pmClient
 	}
 
-	return consumer, nil
-}
-
-// NewMultiTenantConsumer creates a new MultiTenantConsumer.
-// Deprecated: prefer NewMultiTenantConsumerWithError for explicit constructor errors.
-func NewMultiTenantConsumer(
-	rabbitmq *tmrabbitmq.Manager,
-	redisClient redis.UniversalClient,
-	config MultiTenantConfig,
-	logger libLog.Logger,
-	opts ...Option,
-) *MultiTenantConsumer {
-	consumer, err := NewMultiTenantConsumerWithError(rabbitmq, redisClient, config, logger, opts...)
-	if err != nil {
-		panic(fmt.Sprintf("consumer.NewMultiTenantConsumer is deprecated and now fails fast: %v", err))
+	if config.WorkersPerQueue > 0 {
+		consumer.logger.Base().Log(context.Background(), libLog.LevelWarn,
+			"WorkersPerQueue is deprecated and has no effect; the field is reserved for future use",
+			libLog.Int("workers_per_queue", config.WorkersPerQueue))
 	}
 
-	return consumer
+	return consumer, nil
 }
 
 // Register adds a queue handler for all tenant vhosts.
@@ -312,8 +291,11 @@ func (c *MultiTenantConsumer) Run(ctx context.Context) error {
 	ctx, span := tracer.Start(ctx, "consumer.multi_tenant_consumer.run")
 	defer span.End()
 
-	// Store parent context for use by ensureConsumerStarted
+	// Store parent context for use by ensureConsumerStarted.
+	// Protected by c.mu because ensureConsumerStarted reads it concurrently.
+	c.mu.Lock()
 	c.parentCtx = ctx
+	c.mu.Unlock()
 
 	// Discover tenants without blocking (soft failure - does not start consumers)
 	c.discoverTenants(ctx)
@@ -448,7 +430,7 @@ func (c *MultiTenantConsumer) syncTenants(ctx context.Context) error {
 	validTenantIDs := make([]string, 0, len(tenantIDs))
 
 	for _, id := range tenantIDs {
-		if isValidTenantID(id) {
+		if core.IsValidTenantID(id) {
 			validTenantIDs = append(validTenantIDs, id)
 		} else {
 			logger.WarnfCtx(ctx, "skipping invalid tenant ID: %q", id)
@@ -467,7 +449,7 @@ func (c *MultiTenantConsumer) syncTenants(ctx context.Context) error {
 	defer c.mu.Unlock()
 
 	if c.closed {
-		return fmt.Errorf("consumer is closed")
+		return errors.New("consumer is closed")
 	}
 
 	// Snapshot previous known tenants so we can retain those missing briefly from the fetch.
@@ -660,15 +642,21 @@ func (c *MultiTenantConsumer) evictSuspendedTenant(ctx context.Context, tenantID
 
 	// Close database connections for suspended tenant
 	if c.postgres != nil {
-		_ = c.postgres.CloseConnection(ctx, tenantID)
+		if err := c.postgres.CloseConnection(ctx, tenantID); err != nil {
+			logger.WarnfCtx(ctx, "failed to close PostgreSQL connection for suspended tenant %s: %v", tenantID, err)
+		}
 	}
 
 	if c.mongo != nil {
-		_ = c.mongo.CloseConnection(ctx, tenantID)
+		if err := c.mongo.CloseConnection(ctx, tenantID); err != nil {
+			logger.WarnfCtx(ctx, "failed to close MongoDB connection for suspended tenant %s: %v", tenantID, err)
+		}
 	}
 
 	if c.rabbitmq != nil {
-		_ = c.rabbitmq.CloseConnection(ctx, tenantID)
+		if err := c.rabbitmq.CloseConnection(ctx, tenantID); err != nil {
+			logger.WarnfCtx(ctx, "failed to close RabbitMQ connection for suspended tenant %s: %v", tenantID, err)
+		}
 	}
 }
 
@@ -1011,19 +999,24 @@ const maxBackoff = 40 * time.Second
 // maxRetryBeforeDegraded is the number of consecutive failures before marking a tenant as degraded.
 const maxRetryBeforeDegraded = 3
 
-// backoffDelay calculates the exponential backoff delay for a given retry count.
-// The formula is: min(initialBackoff * 2^retryCount, maxBackoff).
-// Sequence: 5s, 10s, 20s, 40s, 40s, ...
+// backoffDelay calculates the exponential backoff delay for a given retry count
+// with +/-25% jitter to prevent thundering herd when multiple tenants retry simultaneously.
+// Base sequence: 5s, 10s, 20s, 40s, 40s, ... (before jitter).
 func backoffDelay(retryCount int) time.Duration {
 	delay := initialBackoff
 	for i := 0; i < retryCount; i++ {
 		delay *= 2
 		if delay > maxBackoff {
-			return maxBackoff
+			delay = maxBackoff
+
+			break
 		}
 	}
 
-	return delay
+	// Apply +/-25% jitter: multiply by a random factor in [0.75, 1.25)
+	jitter := 0.75 + rand.Float64()*0.5
+
+	return time.Duration(float64(delay) * jitter)
 }
 
 // getRetryState returns the retry state entry for a tenant, creating one if it does not exist.
@@ -1087,11 +1080,14 @@ func (c *MultiTenantConsumer) ensureConsumerStarted(ctx context.Context, tenantI
 		return
 	}
 
-	// Use stored parentCtx if available (from Run()), otherwise use the provided ctx
+	// Use stored parentCtx if available (from Run()), otherwise use the provided ctx.
+	// Protected by c.mu.RLock because Run() writes parentCtx concurrently.
+	c.mu.RLock()
 	startCtx := ctx
 	if c.parentCtx != nil {
 		startCtx = c.parentCtx
 	}
+	c.mu.RUnlock()
 
 	logger.InfofCtx(ctx, "on-demand consumer start for tenant: %s", tenantID)
 
@@ -1121,16 +1117,6 @@ func (c *MultiTenantConsumer) IsDegraded(tenantID string) bool {
 	}
 
 	return state.isDegraded()
-}
-
-// isValidTenantID validates a tenant ID against security constraints.
-// Valid tenant IDs must be non-empty, within the max length, and match the allowed character pattern.
-func isValidTenantID(id string) bool {
-	if id == "" || len(id) > maxTenantIDLength {
-		return false
-	}
-
-	return validTenantIDPattern.MatchString(id)
 }
 
 // Close stops all consumer goroutines and marks the consumer as closed.
