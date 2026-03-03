@@ -23,6 +23,8 @@ var (
 	ErrCiphertextTooShort = errors.New("ciphertext too short")
 	// ErrNilCrypto is returned when a Crypto method is called on a nil receiver.
 	ErrNilCrypto = errors.New("crypto instance is nil")
+	// ErrNilInput is returned when a nil pointer is passed to Encrypt or Decrypt.
+	ErrNilInput = errors.New("nil input")
 )
 
 // Crypto groups hashing and symmetric encryption helpers.
@@ -112,7 +114,7 @@ func (c *Crypto) Encrypt(plainText *string) (*string, error) {
 	}
 
 	if plainText == nil {
-		return nil, nil
+		return nil, ErrNilInput
 	}
 
 	if c.Cipher == nil {
@@ -142,7 +144,7 @@ func (c *Crypto) Decrypt(encryptedText *string) (*string, error) {
 	}
 
 	if encryptedText == nil {
-		return nil, nil
+		return nil, ErrNilInput
 	}
 
 	if c.Cipher == nil {

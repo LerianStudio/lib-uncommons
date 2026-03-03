@@ -160,11 +160,12 @@ func TestEncrypt(t *testing.T) {
 		errContains string
 	}{
 		{
-			name:       "nil input returns nil without error",
-			initCipher: true,
-			input:      nil,
-			expectNil:  true,
-			expectErr:  false,
+			name:        "nil input returns error",
+			initCipher:  true,
+			input:       nil,
+			expectNil:   true,
+			expectErr:   true,
+			errContains: "nil input",
 		},
 		{
 			name:        "uninitialized cipher returns error",
@@ -238,11 +239,12 @@ func TestDecrypt(t *testing.T) {
 		errContains string
 	}{
 		{
-			name:       "nil input returns nil without error",
-			initCipher: true,
-			input:      nil,
-			expectNil:  true,
-			expectErr:  false,
+			name:        "nil input returns error",
+			initCipher:  true,
+			input:       nil,
+			expectNil:   true,
+			expectErr:   true,
+			errContains: "nil input",
 		},
 		{
 			name:        "uninitialized cipher returns error",
