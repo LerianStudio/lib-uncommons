@@ -302,7 +302,7 @@ func (m *MultiPoolMiddleware) extractTenantID(c *fiber.Ctx) (string, error) {
 
 	token, _, err := new(jwt.Parser).ParseUnverified(accessToken, jwt.MapClaims{})
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", core.ErrInvalidAuthorizationToken, err)
+		return "", fmt.Errorf("%w: %w", core.ErrInvalidAuthorizationToken, err)
 	}
 
 	claims, ok := token.Claims.(jwt.MapClaims)
@@ -336,7 +336,7 @@ func (m *MultiPoolMiddleware) resolvePGConnection(
 		logger.ErrorCtx(ctx, fmt.Sprintf("failed to get tenant PostgreSQL connection: module=%s, tenantID=%s, error=%v", route.module, tenantID, err))
 		libOpentelemetry.HandleSpanError(span, "failed to get tenant PostgreSQL connection", err)
 
-		return ctx, fmt.Errorf("%w: %v", core.ErrConnectionFailed, err)
+		return ctx, fmt.Errorf("%w: %w", core.ErrConnectionFailed, err)
 	}
 
 	db, err := conn.GetDB()
@@ -344,7 +344,7 @@ func (m *MultiPoolMiddleware) resolvePGConnection(
 		logger.ErrorCtx(ctx, fmt.Sprintf("failed to get database from PostgreSQL connection: module=%s, tenantID=%s, error=%v", route.module, tenantID, err))
 		libOpentelemetry.HandleSpanError(span, "failed to get database from PostgreSQL connection", err)
 
-		return ctx, fmt.Errorf("%w: %v", core.ErrConnectionFailed, err)
+		return ctx, fmt.Errorf("%w: %w", core.ErrConnectionFailed, err)
 	}
 
 	ctx = core.ContextWithModulePGConnection(ctx, route.module, db)
@@ -365,48 +365,44 @@ func (m *MultiPoolMiddleware) resolveCrossModuleConnections(
 			continue
 		}
 
-		conn, err := route.pgPool.GetConnection(ctx, tenantID)
-		if err != nil {
-			logger.WarnfCtx(ctx, "cross-module PG resolution failed: module=%s, tenantID=%s, error=%v",
-				route.module, tenantID, err)
-
-			continue
-		}
-
-		db, err := conn.GetDB()
-		if err != nil {
-			logger.WarnfCtx(ctx, "cross-module PG GetDB failed: module=%s, tenantID=%s, error=%v",
-				route.module, tenantID, err)
-
-			continue
-		}
-
-		ctx = core.ContextWithModulePGConnection(ctx, route.module, db)
+		ctx = m.resolveAndInjectCrossModule(ctx, route, tenantID, logger) //nolint:fatcontext // intentional accumulation of per-module connections into ctx across iterations
 	}
 
 	// Also resolve default route if it differs from matched
 	if m.defaultRoute != nil && m.defaultRoute != matchedRoute &&
 		m.defaultRoute.pgPool != nil && m.defaultRoute.pgPool.IsMultiTenant() {
-		conn, err := m.defaultRoute.pgPool.GetConnection(ctx, tenantID)
-		if err != nil {
-			logger.WarnfCtx(ctx, "cross-module PG resolution failed: module=%s, tenantID=%s, error=%v",
-				m.defaultRoute.module, tenantID, err)
-
-			return ctx
-		}
-
-		db, err := conn.GetDB()
-		if err != nil {
-			logger.WarnfCtx(ctx, "cross-module PG GetDB failed: module=%s, tenantID=%s, error=%v",
-				m.defaultRoute.module, tenantID, err)
-
-			return ctx
-		}
-
-		ctx = core.ContextWithModulePGConnection(ctx, m.defaultRoute.module, db)
+		ctx = m.resolveAndInjectCrossModule(ctx, m.defaultRoute, tenantID, logger)
 	}
 
 	return ctx
+}
+
+// resolveAndInjectCrossModule resolves a single cross-module PG connection and
+// injects it into the context. Errors are logged but do not block the request;
+// the original context is returned unchanged on failure.
+func (m *MultiPoolMiddleware) resolveAndInjectCrossModule(
+	ctx context.Context,
+	route *PoolRoute,
+	tenantID string,
+	logger *logcompat.Logger,
+) context.Context {
+	conn, err := route.pgPool.GetConnection(ctx, tenantID)
+	if err != nil {
+		logger.WarnfCtx(ctx, "cross-module PG resolution failed: module=%s, tenantID=%s, error=%v",
+			route.module, tenantID, err)
+
+		return ctx
+	}
+
+	db, err := conn.GetDB()
+	if err != nil {
+		logger.WarnfCtx(ctx, "cross-module PG GetDB failed: module=%s, tenantID=%s, error=%v",
+			route.module, tenantID, err)
+
+		return ctx
+	}
+
+	return core.ContextWithModulePGConnection(ctx, route.module, db)
 }
 
 // resolveMongoConnection resolves the MongoDB database for the given route
@@ -423,7 +419,7 @@ func (m *MultiPoolMiddleware) resolveMongoConnection(
 		logger.ErrorCtx(ctx, fmt.Sprintf("failed to get tenant MongoDB connection: module=%s, tenantID=%s, error=%v", route.module, tenantID, err))
 		libOpentelemetry.HandleSpanError(span, "failed to get tenant MongoDB connection", err)
 
-		return ctx, fmt.Errorf("%w: %v", core.ErrConnectionFailed, err)
+		return ctx, fmt.Errorf("%w: %w", core.ErrConnectionFailed, err)
 	}
 
 	ctx = core.ContextWithTenantMongo(ctx, mongoDB)
