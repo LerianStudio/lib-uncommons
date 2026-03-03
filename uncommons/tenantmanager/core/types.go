@@ -79,8 +79,8 @@ type TenantConfig struct {
 	Databases          map[string]DatabaseConfig `json:"databases,omitempty"`
 	Messaging          *MessagingConfig          `json:"messaging,omitempty"`
 	ConnectionSettings *ConnectionSettings       `json:"connectionSettings,omitempty"`
-	CreatedAt          time.Time                 `json:"createdAt,omitempty"`
-	UpdatedAt          time.Time                 `json:"updatedAt,omitempty"`
+	CreatedAt          time.Time                 `json:"createdAt,omitzero"`
+	UpdatedAt          time.Time                 `json:"updatedAt,omitzero"`
 }
 
 // sortedDatabaseKeys returns the keys of the Databases map in sorted order.
