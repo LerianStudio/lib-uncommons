@@ -19,11 +19,6 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-// defaultIdleTimeout is the default duration before a tenant connection becomes
-// eligible for eviction when the pool exceeds the soft limit.
-// Defined centrally in the eviction package; aliased here for local convenience.
-var defaultIdleTimeout = eviction.DefaultIdleTimeout
-
 // Manager manages RabbitMQ connections per tenant.
 // Each tenant has a dedicated vhost, user, and credentials stored in Tenant Manager.
 // When maxConnections is set (> 0), the manager uses LRU eviction with an idle
