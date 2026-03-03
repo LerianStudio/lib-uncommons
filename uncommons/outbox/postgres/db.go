@@ -10,7 +10,7 @@ import (
 )
 
 type resolverProvider interface {
-	Resolver(context.Context) (dbresolver.DB, error)
+	Resolver(ctx context.Context) (dbresolver.DB, error)
 }
 
 func resolvePrimaryDB(ctx context.Context, client resolverProvider) (*sql.DB, error) {
