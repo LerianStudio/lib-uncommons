@@ -88,6 +88,26 @@ func (m *mockDB) PrimaryDBs() []*sql.DB              { return nil }
 func (m *mockDB) ReplicaDBs() []*sql.DB              { return nil }
 func (m *mockDB) Stats() sql.DBStats                 { return sql.DBStats{} }
 
+func TestGetTenantPGConnectionFromContext(t *testing.T) {
+	t.Run("returns nil when no PG connection in context", func(t *testing.T) {
+		ctx := context.Background()
+
+		db := GetTenantPGConnectionFromContext(ctx)
+
+		assert.Nil(t, db)
+	})
+
+	t.Run("returns connection when set via ContextWithTenantPGConnection", func(t *testing.T) {
+		ctx := context.Background()
+		mockConn := &mockDB{name: "tenant-db"}
+
+		ctx = ContextWithTenantPGConnection(ctx, mockConn)
+		db := GetTenantPGConnectionFromContext(ctx)
+
+		assert.Equal(t, mockConn, db)
+	})
+}
+
 func TestContextWithModulePGConnection(t *testing.T) {
 	t.Run("stores and retrieves module connection", func(t *testing.T) {
 		ctx := context.Background()
