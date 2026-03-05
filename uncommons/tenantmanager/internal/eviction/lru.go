@@ -41,7 +41,7 @@ func FindLRUEvictionCandidate(
 		return "", false
 	}
 
-	if idleTimeout == 0 {
+	if idleTimeout <= 0 {
 		idleTimeout = DefaultIdleTimeout
 	}
 

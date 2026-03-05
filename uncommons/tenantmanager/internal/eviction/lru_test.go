@@ -402,9 +402,9 @@ func TestFindLRUEvictionCandidate_TableDriven(t *testing.T) {
 				// The eviction check uses `idleDuration < idleTimeout` (strictly
 				// less-than), so entries whose idle time equals the timeout ARE
 				// eligible. We place the entry comfortably under the threshold
-				// (1 second buffer) to avoid clock drift between the test's
+				// (30 second buffer) to avoid clock drift between the test's
 				// `now` and FindLRUEvictionCandidate's internal time.Now().
-				"t1": now.Add(-idleTimeout + time.Second),
+				"t1": now.Add(-idleTimeout + 30*time.Second),
 			},
 			idleTimeout: idleTimeout,
 			expectedID:  "",
@@ -415,7 +415,7 @@ func TestFindLRUEvictionCandidate_TableDriven(t *testing.T) {
 			connectionCount: 1,
 			maxConnections:  1,
 			lastAccessed: map[string]time.Time{
-				"t1": now.Add(-idleTimeout - time.Second),
+				"t1": now.Add(-idleTimeout - 30*time.Second),
 			},
 			idleTimeout: idleTimeout,
 			expectedID:  "t1",
