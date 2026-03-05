@@ -74,6 +74,7 @@ endif
 # Pinned tool versions for reproducibility (update as needed)
 GOTESTSUM_VERSION ?= v1.12.0
 GOSEC_VERSION ?= v2.22.4
+GOLANGCI_LINT_VERSION ?= v2.1.6
 
 TEST_REPORTS_DIR ?= ./reports
 GOTESTSUM = $(shell command -v gotestsum 2>/dev/null)
@@ -441,7 +442,7 @@ coverage:
 .PHONY: lint
 lint:
 	$(call print_title,Running linters on all packages (read-only))
-	$(call check_command,golangci-lint,"go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest")
+	$(call check_command,golangci-lint,"go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)")
 	@out=$$(golangci-lint run ./... 2>&1); \
 	out_err=$$?; \
 	if command -v perfsprint >/dev/null 2>&1; then \
@@ -469,7 +470,7 @@ lint:
 .PHONY: lint-fix
 lint-fix:
 	$(call print_title,Running linters with auto-fix on all packages)
-	$(call check_command,golangci-lint,"go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest")
+	$(call check_command,golangci-lint,"go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)")
 	@golangci-lint run --fix ./...
 	@echo "$(GREEN)$(BOLD)[ok]$(NC) Lint auto-fix completed$(GREEN) ✔️$(NC)"
 
