@@ -20,7 +20,7 @@ func New(logger liblog.Logger) *Logger {
 }
 
 func (l *Logger) WithFields(kv ...any) *Logger {
-	if l == nil {
+	if l == nil || l.base == nil {
 		return New(nil)
 	}
 
@@ -28,11 +28,11 @@ func (l *Logger) WithFields(kv ...any) *Logger {
 }
 
 func (l *Logger) enabled(level liblog.Level) bool {
-	return l != nil && l.base.Enabled(level)
+	return l != nil && l.base != nil && l.base.Enabled(level)
 }
 
 func (l *Logger) log(ctx context.Context, level liblog.Level, msg string) {
-	if l == nil {
+	if l == nil || l.base == nil {
 		return
 	}
 

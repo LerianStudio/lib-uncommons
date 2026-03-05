@@ -179,6 +179,10 @@ type Syscmd struct{}
 
 // ExecCmd runs a command and returns its stdout bytes.
 func (r *Syscmd) ExecCmd(ctx context.Context, name string, arg ...string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	// #nosec G204 -- arguments are passed directly to exec.CommandContext (no shell interpretation); callers are responsible for input validation
 	return exec.CommandContext(ctx, name, arg...).Output()
 }
