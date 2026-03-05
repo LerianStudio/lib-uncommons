@@ -59,7 +59,10 @@ func TestManager_Close_WaitsForRevalidateSettings(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tmClient, _ := client.NewClient(server.URL, logger)
+	tmClient, err := client.NewClient(server.URL, logger)
+	if err != nil {
+		t.Fatalf("NewClient() returned unexpected error: %v", err)
+	}
 
 	manager := NewManager(tmClient, "test-service",
 		WithLogger(logger),
@@ -80,7 +83,7 @@ func TestManager_Close_WaitsForRevalidateSettings(t *testing.T) {
 
 	// GetConnection will hit cache, see that settingsCheckInterval has elapsed,
 	// and spawn a revalidatePoolSettings goroutine that blocks for 500ms on the server.
-	_, err := manager.GetConnection(context.Background(), "tenant-slow")
+	_, err = manager.GetConnection(context.Background(), "tenant-slow")
 	if err != nil {
 		t.Fatalf("GetConnection() returned unexpected error: %v", err)
 	}

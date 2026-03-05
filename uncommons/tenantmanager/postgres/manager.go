@@ -123,7 +123,7 @@ type PostgresConnection struct {
 	client *libPostgres.Client
 }
 
-func (c *PostgresConnection) Connect() error {
+func (c *PostgresConnection) Connect(ctx context.Context) error {
 	if c == nil {
 		return errors.New("postgres connection is nil")
 	}
@@ -139,11 +139,11 @@ func (c *PostgresConnection) Connect() error {
 		return err
 	}
 
-	if err := pgClient.Connect(context.Background()); err != nil {
+	if err := pgClient.Connect(ctx); err != nil {
 		return err
 	}
 
-	resolver, err := pgClient.Resolver(context.Background())
+	resolver, err := pgClient.Resolver(ctx)
 	if err != nil {
 		return err
 	}
@@ -282,6 +282,10 @@ func NewManager(c *client.Client, service string, opts ...Option) *Manager {
 // after a tenant purge+re-associate), the stale connection is evicted and a new
 // one is created with fresh credentials from the Tenant Manager.
 func (p *Manager) GetConnection(ctx context.Context, tenantID string) (*PostgresConnection, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	if tenantID == "" {
 		return nil, errors.New("tenant ID is required")
 	}
@@ -548,7 +552,7 @@ func (p *Manager) buildTenantPostgresConnection(
 		return nil, fmt.Errorf("schema mode requires schema in config for tenant %s", tenantID)
 	}
 
-	if err := conn.Connect(); err != nil {
+	if err := conn.Connect(ctx); err != nil {
 		logger.ErrorCtx(ctx, fmt.Sprintf("failed to connect to tenant database: %v", err))
 		libOpentelemetry.HandleSpanError(span, "failed to connect", err)
 
