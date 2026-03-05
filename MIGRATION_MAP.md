@@ -817,6 +817,18 @@ Five Valkey functions now return `(string, error)` instead of `string` to suppor
 
 **Migration note:** Applications relying on the `X-User-ID` header for auth assertion must ensure upstream auth middleware sets the Fiber local `user_id` value instead. The header path was removed because HTTP headers are client-spoofable and cannot be trusted for authorization decisions.
 
+**5. `isPublicPath` boundary-aware matching**
+
+| Behavior | v2 (previous) | v2 (current) |
+|----------|---|---|
+| `isPublicPath` matching | `strings.HasPrefix(path, prefix)` | `path == prefix \|\| strings.HasPrefix(path, prefix+"/")` |
+
+**Before:** `/healthy` matched public path `/health` because `strings.HasPrefix("/healthy", "/health")` is true.
+
+**After:** `/healthy` does **not** match public path `/health`. Only exact matches (`/health`) or sub-paths (`/health/live`) match.
+
+**Migration note:** Services using `WithPublicPaths()` that relied on the previous prefix-only matching behavior may need to adjust their configured paths. For example, if a service had `WithPublicPaths("/health")` and expected `/healthz` to be treated as public, it must now explicitly add `/healthz` to the public paths list. This change prevents unintended route matching where a public path prefix accidentally exempted unrelated endpoints from tenant resolution.
+
 **5. PostgreSQL SSL default changed**
 
 | Behavior | v2 (previous) | v2 (current) |
