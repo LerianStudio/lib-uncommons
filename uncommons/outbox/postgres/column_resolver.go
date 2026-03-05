@@ -31,6 +31,11 @@ type ColumnResolver struct {
 
 const defaultTenantDiscoveryTTL = 10 * time.Second
 
+// defaultTenantDiscoveryTimeout caps how long a singleflight tenant-discovery
+// query may run. Because context.WithoutCancel strips any parent deadline, an
+// explicit timeout prevents unbounded queries from blocking all coalesced callers.
+const defaultTenantDiscoveryTimeout = 5 * time.Second
+
 type ColumnResolverOption func(*ColumnResolver)
 
 func WithColumnResolverTableName(tableName string) ColumnResolverOption {
@@ -121,7 +126,10 @@ func (resolver *ColumnResolver) DiscoverTenants(ctx context.Context) ([]string, 
 
 		// Use a context that inherits values but not cancellation,
 		// so first caller's timeout doesn't cascade to coalesced callers.
-		sfCtx := context.WithoutCancel(ctx)
+		// Apply an explicit timeout to prevent unbounded queries when the
+		// parent context's deadline was stripped by WithoutCancel.
+		sfCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultTenantDiscoveryTimeout)
+		defer cancel()
 
 		return resolver.queryTenants(sfCtx)
 	})
