@@ -37,7 +37,7 @@ func TestManager_GetConnection_NoTenantID(t *testing.T) {
 func TestManager_GetConnection_ManagerClosed(t *testing.T) {
 	c := &client.Client{}
 	manager := NewManager(c, "ledger")
-	manager.Close(context.Background())
+	require.NoError(t, manager.Close(context.Background()))
 
 	_, err := manager.GetConnection(context.Background(), "tenant-123")
 
@@ -668,7 +668,7 @@ func TestManager_Stats(t *testing.T) {
 		c := &client.Client{}
 		manager := NewManager(c, "ledger")
 
-		manager.Close(context.Background())
+		require.NoError(t, manager.Close(context.Background()))
 
 		stats := manager.Stats()
 

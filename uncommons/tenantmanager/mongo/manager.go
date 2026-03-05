@@ -167,6 +167,10 @@ func NewManager(c *client.Client, service string, opts ...Option) *Manager {
 // after a tenant purge+re-associate), the stale client is evicted and a new
 // one is created with fresh credentials from the Tenant Manager.
 func (p *Manager) GetConnection(ctx context.Context, tenantID string) (*mongo.Client, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	if tenantID == "" {
 		return nil, errors.New("tenant ID is required")
 	}
@@ -242,21 +246,126 @@ func (p *Manager) createConnection(ctx context.Context, tenantID string) (*mongo
 	ctx, span := tracer.Start(ctx, "mongo.create_connection")
 	defer span.End()
 
+	// Check for a cached connection under the write lock, but perform
+	// network I/O (Ping / Disconnect) outside the lock to avoid blocking
+	// other goroutines on slow network calls.
+	cachedConn, hasCached, err := p.snapshotCachedConnection(tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	if hasCached {
+		if reusedDB, reused := p.tryReuseCachedConnection(ctx, tenantID, cachedConn); reused {
+			return reusedDB, nil
+		}
+	}
+
+	return p.buildAndCacheNewConnection(ctx, tenantID, logger, span)
+}
+
+// snapshotCachedConnection reads the cached connection for tenantID under a
+// short lock and returns whether the manager is closed.
+func (p *Manager) snapshotCachedConnection(tenantID string) (*MongoConnection, bool, error) {
 	p.mu.Lock()
-	if cachedDB, ok := p.tryReuseOrEvictCachedConnectionLocked(ctx, tenantID); ok {
-		p.mu.Unlock()
-
-		return cachedDB, nil
-	}
-
-	if p.closed {
-		p.mu.Unlock()
-
-		return nil, core.ErrManagerClosed
-	}
-
+	cachedConn, hasCached := p.connections[tenantID]
+	closed := p.closed
 	p.mu.Unlock()
 
+	if closed {
+		return nil, false, core.ErrManagerClosed
+	}
+
+	return cachedConn, hasCached, nil
+}
+
+// tryReuseCachedConnection validates a previously cached connection by pinging it.
+// If the connection is healthy and still in the cache, it updates the LRU timestamp
+// and returns it. If unhealthy or evicted, it cleans up and returns reused=false so
+// the caller falls through to create a new connection.
+func (p *Manager) tryReuseCachedConnection(
+	ctx context.Context,
+	tenantID string,
+	cachedConn *MongoConnection,
+) (*mongo.Client, bool) {
+	if cachedConn == nil || cachedConn.DB == nil {
+		p.removeStaleCacheEntry(tenantID, cachedConn)
+
+		return nil, false
+	}
+
+	pingCtx, cancel := context.WithTimeout(ctx, mongoPingTimeout)
+	pingErr := cachedConn.DB.Ping(pingCtx, nil)
+
+	cancel()
+
+	if pingErr == nil {
+		return p.reuseHealthyConnection(tenantID, cachedConn)
+	}
+
+	p.disconnectUnhealthyConnection(ctx, tenantID, cachedConn, pingErr)
+
+	return nil, false
+}
+
+// reuseHealthyConnection updates the LRU timestamp for a healthy cached connection.
+// Returns (client, true) if the entry still exists in the cache, or (nil, false) if
+// it was evicted while we were pinging.
+func (p *Manager) reuseHealthyConnection(tenantID string, cachedConn *MongoConnection) (*mongo.Client, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if current, stillExists := p.connections[tenantID]; stillExists && current == cachedConn {
+		p.lastAccessed[tenantID] = time.Now()
+
+		return cachedConn.DB, true
+	}
+
+	return nil, false
+}
+
+// disconnectUnhealthyConnection disconnects a cached connection that failed its
+// health check and removes the stale cache entry.
+func (p *Manager) disconnectUnhealthyConnection(
+	ctx context.Context,
+	tenantID string,
+	cachedConn *MongoConnection,
+	pingErr error,
+) {
+	if p.logger != nil {
+		p.logger.WarnCtx(ctx, fmt.Sprintf("cached mongo connection unhealthy for tenant %s, reconnecting: %v", tenantID, pingErr))
+	}
+
+	discCtx, discCancel := context.WithTimeout(ctx, mongoPingTimeout)
+	if discErr := cachedConn.DB.Disconnect(discCtx); discErr != nil && p.logger != nil {
+		p.logger.WarnCtx(ctx, fmt.Sprintf("failed to disconnect unhealthy mongo connection for tenant %s: %v", tenantID, discErr))
+	}
+
+	discCancel()
+
+	p.removeStaleCacheEntry(tenantID, cachedConn)
+}
+
+// removeStaleCacheEntry removes a cache entry only if it still points to the
+// same connection reference (not replaced by another goroutine).
+func (p *Manager) removeStaleCacheEntry(tenantID string, cachedConn *MongoConnection) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if current, ok := p.connections[tenantID]; ok && current == cachedConn {
+		delete(p.connections, tenantID)
+		delete(p.databaseNames, tenantID)
+		delete(p.lastAccessed, tenantID)
+	}
+}
+
+// buildAndCacheNewConnection fetches tenant config, builds a new MongoDB client,
+// and caches it.
+func (p *Manager) buildAndCacheNewConnection(
+	ctx context.Context,
+	tenantID string,
+	logger *logcompat.Logger,
+	span trace.Span,
+) (*mongo.Client, error) {
 	mongoConfig, err := p.getMongoConfigForTenant(ctx, tenantID, logger, span)
 	if err != nil {
 		return nil, err
@@ -289,38 +398,6 @@ func (p *Manager) createConnection(ctx context.Context, tenantID string) (*mongo
 	logger.InfofCtx(ctx, "MongoDB connection created for tenant %s (database: %s)", tenantID, mongoConfig.Database)
 
 	return p.cacheConnection(ctx, tenantID, conn, mongoConfig.Database, logger.Base())
-}
-
-func (p *Manager) tryReuseOrEvictCachedConnectionLocked(ctx context.Context, tenantID string) (*mongo.Client, bool) {
-	conn, ok := p.connections[tenantID]
-	if !ok {
-		return nil, false
-	}
-
-	if conn != nil && conn.DB != nil {
-		pingCtx, cancel := context.WithTimeout(ctx, mongoPingTimeout)
-		pingErr := conn.DB.Ping(pingCtx, nil)
-
-		cancel()
-
-		if pingErr == nil {
-			return conn.DB, true
-		}
-
-		if p.logger != nil {
-			p.logger.WarnCtx(ctx, fmt.Sprintf("cached mongo connection unhealthy for tenant %s, reconnecting: %v", tenantID, pingErr))
-		}
-
-		if discErr := conn.DB.Disconnect(ctx); discErr != nil && p.logger != nil {
-			p.logger.WarnCtx(ctx, fmt.Sprintf("failed to disconnect unhealthy mongo connection for tenant %s: %v", tenantID, discErr))
-		}
-	}
-
-	delete(p.connections, tenantID)
-	delete(p.databaseNames, tenantID)
-	delete(p.lastAccessed, tenantID)
-
-	return nil, false
 }
 
 func (p *Manager) getMongoConfigForTenant(
@@ -367,7 +444,12 @@ func (p *Manager) cacheConnection(
 
 	if p.closed {
 		if conn.DB != nil {
-			_ = conn.DB.Disconnect(ctx)
+			if discErr := conn.DB.Disconnect(ctx); discErr != nil && p.logger != nil {
+				p.logger.Base().Log(ctx, log.LevelWarn, "failed to disconnect mongo connection on closed manager",
+					log.String("tenant_id", tenantID),
+					log.Err(discErr),
+				)
+			}
 		}
 
 		return nil, core.ErrManagerClosed
@@ -375,7 +457,12 @@ func (p *Manager) cacheConnection(
 
 	if cached, ok := p.connections[tenantID]; ok && cached != nil && cached.DB != nil {
 		if conn.DB != nil {
-			_ = conn.DB.Disconnect(ctx)
+			if discErr := conn.DB.Disconnect(ctx); discErr != nil && p.logger != nil {
+				p.logger.Base().Log(ctx, log.LevelWarn, "failed to disconnect excess mongo connection",
+					log.String("tenant_id", tenantID),
+					log.Err(discErr),
+				)
+			}
 		}
 
 		p.lastAccessed[tenantID] = time.Now()
@@ -500,50 +587,66 @@ func (p *Manager) GetDatabaseForTenant(ctx context.Context, tenantID string) (*m
 }
 
 // Close closes all MongoDB connections.
+//
+// Uses snapshot-then-cleanup to avoid holding the mutex during network I/O
+// (Disconnect calls), which could block other goroutines on slow networks.
 func (p *Manager) Close(ctx context.Context) error {
+	// Step 1: Under lock — mark closed, snapshot all connections, clear maps.
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	p.closed = true
 
+	snapshot := make([]*MongoConnection, 0, len(p.connections))
+	for _, conn := range p.connections {
+		snapshot = append(snapshot, conn)
+	}
+
+	// Clear all maps while still under lock.
+	clear(p.connections)
+	clear(p.databaseNames)
+	clear(p.lastAccessed)
+
+	p.mu.Unlock()
+
+	// Step 2: Outside lock — disconnect each snapshotted connection.
 	var errs []error
 
-	for tenantID, conn := range p.connections {
+	for _, conn := range snapshot {
 		if conn.DB != nil {
 			if err := conn.DB.Disconnect(ctx); err != nil {
 				errs = append(errs, err)
 			}
 		}
-
-		delete(p.connections, tenantID)
-		delete(p.databaseNames, tenantID)
-		delete(p.lastAccessed, tenantID)
 	}
 
 	return errors.Join(errs...)
 }
 
 // CloseConnection closes the MongoDB client for a specific tenant.
+//
+// Uses snapshot-then-cleanup to avoid holding the mutex during Disconnect,
+// which performs network I/O and could block other goroutines.
 func (p *Manager) CloseConnection(ctx context.Context, tenantID string) error {
+	// Step 1: Under lock — remove entry from maps, capture the connection.
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	conn, ok := p.connections[tenantID]
 	if !ok {
+		p.mu.Unlock()
 		return nil
-	}
-
-	var err error
-
-	if conn.DB != nil {
-		err = conn.DB.Disconnect(ctx)
 	}
 
 	delete(p.connections, tenantID)
 	delete(p.databaseNames, tenantID)
 	delete(p.lastAccessed, tenantID)
 
-	return err
+	p.mu.Unlock()
+
+	// Step 2: Outside lock — disconnect the captured connection.
+	if conn.DB != nil {
+		return conn.DB.Disconnect(ctx)
+	}
+
+	return nil
 }
 
 // Stats returns connection statistics.
