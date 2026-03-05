@@ -135,7 +135,7 @@ func WithMultiPoolLogger(l log.Logger) MultiPoolOption {
 }
 
 // NewMultiPoolMiddleware creates a new MultiPoolMiddleware with the given options.
-// The middleware is enabled if at least one route has a PG pool with
+// The middleware is enabled if at least one route has a PG or Mongo pool with
 // IsMultiTenant() == true.
 func NewMultiPoolMiddleware(opts ...MultiPoolOption) *MultiPoolMiddleware {
 	m := &MultiPoolMiddleware{}
@@ -144,17 +144,21 @@ func NewMultiPoolMiddleware(opts ...MultiPoolOption) *MultiPoolMiddleware {
 		opt(m)
 	}
 
-	// Enable if at least one route has a multi-tenant PG pool
+	// Enable if at least one route has a multi-tenant PG or Mongo pool
 	for _, route := range m.routes {
-		if route.pgPool != nil && route.pgPool.IsMultiTenant() {
+		if (route.pgPool != nil && route.pgPool.IsMultiTenant()) ||
+			(route.mongoPool != nil && route.mongoPool.IsMultiTenant()) {
 			m.enabled = true
 
 			break
 		}
 	}
 
-	if !m.enabled && m.defaultRoute != nil && m.defaultRoute.pgPool != nil && m.defaultRoute.pgPool.IsMultiTenant() {
-		m.enabled = true
+	if !m.enabled && m.defaultRoute != nil {
+		if (m.defaultRoute.pgPool != nil && m.defaultRoute.pgPool.IsMultiTenant()) ||
+			(m.defaultRoute.mongoPool != nil && m.defaultRoute.mongoPool.IsMultiTenant()) {
+			m.enabled = true
+		}
 	}
 
 	return m
@@ -175,21 +179,16 @@ func (m *MultiPoolMiddleware) WithTenantDB(c *fiber.Ctx) error {
 		return c.Next()
 	}
 
-	// Step 3: Multi-tenant check
-	if route.pgPool == nil || !route.pgPool.IsMultiTenant() {
+	// Step 3: Multi-tenant check — skip only if neither pool is multi-tenant
+	pgEnabled := route.pgPool != nil && route.pgPool.IsMultiTenant()
+	mongoEnabled := route.mongoPool != nil && route.mongoPool.IsMultiTenant()
+
+	if !pgEnabled && !mongoEnabled {
 		return c.Next()
 	}
 
 	// Step 4: Extract context + telemetry
-	baseCtx := c.UserContext()
-	if baseCtx == nil {
-		baseCtx = context.Background()
-	}
-
-	ctx := libOpentelemetry.ExtractHTTPContext(baseCtx, c)
-	if ctx == nil {
-		ctx = baseCtx
-	}
+	ctx := m.initializeTracingContext(c)
 
 	baseLogger, tracer, _, _ := libCommons.NewTrackingFromContext(ctx)
 	logger := logcompat.New(baseLogger)
@@ -203,57 +202,95 @@ func (m *MultiPoolMiddleware) WithTenantDB(c *fiber.Ctx) error {
 		logger.ErrorCtx(ctx, fmt.Sprintf("failed to extract tenant ID: %v", err))
 		libOpentelemetry.HandleSpanBusinessErrorEvent(span, "failed to extract tenant ID", err)
 
-		if m.errorMapper != nil {
-			return m.errorMapper(c, err, "")
-		}
-
-		return unauthorizedError(c, "UNAUTHORIZED", "Unauthorized")
+		return m.handleTenantDBError(c, err, "")
 	}
 
 	logger.InfofCtx(ctx, "multi-pool tenant resolved: tenantID=%s, module=%s, path=%s",
 		tenantID, route.module, c.Path())
 
-	// Step 6: Set tenant ID in context
+	// Step 6: Set tenant ID in context and trigger consumer
 	ctx = core.ContextWithTenantID(ctx, tenantID)
 
-	// Step 7: Consumer trigger
 	if m.consumerTrigger != nil {
 		m.consumerTrigger.EnsureConsumerStarted(ctx, tenantID)
 	}
 
-	// Step 8: Resolve PG connection for matched route
-	ctx, err = m.resolvePGConnection(ctx, route, tenantID, logger, span)
+	// Step 7: Resolve database connections
+	ctx, err = m.resolveAllConnections(ctx, route, tenantID, pgEnabled, mongoEnabled, logger, span)
 	if err != nil {
-		if m.errorMapper != nil {
-			return m.errorMapper(c, err, tenantID)
-		}
-
-		return m.mapDefaultError(c, err, tenantID)
+		return m.handleTenantDBError(c, err, tenantID)
 	}
 
-	// Step 9: Cross-module injection
-	if m.crossModule {
-		ctx = m.resolveCrossModuleConnections(ctx, route, tenantID, logger)
-	}
-
-	// Step 10: Resolve Mongo connection
-	if route.mongoPool != nil {
-		ctx, err = m.resolveMongoConnection(ctx, route, tenantID, logger, span)
-		if err != nil {
-			if m.errorMapper != nil {
-				return m.errorMapper(c, err, tenantID)
-			}
-
-			return m.mapDefaultError(c, err, tenantID)
-		}
-	}
-
-	// Step 11: Update context
+	// Step 8: Update context
 	c.SetUserContext(ctx)
 
 	logger.InfofCtx(ctx, "multi-pool connections injected: tenantID=%s, module=%s", tenantID, route.module)
 
 	return c.Next()
+}
+
+// initializeTracingContext extracts HTTP trace context from the Fiber request,
+// falling back to a background context if neither source provides one.
+func (m *MultiPoolMiddleware) initializeTracingContext(c *fiber.Ctx) context.Context {
+	baseCtx := c.UserContext()
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+
+	ctx := libOpentelemetry.ExtractHTTPContext(baseCtx, c)
+	if ctx == nil {
+		ctx = baseCtx
+	}
+
+	return ctx
+}
+
+// handleTenantDBError dispatches the error through the custom error mapper if
+// configured, otherwise falls back to the default error mapping. For empty
+// tenantID (auth errors), it returns a generic 401 when no mapper is set.
+func (m *MultiPoolMiddleware) handleTenantDBError(c *fiber.Ctx, err error, tenantID string) error {
+	if m.errorMapper != nil {
+		return m.errorMapper(c, err, tenantID)
+	}
+
+	if tenantID == "" {
+		return unauthorizedError(c, "UNAUTHORIZED", "Unauthorized")
+	}
+
+	return m.mapDefaultError(c, err, tenantID)
+}
+
+// resolveAllConnections resolves PG, cross-module, and Mongo connections for the
+// matched route and tenant. It returns the enriched context or the first error.
+func (m *MultiPoolMiddleware) resolveAllConnections(
+	ctx context.Context,
+	route *PoolRoute,
+	tenantID string,
+	pgEnabled, mongoEnabled bool,
+	logger *logcompat.Logger,
+	span trace.Span,
+) (context.Context, error) {
+	var err error
+
+	if pgEnabled {
+		ctx, err = m.resolvePGConnection(ctx, route, tenantID, logger, span)
+		if err != nil {
+			return ctx, err
+		}
+	}
+
+	if m.crossModule {
+		ctx = m.resolveCrossModuleConnections(ctx, route, tenantID, logger)
+	}
+
+	if mongoEnabled {
+		ctx, err = m.resolveMongoConnection(ctx, route, tenantID, logger, span)
+		if err != nil {
+			return ctx, err
+		}
+	}
+
+	return ctx, nil
 }
 
 // matchRoute finds the PoolRoute whose paths match the request path.
@@ -262,7 +299,7 @@ func (m *MultiPoolMiddleware) WithTenantDB(c *fiber.Ctx) error {
 func (m *MultiPoolMiddleware) matchRoute(path string) *PoolRoute {
 	for _, route := range m.routes {
 		for _, prefix := range route.paths {
-			if strings.HasPrefix(path, prefix) {
+			if path == prefix || strings.HasPrefix(path, prefix+"/") {
 				return route
 			}
 		}
@@ -275,7 +312,7 @@ func (m *MultiPoolMiddleware) matchRoute(path string) *PoolRoute {
 // path prefix. Public paths bypass all tenant resolution logic.
 func (m *MultiPoolMiddleware) isPublicPath(path string) bool {
 	for _, prefix := range m.publicPaths {
-		if strings.HasPrefix(path, prefix) {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
 			return true
 		}
 	}
@@ -289,7 +326,7 @@ func (m *MultiPoolMiddleware) isPublicPath(path string) bool {
 // SECURITY CONTRACT (defense-in-depth): token signature MUST be validated by
 // upstream lib-auth middleware before this function is called. This function
 // only parses claims after hasUpstreamAuthAssertion() confirms auth middleware
-// assertions are present in request context/headers.
+// assertions are present in server-side request context (Fiber locals).
 func (m *MultiPoolMiddleware) extractTenantID(c *fiber.Ctx) (string, error) {
 	accessToken := libHTTP.ExtractTokenFromHeader(c)
 	if accessToken == "" {
@@ -477,7 +514,7 @@ func (m *MultiPoolMiddleware) mapDefaultError(c *fiber.Ctx, err error, tenantID 
 }
 
 // Enabled returns whether the middleware is enabled.
-// The middleware is enabled when at least one route has a multi-tenant PG pool.
+// The middleware is enabled when at least one route has a multi-tenant PG or Mongo pool.
 func (m *MultiPoolMiddleware) Enabled() bool {
 	return m.enabled
 }

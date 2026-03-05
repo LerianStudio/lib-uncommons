@@ -273,7 +273,7 @@ func TestMultiPoolMiddleware_isPublicPath(t *testing.T) {
 		{
 			name:     "does not match partial prefix",
 			path:     "/healthy",
-			expected: true, // HasPrefix: "/healthy" starts with "/health"
+			expected: false, // boundary-aware: "/healthy" is not "/health" or "/health/..."
 		},
 	}
 
@@ -318,6 +318,44 @@ func TestMultiPoolMiddleware_Enabled(t *testing.T) {
 		)
 
 		assert.False(t, mid.Enabled())
+	})
+
+	t.Run("returns true when route has multi-tenant Mongo pool only", func(t *testing.T) {
+		t.Parallel()
+
+		singlePG, _ := newSingleTenantManagers()
+		_, multiMongo := newMultiPoolTestManagers(t, "http://localhost:8080")
+
+		mid := NewMultiPoolMiddleware(
+			WithRoute([]string{"/v1/test"}, "test", singlePG, multiMongo),
+		)
+
+		assert.True(t, mid.Enabled())
+	})
+
+	t.Run("returns true when default route has multi-tenant Mongo pool only", func(t *testing.T) {
+		t.Parallel()
+
+		singlePG, _ := newSingleTenantManagers()
+		_, multiMongo := newMultiPoolTestManagers(t, "http://localhost:8080")
+
+		mid := NewMultiPoolMiddleware(
+			WithDefaultRoute("ledger", singlePG, multiMongo),
+		)
+
+		assert.True(t, mid.Enabled())
+	})
+
+	t.Run("returns true when route has nil PG pool and multi-tenant Mongo pool", func(t *testing.T) {
+		t.Parallel()
+
+		_, multiMongo := newMultiPoolTestManagers(t, "http://localhost:8080")
+
+		mid := NewMultiPoolMiddleware(
+			WithRoute([]string{"/v1/test"}, "test", nil, multiMongo),
+		)
+
+		assert.True(t, mid.Enabled())
 	})
 
 	t.Run("returns true when only default route is multi-tenant", func(t *testing.T) {

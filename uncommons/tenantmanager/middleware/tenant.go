@@ -124,7 +124,7 @@ func (m *TenantMiddleware) WithTenantDB(c *fiber.Ctx) error {
 	//
 	// SECURITY CONTRACT (defense-in-depth): this code path is only valid when upstream
 	// lib-auth middleware has already validated signature/issuer/audience and asserted
-	// identity into request context (for example c.Locals("user_id") or X-User-ID).
+	// identity into server-side request context (Fiber locals, e.g. c.Locals("user_id")).
 	// hasUpstreamAuthAssertion() enforces that contract and fails closed when missing.
 	token, _, err := new(jwt.Parser).ParseUnverified(accessToken, jwt.MapClaims{})
 	if err != nil {
