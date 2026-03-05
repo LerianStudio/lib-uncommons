@@ -427,8 +427,49 @@ func (c *MultiTenantConsumer) syncTenants(ctx context.Context) error {
 		return fmt.Errorf("failed to fetch tenant IDs: %w", err)
 	}
 
-	// Validate tenant IDs before processing
+	validTenantIDs, currentTenants := c.filterValidTenantIDs(ctx, tenantIDs, logger)
 
+	c.mu.Lock()
+
+	if c.closed {
+		c.mu.Unlock()
+		return errors.New("consumer is closed")
+	}
+
+	removedTenants := c.reconcileTenantPresence(currentTenants)
+	newTenants := c.identifyNewTenants(validTenantIDs)
+	c.cancelRemovedTenantConsumers(removedTenants)
+
+	// Capture stats under lock for the final log line.
+	knownCount := len(c.knownTenants)
+	activeCount := len(c.tenants)
+
+	c.mu.Unlock()
+
+	// Close database connections for removed tenants outside the lock (network I/O).
+	c.closeRemovedTenantConnections(ctx, removedTenants, logger)
+
+	// Lazy mode: new tenants are recorded in knownTenants (already done above)
+	// but consumers are NOT started here. Consumer spawning is deferred to
+	// on-demand triggers (e.g., ensureConsumerStarted in T-002).
+	if len(newTenants) > 0 {
+		logger.InfofCtx(ctx, "discovered %d new tenants (lazy mode, consumers deferred): %v",
+			len(newTenants), newTenants)
+	}
+
+	logger.InfofCtx(ctx, "sync complete: %d known, %d active, %d discovered, %d removed",
+		knownCount, activeCount, len(newTenants), len(removedTenants))
+
+	return nil
+}
+
+// filterValidTenantIDs validates the fetched tenant IDs and returns both the
+// valid ID slice and a set for quick lookup.
+func (c *MultiTenantConsumer) filterValidTenantIDs(
+	ctx context.Context,
+	tenantIDs []string,
+	logger *logcompat.Logger,
+) ([]string, map[string]bool) {
 	validTenantIDs := make([]string, 0, len(tenantIDs))
 
 	for _, id := range tenantIDs {
@@ -439,29 +480,24 @@ func (c *MultiTenantConsumer) syncTenants(ctx context.Context) error {
 		}
 	}
 
-	// Create a set of current tenant IDs for quick lookup
-
 	currentTenants := make(map[string]bool, len(validTenantIDs))
 	for _, id := range validTenantIDs {
 		currentTenants[id] = true
 	}
 
-	c.mu.Lock()
+	return validTenantIDs, currentTenants
+}
 
-	defer c.mu.Unlock()
-
-	if c.closed {
-		return errors.New("consumer is closed")
-	}
-
-	// Snapshot previous known tenants so we can retain those missing briefly from the fetch.
+// reconcileTenantPresence updates knownTenants by merging the current fetch with
+// previously known tenants, applying the absence-count threshold. It returns the
+// list of tenant IDs that exceeded the threshold and should be removed.
+// MUST be called with c.mu held.
+func (c *MultiTenantConsumer) reconcileTenantPresence(currentTenants map[string]bool) []string {
 	previousKnown := make(map[string]bool, len(c.knownTenants))
 	for id := range c.knownTenants {
 		previousKnown[id] = true
 	}
 
-	// Build new knownTenants: all currently fetched plus any previously known that are
-	// missing for fewer than absentSyncsBeforeRemoval consecutive syncs.
 	newKnown := make(map[string]bool, len(currentTenants)+len(previousKnown))
 
 	var removedTenants []string
@@ -492,8 +528,13 @@ func (c *MultiTenantConsumer) syncTenants(ctx context.Context) error {
 
 	c.knownTenants = newKnown
 
-	// Identify NEW tenants (in current list but not running)
+	return removedTenants
+}
 
+// identifyNewTenants returns tenant IDs from the valid list that do not have
+// a running consumer.
+// MUST be called with c.mu held.
+func (c *MultiTenantConsumer) identifyNewTenants(validTenantIDs []string) []string {
 	var newTenants []string
 
 	for _, tenantID := range validTenantIDs {
@@ -502,36 +543,29 @@ func (c *MultiTenantConsumer) syncTenants(ctx context.Context) error {
 		}
 	}
 
-	// Stop removed tenants and close their database connections
-	c.stopRemovedTenants(ctx, removedTenants, logger)
-
-	// Lazy mode: new tenants are recorded in knownTenants (already done above)
-	// but consumers are NOT started here. Consumer spawning is deferred to
-	// on-demand triggers (e.g., ensureConsumerStarted in T-002).
-	if len(newTenants) > 0 {
-		logger.InfofCtx(ctx, "discovered %d new tenants (lazy mode, consumers deferred): %v",
-			len(newTenants), newTenants)
-	}
-
-	logger.InfofCtx(ctx, "sync complete: %d known, %d active, %d discovered, %d removed",
-		len(c.knownTenants), len(c.tenants), len(newTenants), len(removedTenants))
-
-	return nil
+	return newTenants
 }
 
-// stopRemovedTenants cancels consumer goroutines and closes database connections for
-// tenants that have been removed from the known tenant registry.
-// Caller MUST hold c.mu write lock.
-func (c *MultiTenantConsumer) stopRemovedTenants(ctx context.Context, removedTenants []string, logger *logcompat.Logger) {
+// cancelRemovedTenantConsumers cancels goroutines and removes tenants from internal maps.
+// MUST be called with c.mu held.
+func (c *MultiTenantConsumer) cancelRemovedTenantConsumers(removedTenants []string) {
 	for _, tenantID := range removedTenants {
-		logger.InfofCtx(ctx, "stopping consumer for removed tenant: %s", tenantID)
-
 		if cancel, ok := c.tenants[tenantID]; ok {
 			cancel()
 			delete(c.tenants, tenantID)
 		}
+	}
+}
 
-		// Close database connections for removed tenant
+// closeRemovedTenantConnections closes database and messaging connections for
+// tenants that have been removed from the known tenant registry.
+// This method performs network I/O and MUST be called WITHOUT holding c.mu.
+// The caller is responsible for cancelling goroutines and cleaning internal maps
+// under the lock before invoking this function.
+func (c *MultiTenantConsumer) closeRemovedTenantConnections(ctx context.Context, removedTenants []string, logger *logcompat.Logger) {
+	for _, tenantID := range removedTenants {
+		logger.InfofCtx(ctx, "closing connections for removed tenant: %s", tenantID)
+
 		if c.rabbitmq != nil {
 			if err := c.rabbitmq.CloseConnection(ctx, tenantID); err != nil {
 				logger.WarnfCtx(ctx, "failed to close RabbitMQ connection for tenant %s: %v", tenantID, err)

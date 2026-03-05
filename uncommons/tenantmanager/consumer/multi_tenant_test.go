@@ -2778,8 +2778,8 @@ func TestMultiTenantConsumer_SyncTenants_ClosesConnectionsOnRemoval(t *testing.T
 
 			// Verify log messages contain removal information for each removed tenant
 			for _, id := range tt.removedTenants {
-				assert.True(t, logger.ContainsSubstring("stopping consumer for removed tenant: "+id),
-					"should log stopping consumer for removed tenant %q", id)
+				assert.True(t, logger.ContainsSubstring("closing connections for removed tenant: "+id),
+					"should log closing connections for removed tenant %q", id)
 			}
 		})
 	}
