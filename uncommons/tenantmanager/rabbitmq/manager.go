@@ -103,6 +103,10 @@ func NewManager(c *client.Client, service string, opts ...Option) *Manager {
 // GetConnection returns a RabbitMQ connection for the tenant.
 // Creates a new connection if one doesn't exist or the existing one is closed.
 func (p *Manager) GetConnection(ctx context.Context, tenantID string) (*amqp.Connection, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	if tenantID == "" {
 		return nil, errors.New("tenant ID is required")
 	}
@@ -119,14 +123,20 @@ func (p *Manager) GetConnection(ctx context.Context, tenantID string) (*amqp.Con
 
 		// Update LRU tracking on cache hit
 		p.mu.Lock()
-		// Re-check connection still exists (may have been evicted between locks)
-		if _, still := p.connections[tenantID]; still {
+		// Re-read connection from map (may have been evicted and closed between locks)
+		if refreshedConn, still := p.connections[tenantID]; still && !refreshedConn.IsClosed() {
 			p.lastAccessed[tenantID] = time.Now()
+			p.mu.Unlock()
+
+			return refreshedConn, nil
 		}
 
 		p.mu.Unlock()
 
-		return conn, nil
+		// Connection was evicted between RUnlock and Lock; create a new one
+		_ = conn // original reference is now potentially stale; discard it
+
+		return p.createConnection(ctx, tenantID)
 	}
 
 	p.mu.RUnlock()
@@ -135,6 +145,12 @@ func (p *Manager) GetConnection(ctx context.Context, tenantID string) (*amqp.Con
 }
 
 // createConnection fetches config from Tenant Manager and creates a RabbitMQ connection.
+//
+// Network I/O (GetTenantConfig, amqp.Dial) is performed outside the mutex to
+// avoid blocking other goroutines on slow network calls. The pattern is:
+//  1. Under lock: double-check cache, check closed state
+//  2. Outside lock: fetch config and dial
+//  3. Re-acquire lock: evict LRU, cache new connection (with race-loss handling)
 func (p *Manager) createConnection(ctx context.Context, tenantID string) (*amqp.Connection, error) {
 	if p.client == nil {
 		return nil, errors.New("tenant manager client is required for multi-tenant connections")
@@ -150,19 +166,22 @@ func (p *Manager) createConnection(ctx context.Context, tenantID string) (*amqp.
 		logger = p.logger
 	}
 
+	// Step 1: Under lock — double-check if connection exists or manager is closed.
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
-	// Double-check after acquiring lock
 	if conn, ok := p.connections[tenantID]; ok && !conn.IsClosed() {
+		p.mu.Unlock()
 		return conn, nil
 	}
 
 	if p.closed {
+		p.mu.Unlock()
 		return nil, core.ErrManagerClosed
 	}
 
-	// Fetch tenant config from Tenant Manager
+	p.mu.Unlock()
+
+	// Step 2: Outside lock — perform network I/O (HTTP call + TCP dial).
 	config, err := p.client.GetTenantConfig(ctx, tenantID, p.service)
 	if err != nil {
 		logger.Errorf("failed to get tenant config: %v", err)
@@ -171,21 +190,18 @@ func (p *Manager) createConnection(ctx context.Context, tenantID string) (*amqp.
 		return nil, fmt.Errorf("failed to get tenant config: %w", err)
 	}
 
-	// Get RabbitMQ config
 	rabbitConfig := config.GetRabbitMQConfig()
 	if rabbitConfig == nil {
 		logger.Errorf("RabbitMQ not configured for tenant: %s", tenantID)
-		libOpentelemetry.HandleSpanBusinessErrorEvent(span, "RabbitMQ not configured", nil)
+		libOpentelemetry.HandleSpanBusinessErrorEvent(span, "RabbitMQ not configured", core.ErrServiceNotConfigured)
 
 		return nil, core.ErrServiceNotConfigured
 	}
 
-	// Build connection URI with tenant's vhost
 	uri := buildRabbitMQURI(rabbitConfig)
 
 	logger.Infof("connecting to RabbitMQ vhost: tenant=%s, vhost=%s", tenantID, rabbitConfig.VHost)
 
-	// Create connection
 	conn, err := amqp.Dial(uri)
 	if err != nil {
 		logger.Errorf("failed to connect to RabbitMQ: %v", err)
@@ -194,12 +210,41 @@ func (p *Manager) createConnection(ctx context.Context, tenantID string) (*amqp.
 		return nil, fmt.Errorf("failed to connect to RabbitMQ: %w", err)
 	}
 
+	// Step 3: Re-acquire lock — evict LRU, cache connection (with race-loss check).
+	p.mu.Lock()
+
+	// If manager was closed while we were dialing, discard the new connection.
+	if p.closed {
+		p.mu.Unlock()
+
+		if closeErr := conn.Close(); closeErr != nil {
+			logger.Errorf("failed to close RabbitMQ connection on closed manager: %v", closeErr)
+		}
+
+		return nil, core.ErrManagerClosed
+	}
+
+	// If another goroutine cached a connection for this tenant while we were
+	// dialing, use the cached one and discard ours.
+	if cached, ok := p.connections[tenantID]; ok && !cached.IsClosed() {
+		p.lastAccessed[tenantID] = time.Now()
+		p.mu.Unlock()
+
+		if closeErr := conn.Close(); closeErr != nil {
+			logger.Errorf("failed to close excess RabbitMQ connection for tenant %s: %v", tenantID, closeErr)
+		}
+
+		return cached, nil
+	}
+
 	// Evict least recently used connection if pool is full
 	p.evictLRU(logger.Base())
 
-	// Cache connection
+	// Cache our new connection
 	p.connections[tenantID] = conn
 	p.lastAccessed[tenantID] = time.Now()
+
+	p.mu.Unlock()
 
 	logger.Infof("RabbitMQ connection created: tenant=%s, vhost=%s", tenantID, rabbitConfig.VHost)
 
@@ -222,7 +267,12 @@ func (p *Manager) evictLRU(logger log.Logger) {
 	// Manager-specific cleanup: close the AMQP connection and remove from maps.
 	if conn, ok := p.connections[candidateID]; ok {
 		if conn != nil && !conn.IsClosed() {
-			_ = conn.Close()
+			if err := conn.Close(); err != nil && logger != nil {
+				logger.Log(context.Background(), log.LevelWarn, "failed to close evicted rabbitmq connection",
+					log.String("tenant_id", candidateID),
+					log.Err(err),
+				)
+			}
 		}
 
 		delete(p.connections, candidateID)
