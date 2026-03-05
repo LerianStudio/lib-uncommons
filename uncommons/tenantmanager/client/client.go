@@ -305,7 +305,7 @@ func (c *Client) GetTenantConfig(ctx context.Context, tenantID, service string) 
 			libLog.String("tenant_id", tenantID),
 			libLog.String("service", service),
 		)
-		libOpentelemetry.HandleSpanBusinessErrorEvent(span, "Tenant not found", nil)
+		libOpentelemetry.HandleSpanBusinessErrorEvent(span, "Tenant not found", core.ErrTenantNotFound)
 
 		return nil, core.ErrTenantNotFound
 	}
@@ -320,7 +320,7 @@ func (c *Client) GetTenantConfig(ctx context.Context, tenantID, service string) 
 			libLog.String("service", service),
 		)
 
-		libOpentelemetry.HandleSpanBusinessErrorEvent(span, "Tenant service suspended or purged", nil)
+		libOpentelemetry.HandleSpanBusinessErrorEvent(span, "Tenant service suspended or purged", core.ErrTenantServiceAccessDenied)
 
 		var errResp struct {
 			Code   string `json:"code"`

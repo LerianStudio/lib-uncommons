@@ -12,6 +12,10 @@ var ErrTenantNotFound = errors.New("tenant not found")
 // ErrServiceNotConfigured is returned when the service is not configured for the tenant.
 var ErrServiceNotConfigured = errors.New("service not configured for tenant")
 
+// ErrTenantServiceAccessDenied is returned when the tenant-service association exists
+// but is not active (e.g., suspended or purged), resulting in an HTTP 403 from the Tenant Manager.
+var ErrTenantServiceAccessDenied = errors.New("tenant service access denied")
+
 // ErrManagerClosed is returned when attempting to use a closed connection manager.
 var ErrManagerClosed = errors.New("tenant connection manager is closed")
 
@@ -61,6 +65,10 @@ type TenantSuspendedError struct {
 
 // Error implements the error interface.
 func (e *TenantSuspendedError) Error() string {
+	if e == nil {
+		return "tenant service is unavailable"
+	}
+
 	if e.Message != "" {
 		return e.Message
 	}

@@ -230,6 +230,104 @@ func TestGetMongoFromContext(t *testing.T) {
 	})
 }
 
+func TestNilContext(t *testing.T) {
+	t.Run("SetTenantIDInContext with nil context does not panic and stores value", func(t *testing.T) {
+		//nolint:staticcheck // SA1012: intentionally passing nil context to test nil-safety guard
+		ctx := SetTenantIDInContext(nil, "t1")
+
+		assert.Equal(t, "t1", GetTenantIDFromContext(ctx))
+	})
+
+	t.Run("GetTenantIDFromContext with nil context returns empty string", func(t *testing.T) {
+		//nolint:staticcheck // SA1012: intentionally passing nil context to test nil-safety guard
+		id := GetTenantIDFromContext(nil)
+
+		assert.Equal(t, "", id)
+	})
+
+	t.Run("ContextWithTenantPGConnection with nil context does not panic", func(t *testing.T) {
+		mockConn := &mockDB{name: "test-db"}
+
+		//nolint:staticcheck // SA1012: intentionally passing nil context to test nil-safety guard
+		ctx := ContextWithTenantPGConnection(nil, mockConn)
+
+		assert.Equal(t, mockConn, GetTenantPGConnectionFromContext(ctx))
+	})
+
+	t.Run("GetTenantPGConnectionFromContext with nil context returns nil", func(t *testing.T) {
+		//nolint:staticcheck // SA1012: intentionally passing nil context to test nil-safety guard
+		db := GetTenantPGConnectionFromContext(nil)
+
+		assert.Nil(t, db)
+	})
+
+	t.Run("ContextWithTenantMongo with nil context does not panic", func(t *testing.T) {
+		// We cannot create a real *mongo.Database without a live client,
+		// but we can verify nil context does not panic with a nil DB value.
+		//nolint:staticcheck // SA1012: intentionally passing nil context to test nil-safety guard
+		ctx := ContextWithTenantMongo(nil, nil)
+
+		assert.NotNil(t, ctx)
+	})
+
+	t.Run("GetMongoFromContext with nil context returns nil", func(t *testing.T) {
+		//nolint:staticcheck // SA1012: intentionally passing nil context to test nil-safety guard
+		db := GetMongoFromContext(nil)
+
+		assert.Nil(t, db)
+	})
+
+	t.Run("GetTenantID alias with nil context returns empty string", func(t *testing.T) {
+		//nolint:staticcheck // SA1012: intentionally passing nil context to test nil-safety guard
+		id := GetTenantID(nil)
+
+		assert.Equal(t, "", id)
+	})
+
+	t.Run("ContextWithTenantID alias with nil context does not panic", func(t *testing.T) {
+		//nolint:staticcheck // SA1012: intentionally passing nil context to test nil-safety guard
+		ctx := ContextWithTenantID(nil, "t2")
+
+		assert.Equal(t, "t2", GetTenantIDFromContext(ctx))
+	})
+
+	t.Run("GetPostgresForTenant with nil context returns error", func(t *testing.T) {
+		//nolint:staticcheck // SA1012: intentionally passing nil context to test nil-safety guard
+		db, err := GetPostgresForTenant(nil)
+
+		assert.Nil(t, db)
+		assert.ErrorIs(t, err, ErrTenantContextRequired)
+	})
+
+	t.Run("GetMongoForTenant with nil context returns error", func(t *testing.T) {
+		//nolint:staticcheck // SA1012: intentionally passing nil context to test nil-safety guard
+		db, err := GetMongoForTenant(nil)
+
+		assert.Nil(t, db)
+		assert.ErrorIs(t, err, ErrTenantContextRequired)
+	})
+
+	t.Run("ContextWithModulePGConnection with nil context does not panic", func(t *testing.T) {
+		mockConn := &mockDB{name: "module-db"}
+
+		//nolint:staticcheck // SA1012: intentionally passing nil context to test nil-safety guard
+		ctx := ContextWithModulePGConnection(nil, "mymod", mockConn)
+
+		db, err := GetModulePostgresForTenant(ctx, "mymod")
+
+		assert.NoError(t, err)
+		assert.Equal(t, mockConn, db)
+	})
+
+	t.Run("GetModulePostgresForTenant with nil context returns error", func(t *testing.T) {
+		//nolint:staticcheck // SA1012: intentionally passing nil context to test nil-safety guard
+		db, err := GetModulePostgresForTenant(nil, "mymod")
+
+		assert.Nil(t, db)
+		assert.ErrorIs(t, err, ErrTenantContextRequired)
+	})
+}
+
 func TestGetMongoForTenant(t *testing.T) {
 	t.Run("returns error when no connection in context", func(t *testing.T) {
 		ctx := context.Background()
